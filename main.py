@@ -214,6 +214,33 @@ class GazeClient:
         """Get the latest calibration result summary"""
         with self.calib_result_lock:
             return self.calib_result
+    
+    def _enable_gaze_data_fields(self):
+        """Enable all gaze data fields according to OpenGaze API"""
+        if self.simulate:
+            return
+        
+        print("DEBUG: Enabling gaze data fields...")
+        
+        # List of data fields to enable (Section 3.2-3.14)
+        fields = [
+            "ENABLE_SEND_COUNTER",      # Frame counter
+            "ENABLE_SEND_TIME",         # Timestamp
+            "ENABLE_SEND_POG_BEST",     # Best POG (preferred)
+            "ENABLE_SEND_POG_LEFT",     # Left eye POG
+            "ENABLE_SEND_POG_RIGHT",    # Right eye POG
+            "ENABLE_SEND_POG_FIX",      # Fixation POG
+            "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data
+            "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data
+        ]
+        
+        for field in fields:
+            cmd = f'<SET ID="{field}" STATE="1" />'
+            if self._send_command(cmd, wait_for_ack=field, timeout=1.0):
+                print(f"DEBUG: Enabled {field}")
+            else:
+                print(f"DEBUG: Failed to enable {field}")
+            time.sleep(0.05)  # Small delay between commands
 
     # Real client with XML protocol parsing
     def _run_real(self):
@@ -235,35 +262,24 @@ class GazeClient:
                 with self._sock_lock:
                     self._sock = sock
                 
-                # Enable data streaming and specific data fields via XML protocol
+                # Enable data streaming via XML protocol
+                # Only enable basic data streaming on connection
+                # Other fields will be enabled by enable_gaze_data_fields() method
                 enable_sent = False
                 with self._sock_lock:
                     if self._sock is not None:
                         try:
                             # Enable data streaming (Section 3.1)
                             self._sock.sendall(b'<SET ID="ENABLE_SEND_DATA" STATE="1" />\r\n')
-                            # Enable counter for tracking (Section 3.2)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_COUNTER" STATE="1" />\r\n')
-                            # Enable time stamp (Section 3.3)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_TIME" STATE="1" />\r\n')
-                            # Enable Best POG (average of left/right or best available) (Section 3.8)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_BEST" STATE="1" />\r\n')
-                            # Enable Fixation POG (Section 3.5)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_FIX" STATE="1" />\r\n')
-                            # Enable Left Eye POG (Section 3.6)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_LEFT" STATE="1" />\r\n')
-                            # Enable Right Eye POG (Section 3.7)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_RIGHT" STATE="1" />\r\n')
-                            # Enable Left Eye Pupil data (Section 3.9)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_PUPIL_LEFT" STATE="1" />\r\n')
-                            # Enable Right Eye Pupil data (Section 3.10)
-                            self._sock.sendall(b'<SET ID="ENABLE_SEND_PUPIL_RIGHT" STATE="1" />\r\n')
                             enable_sent = True
                         except Exception:
                             pass
                 if enable_sent:
-                    # Wait a bit for ACK messages to be processed
-                    time.sleep(0.3)
+                    # Wait a bit for ACK message to be processed
+                    time.sleep(0.2)
+                    
+                # Enable all gaze data fields
+                self._enable_gaze_data_fields()
                 
                 buf = b""
                 while not self._stop.is_set():
@@ -288,9 +304,12 @@ class GazeClient:
                             # Log REC messages to see if gaze data is flowing
                             if b'<REC' in line:
                                 self._rec_count += 1
-                                # Log first 5 REC messages with full raw content to see format
-                                if self._rec_count <= 5:
-                                    print(f"DEBUG: Raw REC message #{self._rec_count}: {line_str[:400]}")  # First 400 chars
+                                # Log first 10 REC messages with full raw content to see format
+                                if self._rec_count <= 10:
+                                    if line_str.strip() == "<REC />":
+                                        print(f"DEBUG: REC message #{self._rec_count}: EMPTY (no data fields)")
+                                    else:
+                                        print(f"DEBUG: REC message #{self._rec_count}: {line_str[:500]}")  # First 500 chars
                                 # Log every 60th message with parsed details
                                 elif self._rec_count % 60 == 0:
                                     # Extract validity and coordinates to see which fields are available
@@ -1184,6 +1203,9 @@ def main():
                     
                     # Hide calibration window
                     gp.calibrate_show(False)
+                    # Re-enable data fields after calibration (some devices may reset them)
+                    print("DEBUG: Re-enabling gaze data fields after calibration...")
+                    gp._enable_gaze_data_fields()
                     # Reset override for next time
                     current_calib_override = None
                     state = "READY"
