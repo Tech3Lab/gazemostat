@@ -91,6 +91,8 @@ class GazeClient:
         self._sock_lock = threading.Lock()  # Thread-safe socket access
         self.calib_result = None  # Store calibration result summary
         self.calib_result_lock = threading.Lock()  # Thread-safe calibration result access
+        self._ack_events = {}  # Dictionary to store ACK events by ID
+        self._ack_lock = threading.Lock()  # Lock for ACK events
 
     def start(self):
         if self._thr and self._thr.is_alive():
@@ -120,23 +122,58 @@ class GazeClient:
             self._sim_stream = not self._sim_stream
 
     # OpenGaze API v2 Calibration Commands
-    def _send_command(self, cmd):
-        """Send a command to Gazepoint (thread-safe)"""
+    def _send_command(self, cmd, wait_for_ack=None, timeout=2.0):
+        """Send a command to Gazepoint (thread-safe)
+        
+        Args:
+            cmd: Command string to send
+            wait_for_ack: Optional ACK ID to wait for (e.g., "CALIBRATE_SHOW")
+            timeout: Timeout in seconds for waiting for ACK
+        
+        Returns:
+            True if command sent (and ACK received if wait_for_ack specified), False otherwise
+        """
         if self.simulate:
             return False  # Commands not supported in simulation mode
+        
+        # Set up ACK event BEFORE sending command to avoid race condition
+        ack_received = None
+        if wait_for_ack:
+            ack_received = threading.Event()
+            with self._ack_lock:
+                self._ack_events[wait_for_ack] = ack_received
+        
         with self._sock_lock:
             if self._sock is None:
+                if wait_for_ack:
+                    with self._ack_lock:
+                        self._ack_events.pop(wait_for_ack, None)
                 return False
             try:
                 self._sock.sendall(cmd.encode('utf-8') + b'\r\n')
+                if wait_for_ack and ack_received:
+                    # Wait for ACK message
+                    if ack_received.wait(timeout=timeout):
+                        with self._ack_lock:
+                            self._ack_events.pop(wait_for_ack, None)
+                        return True
+                    else:
+                        with self._ack_lock:
+                            self._ack_events.pop(wait_for_ack, None)
+                        print(f"DEBUG: Timeout waiting for ACK {wait_for_ack}")
+                        return False
                 return True
-            except Exception:
+            except Exception as e:
+                if wait_for_ack:
+                    with self._ack_lock:
+                        self._ack_events.pop(wait_for_ack, None)
+                print(f"DEBUG: Exception sending command: {e}")
                 return False
 
     def calibrate_show(self, show=True):
         """Show or hide the calibration graphical window"""
         state = "1" if show else "0"
-        return self._send_command(f'<SET ID="CALIBRATE_SHOW" STATE="{state}"/>')
+        return self._send_command(f'<SET ID="CALIBRATE_SHOW" STATE="{state}"/>', wait_for_ack="CALIBRATE_SHOW")
 
     def calibrate_clear(self):
         """Clear the internal list of calibration points"""
@@ -162,7 +199,7 @@ class GazeClient:
     
     def calibrate_start(self):
         """Start the calibration sequence"""
-        return self._send_command('<SET ID="CALIBRATE_START" STATE="1"/>')
+        return self._send_command('<SET ID="CALIBRATE_START" STATE="1"/>', wait_for_ack="CALIBRATE_START")
 
     def get_calibration_result(self):
         """Get the latest calibration result summary"""
@@ -210,26 +247,159 @@ class GazeClient:
                             
                             line_str = line.decode('utf-8', errors='ignore')
                             
+                            # Helper function to extract XML attributes
+                            def get_attr(msg, attr, default):
+                                # Try with quotes first
+                                idx = msg.find(attr + '="')
+                                if idx != -1:
+                                    start = idx + len(attr) + 2
+                                    end = msg.find('"', start)
+                                    if end != -1:
+                                        try:
+                                            val_str = msg[start:end]
+                                            if '.' in val_str:
+                                                return float(val_str)
+                                            else:
+                                                return int(val_str)
+                                        except:
+                                            return msg[start:end]
+                                
+                                # Try without quotes (space-separated)
+                                idx = msg.find(attr + '=')
+                                if idx != -1:
+                                    start = idx + len(attr) + 1
+                                    # Skip whitespace
+                                    while start < len(msg) and msg[start] in ' \t':
+                                        start += 1
+                                    end = start
+                                    while end < len(msg) and msg[end] not in ' \t/>"':
+                                        end += 1
+                                    if end > start:
+                                        try:
+                                            val_str = msg[start:end].strip('"\'')
+                                            if '.' in val_str:
+                                                return float(val_str)
+                                            else:
+                                                return int(val_str)
+                                        except:
+                                            pass
+                                return default
+                            
+                            # Parse ACK messages: <ACK ID="..." ... />
+                            if b'<ACK' in line:
+                                try:
+                                    # Extract ACK ID
+                                    ack_id_start = line_str.find('ID="')
+                                    if ack_id_start != -1:
+                                        ack_id_start += 4
+                                        ack_id_end = line_str.find('"', ack_id_start)
+                                        if ack_id_end != -1:
+                                            ack_id = line_str[ack_id_start:ack_id_end]
+                                            # Signal waiting thread if any
+                                            with self._ack_lock:
+                                                if ack_id in self._ack_events:
+                                                    self._ack_events[ack_id].set()
+                                            print(f"DEBUG: Received ACK for {ack_id}")
+                                except Exception as e:
+                                    print(f"DEBUG: Error parsing ACK: {e}")
+                            
+                            # Parse CAL messages: <CAL ID="CALIB_START_PT" ... />, <CAL ID="CALIB_RESULT_PT" ... />, <CAL ID="CALIB_RESULT" ... />
+                            elif b'<CAL' in line:
+                                try:
+                                    # Extract CAL ID
+                                    cal_id_start = line_str.find('ID="')
+                                    if cal_id_start != -1:
+                                        cal_id_start += 4
+                                        cal_id_end = line_str.find('"', cal_id_start)
+                                        if cal_id_end != -1:
+                                            cal_id = line_str[cal_id_start:cal_id_end]
+                                            
+                                            if cal_id == "CALIB_RESULT":
+                                                # Parse final calibration result
+                                                print(f"DEBUG: Received CALIB_RESULT: {line_str}")
+                                                
+                                                # Extract calibration data for all points
+                                                # Format: CALX1, CALY1, LX1, LY1, LV1, RX1, RY1, RV1, CALX2, CALY2, ...
+                                                calib_data = {}
+                                                max_points = 5  # Typically 5 calibration points
+                                                
+                                                for pt in range(1, max_points + 1):
+                                                    calx = get_attr(line_str, f'CALX{pt}', None)
+                                                    caly = get_attr(line_str, f'CALY{pt}', None)
+                                                    lx = get_attr(line_str, f'LX{pt}', None)
+                                                    ly = get_attr(line_str, f'LY{pt}', None)
+                                                    lv = get_attr(line_str, f'LV{pt}', None)
+                                                    rx = get_attr(line_str, f'RX{pt}', None)
+                                                    ry = get_attr(line_str, f'RY{pt}', None)
+                                                    rv = get_attr(line_str, f'RV{pt}', None)
+                                                    
+                                                    if calx is not None and caly is not None:
+                                                        calib_data[pt] = {
+                                                            'calx': calx, 'caly': caly,
+                                                            'lx': lx, 'ly': ly, 'lv': lv,
+                                                            'rx': rx, 'ry': ry, 'rv': rv
+                                                        }
+                                                
+                                                # Calculate average error and valid points
+                                                valid_points = 0
+                                                total_error = 0.0
+                                                error_count = 0
+                                                
+                                                for pt, data in calib_data.items():
+                                                    # Check if at least one eye is valid
+                                                    l_valid = data.get('lv', 0) == 1
+                                                    r_valid = data.get('rv', 0) == 1
+                                                    
+                                                    if l_valid or r_valid:
+                                                        valid_points += 1
+                                                        
+                                                        # Calculate error for left eye if valid
+                                                        if l_valid and data.get('lx') is not None and data.get('ly') is not None:
+                                                            dx = data['lx'] - data['calx']
+                                                            dy = data['ly'] - data['caly']
+                                                            error = math.sqrt(dx*dx + dy*dy)
+                                                            total_error += error
+                                                            error_count += 1
+                                                        
+                                                        # Calculate error for right eye if valid
+                                                        if r_valid and data.get('rx') is not None and data.get('ry') is not None:
+                                                            dx = data['rx'] - data['calx']
+                                                            dy = data['ry'] - data['caly']
+                                                            error = math.sqrt(dx*dx + dy*dy)
+                                                            total_error += error
+                                                            error_count += 1
+                                                
+                                                avg_error = total_error / error_count if error_count > 0 else 0.0
+                                                success = 1 if valid_points >= 4 else 0
+                                                
+                                                print(f"DEBUG: Parsed CALIB_RESULT - valid_points={valid_points}, avg_error={avg_error:.4f}, success={success}")
+                                                
+                                                # Store calibration result
+                                                with self.calib_result_lock:
+                                                    self.calib_result = {
+                                                        'average_error': avg_error,
+                                                        'num_points': valid_points,
+                                                        'success': success,
+                                                        'calib_data': calib_data
+                                                    }
+                                            elif cal_id in ("CALIB_START_PT", "CALIB_RESULT_PT"):
+                                                # Log calibration point progress
+                                                pt = get_attr(line_str, 'PT', None)
+                                                calx = get_attr(line_str, 'CALX', None)
+                                                caly = get_attr(line_str, 'CALY', None)
+                                                if pt is not None:
+                                                    print(f"DEBUG: {cal_id} - Point {pt} at ({calx}, {caly})")
+                                except Exception as e:
+                                    import traceback
+                                    print(f"DEBUG: Error parsing CAL message: {e}")
+                                    print(f"DEBUG: Traceback: {traceback.format_exc()}")
+                                    print(f"DEBUG: Full message: {line_str}")
+                            
                             # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
-                            if b'<REC' in line:
+                            elif b'<REC' in line:
                                 self.receiving = True
                                 try:
                                     # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
-                                    
-                                    # Simple attribute extraction
-                                    def get_attr(msg, attr, default):
-                                        idx = msg.find(attr + '="')
-                                        if idx == -1:
-                                            return default
-                                        start = idx + len(attr) + 2
-                                        end = msg.find('"', start)
-                                        if end == -1:
-                                            return default
-                                        try:
-                                            return float(msg[start:end])
-                                        except:
-                                            return default
-                                    
                                     gx = get_attr(line_str, 'FPOGX', 0.5)
                                     gy = get_attr(line_str, 'FPOGY', 0.5)
                                     valid = get_attr(line_str, 'FPOGV', 1.0) > 0.5
@@ -246,98 +416,6 @@ class GazeClient:
                                     t = time.time()
                                     self._push_sample(t, 0.5, 0.5, 2.5, True)
                             
-                            # Parse calibration result summary: <ACK ID="CALIBRATE_RESULT_SUMMARY" ... />
-                            # Only process CALIBRATE_RESULT_SUMMARY messages, not other calibration ACKs
-                            elif b'CALIBRATE_RESULT_SUMMARY' in line:
-                                # Debug: print raw message to see what we're receiving
-                                print(f"DEBUG: Received calibration result summary: {line_str}")
-                                try:
-                                    def get_attr(msg, attr, default):
-                                        # Try with quotes first
-                                        idx = msg.find(attr + '="')
-                                        if idx != -1:
-                                            start = idx + len(attr) + 2
-                                            end = msg.find('"', start)
-                                            if end != -1:
-                                                try:
-                                                    val_str = msg[start:end]
-                                                    if '.' in val_str:
-                                                        return float(val_str)
-                                                    else:
-                                                        return int(val_str)
-                                                except:
-                                                    return msg[start:end]
-                                        
-                                        # Try without quotes (space-separated)
-                                        idx = msg.find(attr + '=')
-                                        if idx != -1:
-                                            start = idx + len(attr) + 1
-                                            # Skip whitespace
-                                            while start < len(msg) and msg[start] in ' \t':
-                                                start += 1
-                                            end = start
-                                            while end < len(msg) and msg[end] not in ' \t/>"':
-                                                end += 1
-                                            if end > start:
-                                                try:
-                                                    val_str = msg[start:end].strip('"\'')
-                                                    if '.' in val_str:
-                                                        return float(val_str)
-                                                    else:
-                                                        return int(val_str)
-                                                except:
-                                                    pass
-                                        return default
-                                    
-                                    # Try multiple possible attribute names (OpenGaze API v2 format)
-                                    # Gazepoint uses AVE_ERROR and VALID_POINTS in the actual response
-                                    avg_error = get_attr(line_str, 'AVE_ERROR', None)
-                                    if avg_error is None:
-                                        avg_error = get_attr(line_str, 'AVERAGE_ERROR', None)
-                                    if avg_error is None:
-                                        avg_error = get_attr(line_str, 'AVG_ERROR', None)
-                                    if avg_error is None:
-                                        avg_error = get_attr(line_str, 'ERROR', None)
-                                    
-                                    num_points = get_attr(line_str, 'VALID_POINTS', None)
-                                    if num_points is None:
-                                        num_points = get_attr(line_str, 'NUM_POINTS', None)
-                                    if num_points is None:
-                                        num_points = get_attr(line_str, 'POINTS', None)
-                                    if num_points is None:
-                                        num_points = get_attr(line_str, 'NUM', None)
-                                    if num_points is None:
-                                        num_points = get_attr(line_str, 'PTS', None)  # Some versions use PTS
-                                    
-                                    success = get_attr(line_str, 'SUCCESS', None)
-                                    if success is None:
-                                        success = get_attr(line_str, 'OK', None)
-                                    if success is None:
-                                        # Check if there's a STATE attribute that might indicate success
-                                        state_val = get_attr(line_str, 'STATE', None)
-                                        if state_val is not None:
-                                            success = 1 if state_val > 0 else 0
-                                    
-                                    print(f"DEBUG: Parsed values - avg_error={avg_error}, num_points={num_points}, success={success}")
-                                    
-                                    # Only store result if this is actually a result summary
-                                    # Store even if num_points is 0 (indicates calibration failed/not completed)
-                                    # This allows us to detect when calibration completes (even if it failed)
-                                    if avg_error is not None or num_points is not None:
-                                        with self.calib_result_lock:
-                                            self.calib_result = {
-                                                'average_error': avg_error if avg_error is not None else 0.0,
-                                                'num_points': num_points if num_points is not None else 0,
-                                                'success': success if success is not None else (1 if num_points and num_points >= 4 else 0)
-                                            }
-                                            print(f"DEBUG: Stored calibration result - avg_error={avg_error}, num_points={num_points}, success={success if success is not None else (1 if num_points and num_points >= 4 else 0)}")
-                                    else:
-                                        print(f"DEBUG: No valid calibration result data found (ignoring ACK message)")
-                                except Exception as e:
-                                    import traceback
-                                    print(f"DEBUG: Error parsing calibration result: {e}")
-                                    print(f"DEBUG: Traceback: {traceback.format_exc()}")
-                                    print(f"DEBUG: Full message: {line_str}")
                     except socket.timeout:
                         continue
                     except Exception:
@@ -513,7 +591,7 @@ def main():
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
     def start_calibration(override=None):
-        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override
+        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
@@ -540,12 +618,24 @@ def main():
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
-            # Show calibration window
-            gp.calibrate_show(True)
-            time.sleep(0.2)
-            # Start the calibration sequence
-            gp.calibrate_start()
-            time.sleep(0.1)
+            # Show calibration window and wait for ACK
+            if gp.calibrate_show(True):
+                print("DEBUG: Calibration window shown, waiting for ACK...")
+            else:
+                print("DEBUG: Failed to send CALIBRATE_SHOW command")
+                set_info_msg("Failed to show calibration window", dur=2.0)
+                state = "READY"
+                return
+            # Start the calibration sequence and wait for ACK
+            if gp.calibrate_start():
+                print("DEBUG: Calibration started, waiting for ACK...")
+                calib_step_start = time.time()  # Record when calibration actually started
+            else:
+                print("DEBUG: Failed to send CALIBRATE_START command")
+                set_info_msg("Failed to start calibration", dur=2.0)
+                gp.calibrate_show(False)  # Hide calibration window
+                state = "READY"
+                return
         else:
             # Fallback to client-side calibration in simulation mode
             # Clear previous calibration transform/state
@@ -858,89 +948,71 @@ def main():
         if state == "CALIBRATING":
             if not SIM_GAZE:
                 # Use OpenGaze API v2 calibration
-                # Check for calibration result from Gazepoint
+                # Wait for CALIB_RESULT message from Gazepoint (sent after calibration completes)
                 calib_result = gp.get_calibration_result()
                 if calib_result is not None:
-                    # Check if calibration actually completed (not just an immediate 0-point result)
-                    # If we get a result with 0 points very quickly, it might be an immediate failure
-                    # Wait a bit longer to see if user completes calibration
-                    elapsed = time.time() - calib_step_start
-                    num_points = calib_result.get('num_points', 0)
-                    
-                    # If we got 0 points and it's been less than 10 seconds, ignore it (calibration might still be running)
-                    if num_points == 0 and elapsed < 10.0:
-                        print(f"DEBUG: Ignoring immediate 0-point result (elapsed={elapsed:.1f}s), calibration may still be running")
-                        # Clear the result so we keep waiting
-                        with gp.calib_result_lock:
-                            gp.calib_result = None
+                    # Calibration completed - process result
+                    if current_calib_override == "failed":
+                        calib_status = "red"
+                        calib_quality = "failed"
+                        calib_avg_error = None
+                        set_info_msg("Calibration failed, try again", dur=3.0)
+                    elif current_calib_override == "low":
+                        calib_status = "orange"
+                        calib_quality = "low"
+                        # Use a simulated error value for override
+                        calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
+                        set_info_msg("Ready, low quality calibration", dur=2.0)
                     else:
-                        # Calibration completed (either with points or after sufficient time), process result
-                        if current_calib_override == "failed":
-                            calib_status = "red"
-                            calib_quality = "failed"
-                            calib_avg_error = None
-                            set_info_msg("Calibration failed, try again", dur=3.0)
-                        elif current_calib_override == "low":
-                            calib_status = "orange"
-                            calib_quality = "low"
-                            # Use a simulated error value for override
-                            calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
-                            set_info_msg("Ready, low quality calibration", dur=2.0)
-                        else:
-                            # Evaluate calibration quality based on result
-                            avg_error = calib_result.get('average_error')
-                            num_points = calib_result.get('num_points')
-                            success = calib_result.get('success')
-                            
-                            # Handle None values to prevent TypeError
-                            if num_points is None:
-                                num_points = 0
-                            if success is None:
-                                success = 0
-                            
-                            # Debug: print calibration result for troubleshooting
-                            print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error}")
-                            
-                            if success and num_points >= 4:
-                                if avg_error is not None and avg_error < CALIB_OK_THRESHOLD:
-                                    calib_status = "green"
-                                    calib_quality = "ok"
-                                    calib_avg_error = avg_error
-                                    set_info_msg("Calibration complete", dur=2.0)
-                                elif avg_error is not None and avg_error < CALIB_LOW_THRESHOLD:
-                                    calib_status = "orange"
-                                    calib_quality = "low"
-                                    calib_avg_error = avg_error
-                                    set_info_msg("Ready, low quality calibration", dur=2.0)
-                                else:
-                                    calib_status = "red"
-                                    calib_quality = "failed"
-                                    calib_avg_error = None
-                                    set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
+                        # Evaluate calibration quality based on result
+                        avg_error = calib_result.get('average_error')
+                        num_points = calib_result.get('num_points')
+                        success = calib_result.get('success')
+                        
+                        # Handle None values to prevent TypeError
+                        if num_points is None:
+                            num_points = 0
+                        if success is None:
+                            success = 0
+                        if avg_error is None:
+                            avg_error = 0.0
+                        
+                        # Debug: print calibration result for troubleshooting
+                        print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error:.4f}")
+                        
+                        if success and num_points >= 4:
+                            if avg_error < CALIB_OK_THRESHOLD:
+                                calib_status = "green"
+                                calib_quality = "ok"
+                                calib_avg_error = avg_error
+                                set_info_msg("Calibration complete", dur=2.0)
+                            elif avg_error < CALIB_LOW_THRESHOLD:
+                                calib_status = "orange"
+                                calib_quality = "low"
+                                calib_avg_error = avg_error
+                                set_info_msg("Ready, low quality calibration", dur=2.0)
                             else:
                                 calib_status = "red"
                                 calib_quality = "failed"
                                 calib_avg_error = None
-                                fail_reason = f"success={success}, points={num_points}"
-                                set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
-                        
-                        # Hide calibration window
-                        gp.calibrate_show(False)
-                        # Reset override for next time
-                        current_calib_override = None
-                        state = "READY"
+                                set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
+                        else:
+                            calib_status = "red"
+                            calib_quality = "failed"
+                            calib_avg_error = None
+                            fail_reason = f"success={success}, points={num_points}"
+                            set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
+                    
+                    # Hide calibration window
+                    gp.calibrate_show(False)
+                    # Reset override for next time
+                    current_calib_override = None
+                    state = "READY"
                 else:
-                    # Still calibrating, wait for result
-                    # Don't check for results too early - wait at least 10 seconds for user to complete calibration
-                    # Gazepoint calibration typically takes 10-20 seconds for user to complete all points
-                    tnow = time.time()
-                    elapsed = tnow - calib_step_start
-                    if elapsed > 10.0:  # Wait at least 10 seconds before checking
-                        # Request result summary periodically (every 2 seconds after initial wait)
-                        last_check = getattr(start_calibration, '_last_check', 0)
-                        if tnow - last_check >= 2.0:  # Check every 2 seconds
-                            gp.calibrate_result_summary()
-                            start_calibration._last_check = tnow
+                    # Still calibrating, wait for CALIB_RESULT message
+                    # The server will send CALIB_START_PT and CALIB_RESULT_PT messages for each point
+                    # and finally CALIB_RESULT when calibration completes
+                    pass
             else:
                 # Client-side calibration for simulation mode
                 if calib_step == 0:

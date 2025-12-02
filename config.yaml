@@ -32,7 +32,7 @@ sim_gpio: true
 #            until a connection is established. If the connection is lost, it
 #            will automatically attempt to reconnect.
 #   Default: true
-sim_gaze: true
+sim_gaze: false
 
 # developpement_xg_boost: Enable XGBoost model result simulation
 #   - true:  Generate fake/deterministic XGBoost predictions instead of running
