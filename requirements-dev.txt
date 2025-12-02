@@ -2,6 +2,10 @@
 # Includes all runtime requirements plus development tools
 # Install with: pip install -r requirements-dev.txt
 
+# Build tools (required for Python 3.12+ compatibility - install first)
+setuptools>=65.0.0     # Provides distutils compatibility (removed in Python 3.12+)
+                      # Required for building/installing packages that use distutils
+
 # Include all runtime requirements
 -r requirements.txt
 
