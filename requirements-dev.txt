@@ -1,10 +1,16 @@
 # Development requirements for the Gaze Tracking Application
 # Includes all runtime requirements plus development tools
 # Install with: pip install -r requirements-dev.txt
+#
+# IMPORTANT FOR WINDOWS: On fresh Windows installs, you may need:
+# 1. Microsoft Visual C++ Build Tools (download from Microsoft)
+# 2. Run: python -m pip install --upgrade pip setuptools wheel
+#    before installing these requirements
 
 # Build tools (required for Python 3.12+ compatibility - install first)
 setuptools>=65.0.0     # Provides distutils compatibility (removed in Python 3.12+)
                       # Required for building/installing packages that use distutils
+wheel>=0.40.0         # Wheel package format support (ensures pre-built wheels are used when available)
 
 # Include all runtime requirements
 -r requirements.txt
