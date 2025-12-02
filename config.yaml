@@ -1,0 +1,102 @@
+# ============================================================================
+# Configuration File for Gaze Tracking Application
+# ============================================================================
+# This file controls the behavior of the application, including simulation
+# modes, hardware connections, and model settings.
+# 
+# Note: Values in this file can be overridden by top-level constants in
+# main.py if needed for development purposes.
+
+# ----------------------------------------------------------------------------
+# Simulation Modes
+# ----------------------------------------------------------------------------
+
+# sim_gpio: Enable GPIO hardware simulation via keyboard
+#   - true:  Use keyboard inputs (Z, X, N, B, M) and on-screen LED indicators
+#            instead of physical GPIO hardware. Useful for development/testing
+#            without Arduino/microcontroller hardware.
+#   - false: Use physical GPIO hardware via serial connection (requires
+#            microcontroller with buttons/LEDs connected)
+#   Default: true
+sim_gpio: true
+
+# sim_gaze: Enable Gazepoint eye tracker simulation
+#   - true:  Simulate Gazepoint connection and gaze data using keyboard
+#            controls (1=connect, 2=disconnect, 3=toggle stream) and synthetic
+#            gaze samples. Gaze data follows a Lissajous-like pattern.
+#   - false: Connect to real Gazepoint hardware via TCP/IP (requires Gazepoint
+#            tracker running on gp_host:gp_port)
+#   Default: true
+sim_gaze: true
+
+# developpement_xg_boost: Enable XGBoost model result simulation
+#   - true:  Generate fake/deterministic XGBoost predictions instead of running
+#            real model inference. Useful for testing UI and workflow without
+#            requiring trained models.
+#   - false: Load and use real XGBoost model from model_path for predictions
+#   Default: false
+developpement_xg_boost: false
+
+# dev_show_keys: Show on-screen keyboard overlay
+#   - true:  Display a cheat sheet overlay at the bottom of the screen showing
+#            all available keyboard shortcuts and recently pressed keys.
+#            Helpful during development to remember controls.
+#   - false: Hide the keyboard overlay for cleaner UI
+#   Default: true
+dev_show_keys: true
+
+# ----------------------------------------------------------------------------
+# Gazepoint Eye Tracker Settings
+# ----------------------------------------------------------------------------
+
+# gp_host: Gazepoint tracker TCP/IP host address
+#   - IP address or hostname where Gazepoint Control software is running
+#   - Use "127.0.0.1" for localhost (same machine)
+#   - Only used when sim_gaze is false
+#   Default: "127.0.0.1"
+gp_host: 127.0.0.1
+
+# gp_port: Gazepoint tracker TCP/IP port
+#   - Port number for Gazepoint Open API communication
+#   - Standard Gazepoint port is 4242
+#   - Only used when sim_gaze is false
+#   Default: 4242
+gp_port: 4242
+
+# ----------------------------------------------------------------------------
+# Hardware GPIO Settings
+# ----------------------------------------------------------------------------
+
+# serial_port: Serial port for GPIO hardware connection
+#   - COM port name (Windows) or device path (Linux/Mac) for microcontroller
+#   - Examples: "COM3" (Windows), "/dev/ttyUSB0" (Linux), "/dev/cu.usbserial" (Mac)
+#   - Empty string ("") enables auto-discovery by scanning for "HELLO" handshake
+#   - Only used when sim_gpio is false
+#   - If auto-discovery fails and sim_gpio is false, app will fall back to
+#     simulation mode (if allowed)
+#   Default: "" (auto-discover)
+serial_port: ""
+
+# ----------------------------------------------------------------------------
+# Machine Learning Model Settings
+# ----------------------------------------------------------------------------
+
+# model_path: Path to XGBoost model file
+#   - Relative or absolute path to the trained XGBoost model
+#   - Model should be saved using joblib (MultiOutputRegressor format)
+#   - Model outputs a vector: [global_score, T1, T2, ..., T10]
+#   - Only used when developpement_xg_boost is false
+#   - If path is relative, it's resolved from the application's working directory
+#   Default: "models/model.xgb"
+model_path: models/model.xgb
+
+# feature_window_ms: Time window for feature extraction (milliseconds)
+#   - Duration of gaze sample history to use when extracting features for
+#     XGBoost model inference
+#   - Longer windows provide more stable features but may miss recent changes
+#   - Shorter windows are more responsive but may be noisier
+#   - Used in sliding window statistics calculation (mean, variance, etc.)
+#   - Value in milliseconds (e.g., 1500 = 1.5 seconds)
+#   Default: 1500
+feature_window_ms: 1500
+

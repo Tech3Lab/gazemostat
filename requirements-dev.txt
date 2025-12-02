@@ -1,0 +1,12 @@
+# Development requirements for the Gaze Tracking Application
+# Includes all runtime requirements plus development tools
+# Install with: pip install -r requirements-dev.txt
+
+# Include all runtime requirements
+-r requirements.txt
+
+# Machine Learning Development (required for generate_model.py)
+scikit-learn>=1.0.0    # MultiOutputRegressor wrapper for XGBoost multi-output models
+                       # Required for generating models with vector output format
+                       # Note: xgboost and joblib are already in requirements.txt
+

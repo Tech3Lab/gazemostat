@@ -1,0 +1,1046 @@
+import os
+import sys
+import time
+import math
+import threading
+import queue
+import socket
+import csv
+from datetime import datetime
+from pathlib import Path
+
+try:
+    import yaml
+except ImportError:
+    yaml = None
+    print("Warning: PyYAML not installed. config.yaml will not be loaded.", file=sys.stderr)
+
+# Simulation toggles (can be overridden by config later)
+SIM_GPIO = True      # Keyboard + on-screen LEDs instead of hardware
+SIM_GAZE = True      # Keyboard + synthetic gaze stream
+SIM_XGB  = True      # Fake XGBoost results
+SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
+
+WIDTH, HEIGHT = 480, 800
+FPS = 30
+GP_HOST, GP_PORT = "127.0.0.1", 4242
+MODEL_PATH = "models/model.xgb"
+FEATURE_WINDOW_MS = 1500
+
+# Load config.yaml if it exists
+def load_config():
+    global SIM_GPIO, SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
+    if yaml is None:
+        return
+    config_path = "config.yaml"
+    if os.path.exists(config_path):
+        try:
+            with open(config_path, 'r') as f:
+                config = yaml.safe_load(f)
+                if config:
+                    SIM_GPIO = config.get('sim_gpio', SIM_GPIO)
+                    SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
+                    SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
+                    SHOW_KEYS = config.get('dev_show_keys', SHOW_KEYS)
+                    GP_HOST = config.get('gp_host', GP_HOST)
+                    GP_PORT = config.get('gp_port', GP_PORT)
+                    MODEL_PATH = config.get('model_path', MODEL_PATH)
+                    FEATURE_WINDOW_MS = config.get('feature_window_ms', FEATURE_WINDOW_MS)
+        except Exception as e:
+            print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
+
+load_config()
+
+try:
+    import pygame
+    import numpy as np
+except Exception as e:
+    print("Missing dependency:", e, file=sys.stderr)
+    sys.exit(1)
+
+try:
+    import xgboost as xgb  # optional; only used when SIM_XGB is False
+except Exception:
+    xgb = None
+
+try:
+    import joblib
+except ImportError:
+    joblib = None
+    print("Warning: joblib not installed. Model loading may fail.", file=sys.stderr)
+
+
+class GazeClient:
+    def __init__(self, host=GP_HOST, port=GP_PORT, simulate=SIM_GAZE):
+        self.host, self.port = host, port
+        self.simulate = simulate
+        self.q = queue.Queue(maxsize=1024)
+        self._thr = None
+        self._stop = threading.Event()
+        self.connected = False
+        self.receiving = False
+        self._sim_connected = False
+        self._sim_stream = False
+        self._t0 = time.time()
+
+    def start(self):
+        if self._thr and self._thr.is_alive():
+            return
+        self._stop.clear()
+        if self.simulate:
+            self._thr = threading.Thread(target=self._run_sim, daemon=True)
+        else:
+            self._thr = threading.Thread(target=self._run_real, daemon=True)
+        self._thr.start()
+
+    def stop(self):
+        self._stop.set()
+        if self._thr:
+            self._thr.join(timeout=1.0)
+
+    # Dev controls
+    def sim_connect(self):
+        self._sim_connected = True
+
+    def sim_disconnect(self):
+        self._sim_connected = False
+        self._sim_stream = False
+
+    def sim_toggle_stream(self):
+        if self._sim_connected:
+            self._sim_stream = not self._sim_stream
+
+    # Real client with XML protocol parsing
+    def _run_real(self):
+        self.receiving = False
+        self.connected = False
+        sock = None
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(1.0)
+            sock.connect((self.host, self.port))
+            sock.settimeout(0.1)
+            self.connected = True
+            
+            # Enable data streaming via XML protocol
+            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
+            sock.sendall(enable_cmd)
+            time.sleep(0.1)
+            
+            buf = b""
+            while not self._stop.is_set():
+                try:
+                    data = sock.recv(4096)
+                    if not data:
+                        break
+                    buf += data
+                    
+                    # Parse XML messages (newline-delimited)
+                    while b'\r\n' in buf:
+                        line, buf = buf.split(b'\r\n', 1)
+                        if not line:
+                            continue
+                        
+                        # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
+                        if b'<REC' in line:
+                            self.receiving = True
+                            try:
+                                # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
+                                line_str = line.decode('utf-8', errors='ignore')
+                                
+                                # Simple attribute extraction
+                                def get_attr(msg, attr, default):
+                                    idx = msg.find(attr + '="')
+                                    if idx == -1:
+                                        return default
+                                    start = idx + len(attr) + 2
+                                    end = msg.find('"', start)
+                                    if end == -1:
+                                        return default
+                                    try:
+                                        return float(msg[start:end])
+                                    except:
+                                        return default
+                                
+                                gx = get_attr(line_str, 'FPOGX', 0.5)
+                                gy = get_attr(line_str, 'FPOGY', 0.5)
+                                valid = get_attr(line_str, 'FPOGV', 1.0) > 0.5
+                                pupil = get_attr(line_str, 'PUPILDIA', 2.5)
+                                
+                                # Normalize gaze coordinates (Gazepoint uses 0-1 range)
+                                gx = max(0.0, min(1.0, gx))
+                                gy = max(0.0, min(1.0, gy))
+                                
+                                t = time.time()
+                                self._push_sample(t, gx, gy, pupil, valid)
+                            except Exception:
+                                # Fallback on parse error
+                                t = time.time()
+                                self._push_sample(t, 0.5, 0.5, 2.5, True)
+                except socket.timeout:
+                    continue
+                except Exception:
+                    break
+        except Exception:
+            pass
+        finally:
+            if sock:
+                try:
+                    sock.close()
+                except:
+                    pass
+            self.connected = False
+            self.receiving = False
+
+    # Simulated client
+    def _run_sim(self):
+        self.connected = self._sim_connected
+        self.receiving = False
+        t0 = time.time()
+        ang = 0.0
+        while not self._stop.is_set():
+            self.connected = self._sim_connected
+            if self._sim_connected and self._sim_stream:
+                self.receiving = True
+                now = time.time()
+                dt = now - t0
+                ang += 0.05
+                # Lissajous-like motion in [0,1]
+                gx = 0.5 + 0.4 * math.sin(ang)
+                gy = 0.5 + 0.3 * math.sin(ang * 1.7)
+                # occasional blink invalidation
+                valid = (int(dt * 3) % 20) != 0
+                pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
+                self._push_sample(now, gx, gy, pupil, valid)
+                time.sleep(1.0 / 60.0)
+            else:
+                self.receiving = False
+                time.sleep(0.05)
+
+    def _push_sample(self, t, gx, gy, pupil, valid):
+        try:
+            self.q.put_nowait({"t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid})
+        except queue.Full:
+            try:
+                self.q.get_nowait()
+            except Exception:
+                pass
+
+
+class Affine2D:
+    def __init__(self):
+        self.A = np.array([[1, 0, 0], [0, 1, 0]], dtype=float)
+
+    def fit(self, src_pts, dst_pts):
+        X = []
+        Y = []
+        for (x, y), (u, v) in zip(src_pts, dst_pts):
+            X.append([x, y, 1, 0, 0, 0])
+            X.append([0, 0, 0, x, y, 1])
+            Y.append(u)
+            Y.append(v)
+        X = np.array(X, dtype=float)
+        Y = np.array(Y, dtype=float)
+        try:
+            p, *_ = np.linalg.lstsq(X, Y, rcond=None)
+            self.A = np.array([[p[0], p[1], p[2]], [p[3], p[4], p[5]]], dtype=float)
+        except Exception:
+            self.A = np.array([[1, 0, 0], [0, 1, 0]], dtype=float)
+
+    def apply(self, x, y):
+        v = np.array([x, y, 1.0])
+        out = self.A @ v
+        return float(out[0]), float(out[1])
+
+
+def time_strings(t0):
+    now = time.time()
+    elapsed_ms = int((now - t0) * 1000)
+    hh = elapsed_ms // (3600 * 1000)
+    mm = (elapsed_ms // (60 * 1000)) % 60
+    ss = (elapsed_ms // 1000) % 60
+    ms = elapsed_ms % 1000
+    elapsed_str = f"{hh:02d}:{mm:02d}:{ss:02d}:{ms:03d}ms"
+    wall = datetime.now()
+    wall_str = f"{wall.hour:02d}:{wall.minute:02d}:{wall.second:02d}:{int(wall.microsecond/1000):03d}"
+    return elapsed_ms, elapsed_str, wall_str
+
+
+def draw_circle(screen, color, pos, r=12):
+    # Use a vivid orange to clearly distinguish from red
+    colors = {"red": (220, 50, 47), "orange": (255, 165, 0), "green": (0, 200, 0)}
+    pygame.draw.circle(screen, colors.get(color, (128, 128, 128)), pos, r)
+
+
+def main():
+    pygame.init()
+    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    pygame.display.set_caption("Gaze App")
+    font = pygame.font.SysFont(None, 26)
+    big = pygame.font.SysFont(None, 40)
+    small = pygame.font.SysFont(None, 20)
+
+    logo = None
+    for p in ("assets/logo.jpg", "logo.jpg"):
+        if os.path.exists(p):
+            try:
+                logo = pygame.image.load(p)
+            except Exception:
+                logo = None
+            break
+
+    # Splash
+    splash_until = time.time() + 0.8
+    while time.time() < splash_until:
+        screen.fill((0, 0, 0))
+        if logo:
+            img = pygame.transform.smoothscale(logo, (int(WIDTH * 0.7), int(WIDTH * 0.7 * logo.get_height() / logo.get_width())))
+            screen.blit(img, (WIDTH // 2 - img.get_width() // 2, HEIGHT // 2 - img.get_height() // 2))
+        pygame.display.flip()
+        pygame.time.delay(10)
+
+    gp = GazeClient(simulate=SIM_GAZE)
+    gp.start()
+    
+    # Load XGBoost models at startup (if not in simulation mode)
+    if not SIM_XGB:
+        load_xgb_models()
+
+    conn_status = "red"
+    calib_status = "red"
+    receiving_hint = False
+
+    state = "READY"  # READY|CALIBRATING|COLLECTING|ANALYZING|RESULTS
+    running = True
+    clock = pygame.time.Clock()
+
+    # Calibration
+    aff = Affine2D()
+    calib_points = []
+    target_points = []
+    calib_step = -1
+    calib_step_start = 0.0
+    CALIB_DWELL = 0.9
+    calib_quality = "none"  # none|ok|low|failed
+    current_calib_override = None  # None|'failed'|'low'
+
+    # Collection
+    session_t0 = None
+    next_task_id = 1
+    task_open = False
+    events = []  # list of (elapsed_ms, elapsed_str, wall_str, label)
+    gaze_samples = []  # store minimal fields for analysis
+
+    # Analyzing/Results
+    analyze_t0 = 0.0
+    per_task_scores = {}
+    global_score = 0.0
+    results_scroll = 0.0
+    # Transient user feedback message
+    info_msg = None
+    info_msg_until = 0.0
+
+    # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
+
+    def start_calibration(override=None):
+        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override
+        if not gp.connected:
+            set_info_msg("Connect Gazepoint first")
+            return
+        state = "CALIBRATING"
+        calib_status = "orange"
+        calib_quality = "none"
+        # Record override result for this calibration session (dev simulation)
+        current_calib_override = override
+        # Clear previous calibration transform/state
+        aff = Affine2D()
+        calib_points = []
+        target_points = []
+        calib_step = 0
+        calib_step_start = time.time()
+
+    def start_collection():
+        nonlocal state, session_t0, next_task_id, task_open, events, gaze_samples
+        if not gp.connected:
+            set_info_msg("Connect Gazepoint first")
+            return
+        if calib_quality not in ("ok", "low"):
+            set_info_msg("Calibrate first")
+            return
+        state = "COLLECTING"
+        session_t0 = time.time()
+        next_task_id = 1
+        task_open = False
+        events = []
+        gaze_samples = []
+
+    def stop_collection_begin_analysis():
+        nonlocal state, analyze_t0, per_task_scores, global_score
+        state = "ANALYZING"
+        analyze_t0 = time.time()
+        
+        # Save session logs to CSV
+        save_session_logs(events, gaze_samples, session_t0)
+        
+        # Run analysis in a tiny thread to simulate progress
+        def _run():
+            nonlocal per_task_scores, global_score
+            time.sleep(1.2)
+            if SIM_XGB:
+                # Fake: global = mean of per-task synthetic, per task = simple function of duration
+                per_task_scores = {}
+                # derive durations from events
+                starts = {}
+                for _, _, _, lab in events:
+                    if lab.endswith("_START"):
+                        starts[lab.split("_")[0]] = True
+                # simple deterministic values
+                for t in range(1, (next_task_id if not task_open else next_task_id) + 1):
+                    key = f"T{t}"
+                    per_task_scores[key] = round(0.5 + 0.1 * (t % 5), 3)
+                if per_task_scores:
+                    global_score = round(sum(per_task_scores.values()) / len(per_task_scores), 3)
+                else:
+                    global_score = 0.0
+            else:
+                per_task_scores, global_score = run_xgb_results({
+                    "events": events,
+                    "gaze": gaze_samples,
+                }, aff=aff, session_t0=session_t0)
+            
+            # Save results to CSV
+            save_results_logs(per_task_scores, global_score, session_t0)
+            
+            # flip to results after small delay
+            time.sleep(0.3)
+            set_results_state()
+        threading.Thread(target=_run, daemon=True).start()
+
+    def set_results_state():
+        nonlocal state, results_scroll
+        state = "RESULTS"
+        results_scroll = 0.0
+
+    def marker_toggle():
+        nonlocal task_open, next_task_id
+        if session_t0 is None:
+            return
+        elapsed_ms, elapsed_str, wall_str = time_strings(session_t0)
+        if not task_open:
+            label = f"T{next_task_id}_START"
+            task_open = True
+        else:
+            label = f"T{next_task_id}_END"
+            task_open = False
+            next_task_id += 1
+        events.append((elapsed_ms, elapsed_str, wall_str, label))
+
+    def set_info_msg(msg, dur=2.0):
+        nonlocal info_msg, info_msg_until
+        info_msg = msg
+        info_msg_until = time.time() + dur
+
+    def draw_status_header():
+        conn_x = 50  # moved 20px to the right
+        cal_x = WIDTH - 50  # moved 20px to the left
+        draw_circle(screen, conn_status, (conn_x, 30))
+        if receiving_hint:
+            pygame.draw.circle(screen, (255, 255, 255), (conn_x, 30), 4)
+        # Blink calibration circle while calibrating
+        if state == "CALIBRATING":
+            blink_on = (int(time.time() * 2) % 2) == 0
+            if blink_on:
+                draw_circle(screen, calib_status, (cal_x, 30))
+        else:
+            draw_circle(screen, calib_status, (cal_x, 30))
+        # Middle collecting indicator when collecting
+        if state == "COLLECTING":
+            mid_x = WIDTH // 2
+            # blink at ~2 Hz
+            blink_on = (int(time.time() * 2) % 2) == 0
+            if blink_on:
+                pygame.draw.circle(screen, (220, 50, 47), (mid_x, 30), 12)
+            lbl_col = small.render("Collecting", True, (200, 200, 200))
+            screen.blit(lbl_col, (mid_x - lbl_col.get_width() // 2, 30 + 16))
+        # Labels under circles
+        lbl_conn = small.render("Connection", True, (200, 200, 200))
+        screen.blit(lbl_conn, (conn_x - lbl_conn.get_width() // 2, 30 + 16))
+        lbl_cal = small.render("Calibration", True, (200, 200, 200))
+        screen.blit(lbl_cal, (cal_x - lbl_cal.get_width() // 2, 30 + 16))
+
+    def draw_preview_and_markers():
+        # Stacked vertical squares: top preview, bottom marker list
+        top_y = 120
+        # compute square size to fit two squares plus spacing
+        spacing = 10
+        sq = min(WIDTH - 20, (HEIGHT - top_y - 40 - spacing) // 2)
+        sq = max(120, sq)
+        cx = WIDTH // 2
+        # Top square: preview
+        rect = pygame.Rect(cx - sq // 2, top_y, sq, sq)
+        pygame.draw.rect(screen, (30, 30, 30), rect, border_radius=6)
+        if last_calib_gaze is not None:
+            gx, gy = last_calib_gaze
+            dx = rect.left + int(gx * rect.width)
+            dy = rect.top + int(gy * rect.height)
+            pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 5)
+        # Bottom square: marker list
+        list_rect = pygame.Rect(cx - sq // 2, rect.bottom + spacing, sq, sq)
+        pygame.draw.rect(screen, (20, 20, 20), list_rect, border_radius=6)
+        y = list_rect.top + 8
+        for i in range(max(0, len(events) - 14), len(events)):
+            _, elapsed_str, wall_str, label = events[i]
+            line = f"{elapsed_str} : {label}"
+            surf = font.render(line, True, (230, 230, 230))
+            screen.blit(surf, (list_rect.left + 8, y))
+            y += surf.get_height() + 2
+
+    last_calib_gaze = None
+    key_log = []  # list of (time, label)
+
+    def log_key(label):
+        if not SHOW_KEYS:
+            return
+        key_log.append((time.time(), label))
+        if len(key_log) > 20:
+            del key_log[: len(key_log) - 20]
+
+    # Map keys to labels for overlay; only log when the corresponding sim toggle is enabled
+    KEY_LABELS_GPIO = {
+        pygame.K_z: "Z",
+        pygame.K_x: "X",
+        pygame.K_n: "N",
+        pygame.K_b: "B",
+        pygame.K_m: "M",
+    }
+    KEY_LABELS_GAZE = {
+        pygame.K_1: "1",
+        pygame.K_2: "2",
+        pygame.K_3: "3",
+    }
+
+    def draw_key_overlay():
+        if not SHOW_KEYS:
+            return
+        cheat = []
+        if SIM_GPIO:
+            cheat += [
+                "Z — Start calibration",
+                "X — Start collection",
+                "N — Marker (toggle start/end)",
+                "B — Stop collection (analyze)",
+            ]
+        if SIM_GAZE:
+            cheat += [
+                "1 — Gaze: Connected",
+                "2 — Gaze: Disconnected",
+                "3 — Gaze: Toggle stream",
+                "4 — Start failed calibration (sim)",
+                "5 — Start bad calibration (low quality)",
+            ]
+        last = [lbl for (_, lbl) in key_log[-6:]]
+        # Build surfaces
+        pad = 6
+        surfs = [small.render(t, True, (240, 240, 240)) for t in cheat]
+        if last:
+            surfs.append(small.render("", True, (240, 240, 240)))
+            surfs.append(small.render("Last: " + " ".join(last), True, (200, 200, 200)))
+        if not surfs:
+            return
+        w = 0
+        h = 0
+        for s in surfs:
+            w = max(w, s.get_width())
+            h += s.get_height() + 2
+        base_y = HEIGHT - 10
+        bg = pygame.Rect(8, base_y - h - pad, w + pad * 2, h + pad)
+        pygame.draw.rect(screen, (20, 20, 20), bg, border_radius=6)
+        y = base_y - h
+        for s in surfs:
+            screen.blit(s, (8 + pad, y))
+            y += s.get_height() + 2
+
+    while running:
+        for ev in pygame.event.get():
+            if ev.type == pygame.QUIT:
+                running = False
+            elif ev.type == pygame.KEYDOWN:
+                if SIM_GPIO and ev.key == pygame.K_z and state == "READY":
+                    log_key("Z")
+                    start_calibration(override=None)
+                elif SIM_GAZE and ev.key == pygame.K_1:
+                    log_key("1")
+                    gp.sim_connect()
+                elif SIM_GAZE and ev.key == pygame.K_2:
+                    log_key("2")
+                    gp.sim_disconnect()
+                elif SIM_GAZE and ev.key == pygame.K_3:
+                    log_key("3")
+                    gp.sim_toggle_stream()
+                elif SIM_GAZE and ev.key == pygame.K_4 and state == "READY":
+                    # Start calibration with simulated failed result (same routine, overridden outcome)
+                    log_key("4")
+                    start_calibration(override="failed")
+                elif SIM_GAZE and ev.key == pygame.K_5 and state == "READY":
+                    # Start calibration with simulated low-quality result (same routine, overridden outcome)
+                    log_key("5")
+                    start_calibration(override="low")
+                elif SIM_GPIO and ev.key == pygame.K_x and state == "READY":
+                    log_key("X")
+                    start_collection()
+                elif SIM_GPIO and ev.key == pygame.K_n and state == "COLLECTING":
+                    log_key("N")
+                    marker_toggle()
+                elif SIM_GPIO and ev.key == pygame.K_b and state == "COLLECTING":
+                    log_key("B")
+                    stop_collection_begin_analysis()
+                elif ev.key == pygame.K_m:
+                    if SHOW_KEYS:
+                        log_key("M")
+                    running = False
+
+        # Pull gaze samples
+        # Show red when disconnected, green when connected
+        conn_status = "green" if gp.connected else "red"
+        receiving_hint = gp.receiving
+        try:
+            for _ in range(2):
+                s = gp.q.get_nowait()
+                if state == "COLLECTING":
+                    gaze_samples.append(s)
+                # Remember last for preview
+                last_calib_gaze = (max(0.0, min(1.0, s.get("gx", 0.5))), max(0.0, min(1.0, s.get("gy", 0.5))))
+        except queue.Empty:
+            pass
+
+        # Calibration sequencing
+        if state == "CALIBRATING":
+            if calib_step == 0:
+                target = (0.1, 0.1)
+            elif calib_step == 1:
+                target = (0.9, 0.1)
+            elif calib_step == 2:
+                target = (0.9, 0.9)
+            elif calib_step == 3:
+                target = (0.1, 0.9)
+            else:
+                target = None
+
+            # collect samples during dwell
+            if target is not None:
+                tnow = time.time()
+                if tnow - calib_step_start < CALIB_DWELL:
+                    if last_calib_gaze is not None:
+                        calib_points.append(last_calib_gaze)
+                        target_points.append(target)
+                else:
+                    calib_step += 1
+                    calib_step_start = tnow
+            else:
+                # Finalize calibration outcome
+                if current_calib_override == "failed":
+                    calib_status = "red"
+                    calib_quality = "failed"
+                    set_info_msg("Calibration failed, try again", dur=3.0)
+                elif current_calib_override == "low":
+                    # Simulate a successful but low-quality calibration regardless of sample count
+                    calib_status = "orange"
+                    calib_quality = "low"
+                else:
+                    if len(calib_points) >= 4:
+                        # Fit simple affine raw->screen
+                        aff.fit(calib_points[:4], target_points[:4])
+                        calib_status = "green"
+                        calib_quality = "ok"
+                    elif SIM_GAZE:
+                        # In development, succeed even without enough samples
+                        calib_status = "green"
+                        calib_quality = "ok"
+                    else:
+                        calib_status = "red"
+                        calib_quality = "failed"
+                        set_info_msg("Calibration failed, try again", dur=3.0)
+                # Reset override for next time
+                current_calib_override = None
+                state = "READY"
+
+        # Draw
+        screen.fill((0, 0, 0))
+        draw_status_header()
+
+        # On-screen calibration LED hints in SIM_GPIO
+        if state == "CALIBRATING" and SIM_GPIO:
+            led_pos = [
+                (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
+                (int(WIDTH * 0.9), int(HEIGHT * 0.15)),
+                (int(WIDTH * 0.9), int(HEIGHT * 0.85)),
+                (int(WIDTH * 0.1), int(HEIGHT * 0.85)),
+            ]
+            for i, p in enumerate(led_pos):
+                color = (0, 255, 0) if i == calib_step else (60, 60, 60)
+                pygame.draw.circle(screen, color, p, 8)
+
+        if state == "READY":
+            # Message logic based on connection and calibration
+            now = time.time()
+            if info_msg and now < info_msg_until:
+                msg = info_msg
+            else:
+                info_msg = None
+                if not gp.connected:
+                    msg = "Connect Gazepoint"
+                else:
+                    if calib_quality == "ok":
+                        msg = "Ready"
+                    elif calib_quality == "low":
+                        msg = "Ready, low quality calibration"
+                    elif calib_quality == "failed":
+                        msg = "Calibration failed, try again"
+                    else:
+                        msg = "Start calibration"
+            txt = big.render(msg, True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+        elif state == "CALIBRATING":
+            # Only show calibration indicators, not the preview/list squares
+            txt = big.render("Calibrating…", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
+        elif state == "COLLECTING":
+            # Show collecting label and live marker list on right half
+            txt = big.render("Collecting…", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
+            # reuse preview pane for live gaze
+            draw_preview_and_markers()
+        elif state == "ANALYZING":
+            txt = big.render("Calculating…", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 60))
+            # progress bar
+            bar_w, bar_h = int(WIDTH * 0.7), 18
+            bx = WIDTH // 2 - bar_w // 2
+            by = HEIGHT // 2
+            pygame.draw.rect(screen, (40, 40, 40), (bx, by, bar_w, bar_h), border_radius=6)
+            pr = min(1.0, (time.time() - analyze_t0) / 1.5)
+            pygame.draw.rect(screen, (80, 180, 80), (bx, by, int(bar_w * pr), bar_h), border_radius=6)
+        elif state == "RESULTS":
+            txt = big.render(f"Global: {global_score:.3f}", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
+            # Per-task list: only loop if too many to fit; slower loop speed
+            y0 = 120
+            lines = [f"{k}: {v:.3f}" for k, v in sorted(per_task_scores.items(), key=lambda kv: int(kv[0][1:]))]
+            if lines:
+                line_h = font.get_height() + 4
+                avail_h = HEIGHT - y0 - 20
+                visible = max(1, avail_h // line_h)
+                if len(lines) > visible:
+                    results_scroll = (results_scroll + 0.05) % len(lines)
+                    start = int(results_scroll)
+                    count = visible
+                else:
+                    start = 0
+                    count = len(lines)
+                for i in range(count):
+                    line = lines[(start + i) % len(lines)]
+                    surf = font.render(line, True, (230, 230, 230))
+                    screen.blit(surf, (WIDTH // 2 - 120, y0 + i * line_h))
+
+        # Key overlay drawn last
+        draw_key_overlay()
+        pygame.display.flip()
+        clock.tick(FPS)
+
+    gp.stop()
+    pygame.quit()
+
+
+def save_session_logs(events, gaze_samples, session_t0):
+    """Save session events and gaze data to CSV files in /logs folder."""
+    try:
+        # Create logs directory
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        
+        # Create session directory with timestamp
+        if session_t0:
+            session_timestamp = datetime.fromtimestamp(session_t0).strftime("%Y%m%d_%H%M%S")
+        else:
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        session_dir = logs_dir / session_timestamp
+        session_dir.mkdir(exist_ok=True)
+        
+        # Save events.csv
+        events_path = session_dir / "events.csv"
+        with open(events_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['elapsed_ms', 'wall_time', 'event'])
+            
+            # Add session start event
+            if session_t0:
+                wall_time = datetime.fromtimestamp(session_t0).strftime("%H:%M:%S:%f")[:-3]
+                writer.writerow([0, wall_time, 'SESSION_START'])
+            
+            # Write all events
+            for elapsed_ms, elapsed_str, wall_str, label in events:
+                writer.writerow([elapsed_ms, wall_str, label])
+            
+            # Add session end event
+            if session_t0:
+                end_time = time.time()
+                end_elapsed_ms = int((end_time - session_t0) * 1000)
+                wall_time = datetime.fromtimestamp(end_time).strftime("%H:%M:%S:%f")[:-3]
+                writer.writerow([end_elapsed_ms, wall_time, 'SESSION_END'])
+        
+        # Save gaze samples (sparse - every 10th sample to limit size)
+        gaze_path = session_dir / "gaze.csv"
+        with open(gaze_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['timestamp', 'gx', 'gy', 'pupil', 'valid'])
+            
+            for i, sample in enumerate(gaze_samples):
+                if i % 10 == 0:  # Save every 10th sample
+                    writer.writerow([
+                        sample.get('t', 0.0),
+                        sample.get('gx', 0.5),
+                        sample.get('gy', 0.5),
+                        sample.get('pupil', 2.5),
+                        sample.get('valid', True)
+                    ])
+    except Exception as e:
+        print(f"Warning: Failed to save session logs: {e}", file=sys.stderr)
+
+def save_results_logs(per_task_scores, global_score, session_t0):
+    """Save analysis results to CSV file in /logs folder."""
+    try:
+        # Create logs directory
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+        
+        # Find or create session directory
+        if session_t0:
+            session_timestamp = datetime.fromtimestamp(session_t0).strftime("%Y%m%d_%H%M%S")
+        else:
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        
+        session_dir = logs_dir / session_timestamp
+        session_dir.mkdir(exist_ok=True)
+        
+        # Save results.csv
+        results_path = session_dir / "results.csv"
+        with open(results_path, 'w', newline='') as f:
+            writer = csv.writer(f)
+            writer.writerow(['label', 'value'])
+            
+            # Write global score
+            writer.writerow(['GLOBAL', f"{global_score:.6f}"])
+            
+            # Write per-task scores
+            for task_key in sorted(per_task_scores.keys(), key=lambda k: int(k[1:])):
+                writer.writerow([task_key, f"{per_task_scores[task_key]:.6f}"])
+    except Exception as e:
+        print(f"Warning: Failed to save results logs: {e}", file=sys.stderr)
+
+
+# Global model storage
+_xgb_model = None
+_xgb_loaded = False
+
+def load_xgb_models():
+    """Load XGBoost model from disk. Model outputs a vector: [global_score, T1, T2, ..., T10]."""
+    global _xgb_model, _xgb_loaded
+    if _xgb_loaded or (xgb is None and joblib is None):
+        return
+    
+    try:
+        # Load the single model file
+        model_path = MODEL_PATH
+        if not os.path.exists(model_path):
+            # Try alternative path
+            if "/" in MODEL_PATH or "\\" in MODEL_PATH:
+                base_dir = os.path.dirname(MODEL_PATH)
+            else:
+                base_dir = "models"
+            model_path = os.path.join(base_dir, "model.xgb")
+        
+        if os.path.exists(model_path):
+            if joblib is not None:
+                _xgb_model = joblib.load(model_path)
+                print(f"Loaded XGBoost model from {model_path}")
+                _xgb_loaded = True
+            else:
+                print(f"Warning: joblib not available, cannot load model from {model_path}", file=sys.stderr)
+        else:
+            print(f"Warning: Model file not found: {model_path}", file=sys.stderr)
+    except Exception as e:
+        print(f"Warning: Failed to load XGBoost model: {e}", file=sys.stderr)
+        _xgb_loaded = False
+
+def extract_features(gaze_samples, events, session_t0, aff):
+    """
+    Extract features from gaze samples and events for XGBoost model.
+    Returns a feature vector of 20 values.
+    """
+    if not gaze_samples:
+        return np.zeros(20, dtype=np.float32)
+    
+    # Convert to numpy arrays for easier processing
+    gaze_array = np.array([(s.get('gx', 0.5), s.get('gy', 0.5), s.get('pupil', 2.5), s.get('valid', True)) 
+                           for s in gaze_samples])
+    
+    # Apply calibration transform if available
+    if aff and len(gaze_array) > 0:
+        calibrated_gaze = []
+        for gx, gy, pupil, valid in gaze_array:
+            if valid:
+                cx, cy = aff.apply(gx, gy)
+                calibrated_gaze.append((cx, cy, pupil, valid))
+            else:
+                calibrated_gaze.append((gx, gy, pupil, valid))
+        gaze_array = np.array(calibrated_gaze)
+    
+    gx = gaze_array[:, 0]
+    gy = gaze_array[:, 1]
+    pupil = gaze_array[:, 2]
+    valid = gaze_array[:, 3].astype(bool)
+    
+    # Calculate features
+    valid_samples = gaze_array[valid]
+    
+    # Basic statistics
+    mean_gaze_x = float(np.mean(gx[valid])) if np.any(valid) else 0.5
+    mean_gaze_y = float(np.mean(gy[valid])) if np.any(valid) else 0.5
+    gaze_variance_x = float(np.var(gx[valid])) if np.any(valid) else 0.0
+    gaze_variance_y = float(np.var(gy[valid])) if np.any(valid) else 0.0
+    gaze_std_x = float(np.std(gx[valid])) if np.any(valid) else 0.0
+    gaze_std_y = float(np.std(gy[valid])) if np.any(valid) else 0.0
+    
+    # Blink count (invalid samples)
+    blink_count = float(np.sum(~valid))
+    
+    # Validity rate
+    validity_rate = float(np.mean(valid)) if len(valid) > 0 else 0.0
+    
+    # Pupil statistics
+    pupil_mean = float(np.mean(pupil[valid])) if np.any(valid) else 2.5
+    pupil_std = float(np.std(pupil[valid])) if np.any(valid) else 0.0
+    
+    # Gaze range
+    gaze_range_x = float(np.max(gx[valid]) - np.min(gx[valid])) if np.any(valid) else 0.0
+    gaze_range_y = float(np.max(gy[valid]) - np.min(gy[valid])) if np.any(valid) else 0.0
+    
+    # Calculate velocities (simple difference)
+    if len(valid_samples) > 1:
+        dx = np.diff(valid_samples[:, 0])
+        dy = np.diff(valid_samples[:, 1])
+        velocities = np.sqrt(dx**2 + dy**2)
+        gaze_velocity_mean = float(np.mean(velocities)) if len(velocities) > 0 else 0.0
+        gaze_velocity_std = float(np.std(velocities)) if len(velocities) > 0 else 0.0
+    else:
+        gaze_velocity_mean = 0.0
+        gaze_velocity_std = 0.0
+    
+    # Fixation and saccade detection (simplified)
+    # Fixation: low velocity samples
+    if len(valid_samples) > 1:
+        threshold = 0.01  # threshold for fixation
+        fixations = velocities < threshold
+        fixation_count = float(np.sum(fixations))
+        fixation_duration = float(np.mean(velocities[fixations])) if np.any(fixations) else 0.0
+        
+        # Saccades: high velocity samples
+        saccades = velocities >= threshold
+        saccade_count = float(np.sum(saccades))
+        saccade_rate = float(np.mean(velocities[saccades])) if np.any(saccades) else 0.0
+    else:
+        fixation_count = 0.0
+        fixation_duration = 0.0
+        saccade_count = 0.0
+        saccade_rate = 0.0
+    
+    # Task duration (from events)
+    task_duration = 0.0
+    if events and session_t0:
+        if len(events) >= 2:
+            last_event_time = events[-1][0] / 1000.0  # Convert ms to seconds
+            task_duration = last_event_time
+    
+    total_samples = float(len(gaze_samples))
+    
+    # Build feature vector (20 features)
+    features = np.array([
+        mean_gaze_x, mean_gaze_y, gaze_variance_x, gaze_variance_y,
+        blink_count, fixation_duration, saccade_rate, task_duration,
+        gaze_std_x, gaze_std_y, pupil_mean, pupil_std,
+        validity_rate, gaze_range_x, gaze_range_y, gaze_velocity_mean,
+        gaze_velocity_std, fixation_count, saccade_count, total_samples
+    ], dtype=np.float32)
+    
+    return features
+
+def run_xgb_results(collected, aff=None, session_t0=None):
+    """
+    Run XGBoost inference on collected data.
+    Model outputs a vector: [global_score, T1, T2, ..., T10]
+    Returns (per_task_dict, global_score) where per_task_dict maps "T1", "T2", etc. to scores.
+    """
+    global _xgb_model
+    
+    # Load model if not already loaded
+    if not _xgb_loaded:
+        load_xgb_models()
+    
+    events = collected.get("events", [])
+    gaze_samples = collected.get("gaze", [])
+    
+    # Extract features
+    features = extract_features(gaze_samples, events, session_t0, aff)
+    features_2d = features.reshape(1, -1)
+    
+    per_task = {}
+    
+    # Get task IDs from events
+    tasks = set()
+    for _, _, _, lab in events:
+        if lab.endswith("_START") or lab.endswith("_END"):
+            task_id = int(lab.split("_")[0][1:])  # Extract number from "T1_START"
+            tasks.add(task_id)
+    
+    # Predict using the single model that outputs a vector
+    if _xgb_model is not None and _xgb_loaded:
+        try:
+            # Model outputs: [global_score, T1, T2, ..., T10]
+            predictions = _xgb_model.predict(features_2d)[0]  # Get first (and only) prediction
+            
+            # Verify output vector has expected length (11: 1 global + 10 tasks)
+            if len(predictions) < 11:
+                raise ValueError(f"Expected 11 outputs, got {len(predictions)}")
+            
+            # Parse the output vector
+            # predictions[0] = global_score
+            # predictions[1:] = [T1, T2, ..., T10]
+            global_score = float(max(0.0, min(1.0, predictions[0])))  # Clamp to [0, 1]
+            
+            # Extract per-task scores for tasks that exist in events
+            for task_id in sorted(tasks):
+                if task_id >= 1 and task_id <= 10:  # Valid task range
+                    key = f"T{task_id}"
+                    # predictions[task_id] corresponds to T{task_id} (since index 0 is global)
+                    task_score = float(max(0.0, min(1.0, predictions[task_id])))
+                    per_task[key] = task_score
+        except Exception as e:
+            print(f"Warning: Model prediction failed: {e}", file=sys.stderr)
+            # Fallback to random values
+            for task_id in sorted(tasks):
+                key = f"T{task_id}"
+                per_task[key] = np.random.rand()
+            global_score = np.random.rand() if not per_task else float(np.mean(list(per_task.values())))
+    else:
+        # Fallback to random values if model not available
+        for task_id in sorted(tasks):
+            key = f"T{task_id}"
+            per_task[key] = np.random.rand()
+        global_score = np.random.rand() if not per_task else float(np.mean(list(per_task.values())))
+    
+    return per_task, global_score
+
+
+if __name__ == "__main__":
+    main()

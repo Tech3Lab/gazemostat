@@ -1,0 +1,21 @@
+# Runtime requirements for the Gaze Tracking Application
+# Install with: pip install -r requirements.txt
+
+# Core dependencies (required)
+pygame>=2.0.0          # UI framework for the 480x800 window
+numpy>=1.20.0          # Numerical operations and array handling
+
+# Configuration (recommended)
+PyYAML>=5.4.0          # YAML parser for config.yaml file loading
+                       # App will work without this but config.yaml won't be loaded
+
+# Machine Learning (optional - only needed when developpement_xg_boost is false)
+xgboost>=1.5.0         # XGBoost model for gaze analysis predictions
+                       # Required if using real model inference instead of simulation
+joblib>=1.0.0          # Model serialization/loading (for XGBoost MultiOutputRegressor)
+                       # Required if loading trained models
+
+# Hardware GPIO (optional - only needed when sim_gpio is false)
+pyserial>=3.5          # Serial communication for Arduino/microcontroller GPIO backend
+                       # Required if using physical hardware buttons/LEDs instead of keyboard simulation
+
