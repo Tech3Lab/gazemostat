@@ -1,6 +1,10 @@
 # Runtime requirements for the Gaze Tracking Application
 # Install with: pip install -r requirements.txt
 
+# Build tools (required for Python 3.12+ compatibility)
+setuptools>=65.0.0     # Provides distutils compatibility (removed in Python 3.12+)
+                      # Required for building/installing packages that use distutils
+
 # Core dependencies (required)
 pygame>=2.0.0          # UI framework for the 480x800 window
 numpy>=1.20.0          # Numerical operations and array handling
