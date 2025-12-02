@@ -290,17 +290,24 @@ class GazeClient:
                                         return default
                                     
                                     # Try multiple possible attribute names (OpenGaze API v2 format)
-                                    avg_error = get_attr(line_str, 'AVERAGE_ERROR', None)
+                                    # Gazepoint uses AVE_ERROR and VALID_POINTS in the actual response
+                                    avg_error = get_attr(line_str, 'AVE_ERROR', None)
+                                    if avg_error is None:
+                                        avg_error = get_attr(line_str, 'AVERAGE_ERROR', None)
                                     if avg_error is None:
                                         avg_error = get_attr(line_str, 'AVG_ERROR', None)
                                     if avg_error is None:
                                         avg_error = get_attr(line_str, 'ERROR', None)
                                     
-                                    num_points = get_attr(line_str, 'NUM_POINTS', None)
+                                    num_points = get_attr(line_str, 'VALID_POINTS', None)
+                                    if num_points is None:
+                                        num_points = get_attr(line_str, 'NUM_POINTS', None)
                                     if num_points is None:
                                         num_points = get_attr(line_str, 'POINTS', None)
                                     if num_points is None:
                                         num_points = get_attr(line_str, 'NUM', None)
+                                    if num_points is None:
+                                        num_points = get_attr(line_str, 'PTS', None)  # Some versions use PTS
                                     
                                     success = get_attr(line_str, 'SUCCESS', None)
                                     if success is None:
@@ -313,15 +320,17 @@ class GazeClient:
                                     
                                     print(f"DEBUG: Parsed values - avg_error={avg_error}, num_points={num_points}, success={success}")
                                     
-                                    # Only store result if this is actually a result summary with meaningful data
-                                    # Don't store ACK messages from other calibration commands (they have success=1 but no actual data)
-                                    if avg_error is not None or (num_points is not None and num_points > 0):
+                                    # Only store result if this is actually a result summary
+                                    # Store even if num_points is 0 (indicates calibration failed/not completed)
+                                    # This allows us to detect when calibration completes (even if it failed)
+                                    if avg_error is not None or num_points is not None:
                                         with self.calib_result_lock:
                                             self.calib_result = {
-                                                'average_error': avg_error,
+                                                'average_error': avg_error if avg_error is not None else 0.0,
                                                 'num_points': num_points if num_points is not None else 0,
                                                 'success': success if success is not None else (1 if num_points and num_points >= 4 else 0)
                                             }
+                                            print(f"DEBUG: Stored calibration result - avg_error={avg_error}, num_points={num_points}, success={success if success is not None else (1 if num_points and num_points >= 4 else 0)}")
                                     else:
                                         print(f"DEBUG: No valid calibration result data found (ignoring ACK message)")
                                 except Exception as e:
@@ -852,7 +861,20 @@ def main():
                 # Check for calibration result from Gazepoint
                 calib_result = gp.get_calibration_result()
                 if calib_result is not None:
-                    # Calibration completed, process result
+                    # Check if calibration actually completed (not just an immediate 0-point result)
+                    # If we get a result with 0 points very quickly, it might be an immediate failure
+                    # Wait a bit longer to see if user completes calibration
+                    elapsed = time.time() - calib_step_start
+                    num_points = calib_result.get('num_points', 0)
+                    
+                    # If we got 0 points and it's been less than 10 seconds, ignore it (calibration might still be running)
+                    if num_points == 0 and elapsed < 10.0:
+                        print(f"DEBUG: Ignoring immediate 0-point result (elapsed={elapsed:.1f}s), calibration may still be running")
+                        # Clear the result so we keep waiting
+                        with gp.calib_result_lock:
+                            gp.calib_result = None
+                    else:
+                        # Calibration completed (either with points or after sufficient time), process result
                     if current_calib_override == "failed":
                         calib_status = "red"
                         calib_quality = "failed"
@@ -909,13 +931,14 @@ def main():
                     state = "READY"
                 else:
                     # Still calibrating, wait for result
-                    # Don't check for results too early - wait at least 5 seconds for user to complete calibration
+                    # Don't check for results too early - wait at least 10 seconds for user to complete calibration
+                    # Gazepoint calibration typically takes 10-20 seconds for user to complete all points
                     tnow = time.time()
                     elapsed = tnow - calib_step_start
-                    if elapsed > 5.0:  # Wait at least 5 seconds before checking
-                        # Request result summary periodically (every 1 second after initial wait)
+                    if elapsed > 10.0:  # Wait at least 10 seconds before checking
+                        # Request result summary periodically (every 2 seconds after initial wait)
                         last_check = getattr(start_calibration, '_last_check', 0)
-                        if tnow - last_check >= 1.0:  # Check every 1 second
+                        if tnow - last_check >= 2.0:  # Check every 2 seconds
                             gp.calibrate_result_summary()
                             start_calibration._last_check = tnow
             else:
