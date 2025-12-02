@@ -17,10 +17,9 @@
 #            without Arduino/microcontroller hardware.
 #            Keyboard shortcuts: Z=start calibration, X=start collection,
 #            N=marker toggle, B=stop collection, M=end session, R=reset app state
-#   - false: Use physical GPIO hardware via serial connection (requires
-#            microcontroller with buttons/LEDs connected)
+#   - false: Use physical GPIO hardware (LattePanda button on GP0+GND)
 #   Default: true
-sim_gpio: true
+sim_gpio: false
 
 # sim_gaze: Enable Gazepoint eye tracker simulation
 #   - true:  Simulate Gazepoint connection and gaze data using keyboard
@@ -103,6 +102,29 @@ calibration_low_threshold: 2.0
 #     simulation mode (if allowed)
 #   Default: "" (auto-discover)
 serial_port: ""
+
+# gpio_chip: GPIO chip device path for LattePanda Iota
+#   - Device path for GPIO chip (Linux only)
+#   - LattePanda Iota typically uses /dev/gpiochip0
+#   - Only used when sim_gpio is false and gpiod is available
+#   Default: "/dev/gpiochip0"
+gpio_chip: "/dev/gpiochip0"
+
+# gpio_button_line: GPIO line number for marker button
+#   - GPIO line number (pin) for the marker toggle button
+#   - LattePanda Iota GP0 = line 0
+#   - Connect button between this pin and GND
+#   - Internal pull-up resistor is enabled (button pulls to GND when pressed)
+#   - Only used when sim_gpio is false and gpiod is available
+#   Default: 0 (GP0)
+gpio_button_line: 0
+
+# gpio_button_debounce: Button debounce time in seconds
+#   - Minimum time between button presses to prevent accidental double-presses
+#   - Value in seconds (e.g., 0.2 = 200ms)
+#   - Only used when sim_gpio is false and gpiod is available
+#   Default: 0.2
+gpio_button_debounce: 0.2
 
 # ----------------------------------------------------------------------------
 # Machine Learning Model Settings

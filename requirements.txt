@@ -31,4 +31,6 @@ joblib>=1.0.0          # Model serialization/loading (for XGBoost MultiOutputReg
 # Hardware GPIO (optional - only needed when sim_gpio is false)
 pyserial>=3.5          # Serial communication for Arduino/microcontroller GPIO backend
                        # Required if using physical hardware buttons/LEDs instead of keyboard simulation
+gpiod>=2.0.0           # Linux GPIO support for LattePanda and other embedded boards
+                       # Required for physical button support on LattePanda Iota
 

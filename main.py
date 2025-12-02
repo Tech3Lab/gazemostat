@@ -28,11 +28,15 @@ MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
 CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
 CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
+GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
+GPIO_BUTTON_LINE = 0  # GPIO line for marker button (GP0)
+GPIO_BUTTON_DEBOUNCE = 0.2  # Button debounce time in seconds
 
 # Load config.yaml if it exists
 def load_config():
     global SIM_GPIO, SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD
+    global GPIO_CHIP, GPIO_BUTTON_LINE, GPIO_BUTTON_DEBOUNCE
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -51,6 +55,9 @@ def load_config():
                     FEATURE_WINDOW_MS = config.get('feature_window_ms', FEATURE_WINDOW_MS)
                     CALIB_OK_THRESHOLD = config.get('calibration_ok_threshold', CALIB_OK_THRESHOLD)
                     CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
+                    GPIO_CHIP = config.get('gpio_chip', GPIO_CHIP)
+                    GPIO_BUTTON_LINE = config.get('gpio_button_line', GPIO_BUTTON_LINE)
+                    GPIO_BUTTON_DEBOUNCE = config.get('gpio_button_debounce', GPIO_BUTTON_DEBOUNCE)
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -73,6 +80,12 @@ try:
 except ImportError:
     joblib = None
     print("Warning: joblib not installed. Model loading may fail.", file=sys.stderr)
+
+try:
+    import gpiod
+except ImportError:
+    gpiod = None
+    print("Warning: gpiod not installed. GPIO button support disabled.", file=sys.stderr)
 
 
 class GazeClient:
@@ -679,6 +692,72 @@ class Affine2D:
         return float(out[0]), float(out[1])
 
 
+class GPIOButtonMonitor:
+    """Monitor GPIO button on LattePanda Iota (GP0 + GND)"""
+    def __init__(self, gpio_chip="/dev/gpiochip0", gpio_line=0, callback=None):
+        self.gpio_chip = gpio_chip
+        self.gpio_line = gpio_line
+        self.callback = callback
+        self._thr = None
+        self._stop = threading.Event()
+        self._last_press_time = 0
+        self.debounce_time = 0.2  # 200ms debounce
+        
+    def start(self):
+        if gpiod is None:
+            print("Warning: gpiod not available, GPIO button disabled.", file=sys.stderr)
+            return
+        
+        if self._thr and self._thr.is_alive():
+            return
+        
+        self._stop.clear()
+        self._thr = threading.Thread(target=self._run, daemon=True)
+        self._thr.start()
+    
+    def stop(self):
+        self._stop.set()
+        if self._thr:
+            self._thr.join(timeout=1.0)
+    
+    def _run(self):
+        """Monitor GPIO button in background thread"""
+        try:
+            # Request GPIO line with pull-up (button pulls to GND when pressed)
+            chip = gpiod.Chip(self.gpio_chip)
+            line = chip.get_line(self.gpio_line)
+            
+            # Configure as input with pull-up
+            # When button is pressed (connected to GND), line will read 0
+            # When button is released, pull-up keeps it at 1
+            line.request(consumer="marker_button", type=gpiod.LINE_REQ_DIR_IN, flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
+            
+            print(f"GPIO button monitoring started on {self.gpio_chip} line {self.gpio_line}")
+            
+            last_state = 1  # Released (pull-up)
+            
+            while not self._stop.is_set():
+                # Read button state (0 = pressed, 1 = released)
+                current_state = line.get_value()
+                
+                # Detect falling edge (button press)
+                if last_state == 1 and current_state == 0:
+                    # Button pressed
+                    now = time.time()
+                    if now - self._last_press_time > self.debounce_time:
+                        self._last_press_time = now
+                        if self.callback:
+                            self.callback()
+                
+                last_state = current_state
+                time.sleep(0.01)  # Poll at 100Hz
+                
+        except Exception as e:
+            print(f"Warning: GPIO button monitor failed: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+
+
 def time_strings(t0):
     now = time.time()
     elapsed_ms = int((now - t0) * 1000)
@@ -728,6 +807,13 @@ def main():
     gp = GazeClient(simulate=SIM_GAZE)
     gp.start()
     
+    # Start GPIO button monitor for LattePanda Iota (if not in simulation mode)
+    gpio_monitor = None
+    if not SIM_GPIO and gpiod is not None:
+        gpio_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BUTTON_LINE, callback=gpio_button_callback)
+        gpio_monitor.debounce_time = GPIO_BUTTON_DEBOUNCE
+        gpio_monitor.start()
+    
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
         load_xgb_models()
@@ -766,6 +852,9 @@ def main():
     # Transient user feedback message
     info_msg = None
     info_msg_until = 0.0
+    
+    # Button press visual feedback
+    button_pressed_until = 0.0
 
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
@@ -906,7 +995,7 @@ def main():
         results_scroll = 0.0
 
     def marker_toggle():
-        nonlocal task_open, next_task_id
+        nonlocal task_open, next_task_id, button_pressed_until
         if session_t0 is None:
             return
         elapsed_ms, elapsed_str, wall_str = time_strings(session_t0)
@@ -918,6 +1007,8 @@ def main():
             task_open = False
             next_task_id += 1
         events.append((elapsed_ms, elapsed_str, wall_str, label))
+        # Show visual feedback for 200ms
+        button_pressed_until = time.time() + 0.2
 
     def set_info_msg(msg, dur=2.0):
         nonlocal info_msg, info_msg_until
@@ -954,6 +1045,13 @@ def main():
         info_msg_until = 0.0
         last_calib_gaze = None
         set_info_msg("App state reset", dur=2.0)
+    
+    def gpio_button_callback():
+        """Called when GPIO button is pressed"""
+        nonlocal button_pressed_until
+        if state == "COLLECTING":
+            marker_toggle()
+            print("DEBUG: GPIO button pressed - marker toggled")
 
     def draw_status_header():
         conn_x = 50  # moved 20px to the right
@@ -1113,6 +1211,36 @@ def main():
         for s in surfs:
             screen.blit(s, (8 + pad, y))
             y += s.get_height() + 2
+    
+    def draw_button_feedback():
+        """Draw visual feedback icon when GPIO button is pressed"""
+        now = time.time()
+        if now < button_pressed_until:
+            # Draw icon in bottom right corner
+            icon_size = 40
+            margin = 20
+            icon_x = WIDTH - icon_size - margin
+            icon_y = HEIGHT - icon_size - margin
+            
+            # Draw circular background
+            center_x = icon_x + icon_size // 2
+            center_y = icon_y + icon_size // 2
+            pygame.draw.circle(screen, (0, 200, 100), (center_x, center_y), icon_size // 2)
+            
+            # Draw checkmark symbol
+            # Checkmark points
+            check_points = [
+                (center_x - 8, center_y),
+                (center_x - 2, center_y + 8),
+                (center_x + 10, center_y - 10)
+            ]
+            pygame.draw.lines(screen, (255, 255, 255), False, check_points, 4)
+            
+            # Draw "B" label below icon
+            label = small.render("Button", True, (200, 200, 200))
+            label_x = center_x - label.get_width() // 2
+            label_y = icon_y + icon_size + 4
+            screen.blit(label, (label_x, label_y))
 
     while running:
         for ev in pygame.event.get():
@@ -1421,12 +1549,15 @@ def main():
                     surf = font.render(line, True, (230, 230, 230))
                     screen.blit(surf, (WIDTH // 2 - 120, y0 + i * line_h))
 
-        # Key overlay drawn last
+        # Button feedback and key overlay drawn last
+        draw_button_feedback()
         draw_key_overlay()
         pygame.display.flip()
         clock.tick(FPS)
 
     gp.stop()
+    if gpio_monitor:
+        gpio_monitor.stop()
     pygame.quit()
 
 
