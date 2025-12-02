@@ -245,36 +245,87 @@ class GazeClient:
                                     self._push_sample(t, 0.5, 0.5, 2.5, True)
                             
                             # Parse calibration result summary: <ACK ID="CALIBRATE_RESULT_SUMMARY" ... />
-                            elif b'CALIBRATE_RESULT_SUMMARY' in line:
+                            # Also check for any ACK messages related to calibration
+                            elif b'CALIBRATE' in line or (b'<ACK' in line and b'CALIBRATE' in line):
+                                # Debug: print raw message to see what we're receiving
+                                print(f"DEBUG: Received calibration-related message: {line_str}")
                                 try:
                                     def get_attr(msg, attr, default):
+                                        # Try with quotes first
                                         idx = msg.find(attr + '="')
-                                        if idx == -1:
-                                            return default
-                                        start = idx + len(attr) + 2
-                                        end = msg.find('"', start)
-                                        if end == -1:
-                                            return default
-                                        try:
-                                            return float(msg[start:end])
-                                        except:
-                                            try:
-                                                return int(msg[start:end])
-                                            except:
-                                                return msg[start:end]
+                                        if idx != -1:
+                                            start = idx + len(attr) + 2
+                                            end = msg.find('"', start)
+                                            if end != -1:
+                                                try:
+                                                    val_str = msg[start:end]
+                                                    if '.' in val_str:
+                                                        return float(val_str)
+                                                    else:
+                                                        return int(val_str)
+                                                except:
+                                                    return msg[start:end]
+                                        
+                                        # Try without quotes (space-separated)
+                                        idx = msg.find(attr + '=')
+                                        if idx != -1:
+                                            start = idx + len(attr) + 1
+                                            # Skip whitespace
+                                            while start < len(msg) and msg[start] in ' \t':
+                                                start += 1
+                                            end = start
+                                            while end < len(msg) and msg[end] not in ' \t/>"':
+                                                end += 1
+                                            if end > start:
+                                                try:
+                                                    val_str = msg[start:end].strip('"\'')
+                                                    if '.' in val_str:
+                                                        return float(val_str)
+                                                    else:
+                                                        return int(val_str)
+                                                except:
+                                                    pass
+                                        return default
                                     
+                                    # Try multiple possible attribute names (OpenGaze API v2 format)
                                     avg_error = get_attr(line_str, 'AVERAGE_ERROR', None)
-                                    num_points = get_attr(line_str, 'NUM_POINTS', None)
-                                    success = get_attr(line_str, 'SUCCESS', None)
+                                    if avg_error is None:
+                                        avg_error = get_attr(line_str, 'AVG_ERROR', None)
+                                    if avg_error is None:
+                                        avg_error = get_attr(line_str, 'ERROR', None)
                                     
-                                    with self.calib_result_lock:
-                                        self.calib_result = {
-                                            'average_error': avg_error,
-                                            'num_points': num_points,
-                                            'success': success
-                                        }
-                                except Exception:
-                                    pass
+                                    num_points = get_attr(line_str, 'NUM_POINTS', None)
+                                    if num_points is None:
+                                        num_points = get_attr(line_str, 'POINTS', None)
+                                    if num_points is None:
+                                        num_points = get_attr(line_str, 'NUM', None)
+                                    
+                                    success = get_attr(line_str, 'SUCCESS', None)
+                                    if success is None:
+                                        success = get_attr(line_str, 'OK', None)
+                                    if success is None:
+                                        # Check if there's a STATE attribute that might indicate success
+                                        state_val = get_attr(line_str, 'STATE', None)
+                                        if state_val is not None:
+                                            success = 1 if state_val > 0 else 0
+                                    
+                                    print(f"DEBUG: Parsed values - avg_error={avg_error}, num_points={num_points}, success={success}")
+                                    
+                                    # Only store result if we got at least one meaningful value
+                                    if avg_error is not None or num_points is not None or success is not None:
+                                        with self.calib_result_lock:
+                                            self.calib_result = {
+                                                'average_error': avg_error,
+                                                'num_points': num_points,
+                                                'success': success
+                                            }
+                                    else:
+                                        print(f"DEBUG: No valid values found in calibration message")
+                                except Exception as e:
+                                    import traceback
+                                    print(f"DEBUG: Error parsing calibration result: {e}")
+                                    print(f"DEBUG: Traceback: {traceback.format_exc()}")
+                                    print(f"DEBUG: Full message: {line_str}")
                     except socket.timeout:
                         continue
                     except Exception:
