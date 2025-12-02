@@ -235,20 +235,35 @@ class GazeClient:
                 with self._sock_lock:
                     self._sock = sock
                 
-                # Enable data streaming via XML protocol
-                # Use _send_command to wait for ACK
+                # Enable data streaming and specific data fields via XML protocol
                 enable_sent = False
                 with self._sock_lock:
                     if self._sock is not None:
                         try:
-                            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1" />\r\n'
-                            self._sock.sendall(enable_cmd)
+                            # Enable data streaming (Section 3.1)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_DATA" STATE="1" />\r\n')
+                            # Enable counter for tracking (Section 3.2)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_COUNTER" STATE="1" />\r\n')
+                            # Enable time stamp (Section 3.3)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_TIME" STATE="1" />\r\n')
+                            # Enable Best POG (average of left/right or best available) (Section 3.8)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_BEST" STATE="1" />\r\n')
+                            # Enable Fixation POG (Section 3.5)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_FIX" STATE="1" />\r\n')
+                            # Enable Left Eye POG (Section 3.6)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_LEFT" STATE="1" />\r\n')
+                            # Enable Right Eye POG (Section 3.7)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_POG_RIGHT" STATE="1" />\r\n')
+                            # Enable Left Eye Pupil data (Section 3.9)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_PUPIL_LEFT" STATE="1" />\r\n')
+                            # Enable Right Eye Pupil data (Section 3.10)
+                            self._sock.sendall(b'<SET ID="ENABLE_SEND_PUPIL_RIGHT" STATE="1" />\r\n')
                             enable_sent = True
                         except Exception:
                             pass
                 if enable_sent:
-                    # Wait a bit for ACK (it will be handled by ACK parser)
-                    time.sleep(0.2)
+                    # Wait a bit for ACK messages to be processed
+                    time.sleep(0.3)
                 
                 buf = b""
                 while not self._stop.is_set():
@@ -273,26 +288,44 @@ class GazeClient:
                             # Log REC messages to see if gaze data is flowing
                             if b'<REC' in line:
                                 self._rec_count += 1
-                                # Log first 3 REC messages with full raw content to see format
-                                if self._rec_count <= 3:
-                                    print(f"DEBUG: Raw REC message #{self._rec_count}: {line_str[:300]}")  # First 300 chars
+                                # Log first 5 REC messages with full raw content to see format
+                                if self._rec_count <= 5:
+                                    print(f"DEBUG: Raw REC message #{self._rec_count}: {line_str[:400]}")  # First 400 chars
                                 # Log every 60th message with parsed details
                                 elif self._rec_count % 60 == 0:
-                                    # Extract validity to see if eyes are being tracked
+                                    # Extract validity and coordinates to see which fields are available
                                     try:
-                                        # Try different possible validity attribute names
-                                        valid_val = get_attr(line_str, 'FPOGV', None)
-                                        if valid_val is None:
-                                            valid_val = get_attr(line_str, 'FPOGV', None)  # Try without quotes
-                                        if valid_val is None:
-                                            valid_val = get_attr(line_str, 'VALID', None)
-                                        gx = get_attr(line_str, 'FPOGX', None)
-                                        gy = get_attr(line_str, 'FPOGY', None)
-                                        if valid_val is not None:
+                                        # Try different POG field names in order of preference
+                                        gx = get_attr(line_str, 'BPOGX', None)
+                                        gy = get_attr(line_str, 'BPOGY', None)
+                                        valid_val = get_attr(line_str, 'BPOGV', None)
+                                        field_type = "BPOG"
+                                        
+                                        if gx is None:
+                                            gx = get_attr(line_str, 'FPOGX', None)
+                                            gy = get_attr(line_str, 'FPOGY', None)
+                                            valid_val = get_attr(line_str, 'FPOGV', None)
+                                            field_type = "FPOG"
+                                        
+                                        if gx is None:
+                                            gx = get_attr(line_str, 'LPOGX', None)
+                                            gy = get_attr(line_str, 'LPOGY', None)
+                                            valid_val = get_attr(line_str, 'LPOGV', None)
+                                            field_type = "LPOG"
+                                        
+                                        if gx is None:
+                                            gx = get_attr(line_str, 'RPOGX', None)
+                                            gy = get_attr(line_str, 'RPOGY', None)
+                                            valid_val = get_attr(line_str, 'RPOGV', None)
+                                            field_type = "RPOG"
+                                        
+                                        if gx is not None and valid_val is not None:
                                             valid_str = "VALID" if valid_val > 0.5 else "INVALID"
-                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {valid_str}, gx={gx:.3f}, gy={gy:.3f})")
+                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {field_type}, {valid_str}, gx={gx:.3f}, gy={gy:.3f})")
+                                        elif gx is not None:
+                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {field_type}, gx={gx:.3f}, gy={gy:.3f}, no validity)")
                                         else:
-                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, gx={gx}, gy={gy}, no validity found)")
+                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, no POG fields found)")
                                     except Exception as e:
                                         print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count}, parse error: {e})")
                             
@@ -478,26 +511,69 @@ class GazeClient:
                                     print(f"DEBUG: Traceback: {traceback.format_exc()}")
                                     print(f"DEBUG: Full message: {line_str}")
                             
-                            # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
+                            # Parse REC message: <REC ... BPOGX="..." BPOGY="..." ... />
+                            # Try multiple POG fields in order of preference (Section 5)
                             elif b'<REC' in line:
                                 self.receiving = True
                                 try:
-                                    # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
-                                    gx = get_attr(line_str, 'FPOGX', 0.5)
-                                    gy = get_attr(line_str, 'FPOGY', 0.5)
-                                    valid = get_attr(line_str, 'FPOGV', 1.0) > 0.5
-                                    pupil = get_attr(line_str, 'PUPILDIA', 2.5)
+                                    # Try Best POG first (Section 5.7 - average or best available)
+                                    gx = get_attr(line_str, 'BPOGX', None)
+                                    gy = get_attr(line_str, 'BPOGY', None)
+                                    valid = get_attr(line_str, 'BPOGV', None)
+                                    
+                                    # Fallback to Fixation POG (Section 5.4)
+                                    if gx is None:
+                                        gx = get_attr(line_str, 'FPOGX', None)
+                                        gy = get_attr(line_str, 'FPOGY', None)
+                                        valid = get_attr(line_str, 'FPOGV', None)
+                                    
+                                    # Fallback to Left Eye POG (Section 5.5)
+                                    if gx is None:
+                                        gx = get_attr(line_str, 'LPOGX', None)
+                                        gy = get_attr(line_str, 'LPOGY', None)
+                                        valid = get_attr(line_str, 'LPOGV', None)
+                                    
+                                    # Fallback to Right Eye POG (Section 5.6)
+                                    if gx is None:
+                                        gx = get_attr(line_str, 'RPOGX', None)
+                                        gy = get_attr(line_str, 'RPOGY', None)
+                                        valid = get_attr(line_str, 'RPOGV', None)
+                                    
+                                    # Default values if still None
+                                    if gx is None:
+                                        gx = 0.5
+                                        gy = 0.5
+                                        valid = 0
+                                    
+                                    # Convert validity to boolean
+                                    valid = valid > 0.5 if valid is not None else False
+                                    
+                                    # Extract pupil diameter (Sections 5.8 and 5.9)
+                                    # Try left eye pupil diameter
+                                    lpd = get_attr(line_str, 'LPD', None)
+                                    # Try right eye pupil diameter
+                                    rpd = get_attr(line_str, 'RPD', None)
+                                    
+                                    # Average both if available, otherwise use whichever is available
+                                    if lpd is not None and rpd is not None:
+                                        pupil = (lpd + rpd) / 2.0
+                                    elif lpd is not None:
+                                        pupil = lpd
+                                    elif rpd is not None:
+                                        pupil = rpd
+                                    else:
+                                        pupil = 2.5  # Default fallback
                                     
                                     # Normalize gaze coordinates (Gazepoint uses 0-1 range)
-                                    gx = max(0.0, min(1.0, gx))
-                                    gy = max(0.0, min(1.0, gy))
+                                    gx = max(0.0, min(1.0, float(gx)))
+                                    gy = max(0.0, min(1.0, float(gy)))
                                     
                                     t = time.time()
                                     self._push_sample(t, gx, gy, pupil, valid)
-                                except Exception:
-                                    # Fallback on parse error
+                                except Exception as e:
+                                    # Fallback on parse error - use center position with invalid flag
                                     t = time.time()
-                                    self._push_sample(t, 0.5, 0.5, 2.5, True)
+                                    self._push_sample(t, 0.5, 0.5, 2.5, False)
                             
                     except socket.timeout:
                         # Timeout is normal - continue reading
@@ -1217,7 +1293,35 @@ def main():
                     else:
                         msg = "Start calibration"
             txt = big.render(msg, True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            
+            # Show gaze preview after successful calibration
+            if calib_quality in ("ok", "low") and last_calib_gaze is not None:
+                # Draw preview square below the message
+                preview_y = HEIGHT // 2 + 40
+                sq = min(200, WIDTH - 40)
+                cx = WIDTH // 2
+                rect = pygame.Rect(cx - sq // 2, preview_y, sq, sq)
+                pygame.draw.rect(screen, (30, 30, 30), rect, border_radius=6)
+                
+                # Draw gaze position
+                gx, gy = last_calib_gaze
+                dx = rect.left + int(gx * rect.width)
+                dy = rect.top + int(gy * rect.height)
+                pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+                
+                # Draw crosshair in center for reference
+                pygame.draw.line(screen, (60, 60, 60), 
+                               (rect.centerx - 10, rect.centery), 
+                               (rect.centerx + 10, rect.centery), 1)
+                pygame.draw.line(screen, (60, 60, 60), 
+                               (rect.centerx, rect.centery - 10), 
+                               (rect.centerx, rect.centery + 10), 1)
+                
+                # Show message above preview
+                screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, preview_y - 60))
+            else:
+                # Show message in center when no preview
+                screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
         elif state == "CALIBRATING":
             # Only show calibration indicators, not the preview/list squares
             txt = big.render("Calibrating…", True, (255, 255, 255))
