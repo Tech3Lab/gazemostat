@@ -93,6 +93,8 @@ class GazeClient:
         self.calib_result_lock = threading.Lock()  # Thread-safe calibration result access
         self._ack_events = {}  # Dictionary to store ACK events by ID
         self._ack_lock = threading.Lock()  # Lock for ACK events
+        self._rec_count = 0  # Counter for REC messages
+        self._cal_count = 0  # Counter for CAL messages
 
     def start(self):
         if self._thr and self._thr.is_alive():
@@ -261,21 +263,21 @@ class GazeClient:
                             if b'<CAL' in line or b'<ACK' in line:
                                 print(f"DEBUG: Raw message: {line_str}")
                             
-                            # Log REC messages occasionally to see if gaze data is flowing
+                            # Log REC messages to see if gaze data is flowing
                             if b'<REC' in line:
-                                # Only log occasionally to avoid spam (every 60th message, ~1 per second at 60Hz)
-                                if not hasattr(self, '_rec_count'):
-                                    self._rec_count = 0
                                 self._rec_count += 1
-                                if self._rec_count % 60 == 0:
+                                # Log first 5 REC messages, then every 60th to avoid spam
+                                if self._rec_count <= 5 or self._rec_count % 60 == 0:
                                     # Extract validity to see if eyes are being tracked
                                     try:
                                         valid_start = line_str.find('FPOGV="')
                                         if valid_start != -1:
                                             valid_val = line_str[valid_start+7:valid_start+8]
                                             print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, valid={valid_val})")
-                                    except:
-                                        print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count})")
+                                        else:
+                                            print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count})")
+                                    except Exception as e:
+                                        print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count}, parse error: {e})")
                             
                             # Log any other XML messages we might be missing
                             if line_str.strip().startswith('<') and b'<CAL' not in line and b'<ACK' not in line and b'<REC' not in line:
@@ -340,6 +342,8 @@ class GazeClient:
                             # Parse CAL messages: <CAL ID="CALIB_START_PT" ... />, <CAL ID="CALIB_RESULT_PT" ... />, <CAL ID="CALIB_RESULT" ... />
                             elif b'<CAL' in line:
                                 try:
+                                    self._cal_count += 1
+                                    print(f"DEBUG: CAL message #{self._cal_count}: {line_str}")
                                     # Extract CAL ID (handle possible leading/trailing spaces)
                                     cal_id_start = line_str.find('ID="')
                                     if cal_id_start != -1:
