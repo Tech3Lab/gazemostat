@@ -996,24 +996,55 @@ def main():
         sq = min(WIDTH - 20, (HEIGHT - top_y - 40 - spacing) // 2)
         sq = max(120, sq)
         cx = WIDTH // 2
-        # Top square: preview
+        
+        # Top square: preview with label
+        preview_label = small.render("Gaze Preview", True, (180, 180, 180))
+        screen.blit(preview_label, (cx - preview_label.get_width() // 2, top_y - 20))
+        
         rect = pygame.Rect(cx - sq // 2, top_y, sq, sq)
         pygame.draw.rect(screen, (30, 30, 30), rect, border_radius=6)
+        pygame.draw.rect(screen, (60, 60, 60), rect, 2, border_radius=6)  # Border
+        
         if last_calib_gaze is not None:
             gx, gy = last_calib_gaze
             dx = rect.left + int(gx * rect.width)
             dy = rect.top + int(gy * rect.height)
-            pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 5)
-        # Bottom square: marker list
+            pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+            # Draw a small trail effect
+            pygame.draw.circle(screen, (0, 150, 200), (dx, dy), 8, 1)
+        
+        # Draw crosshair in center for reference
+        pygame.draw.line(screen, (60, 60, 60), 
+                       (rect.centerx - 10, rect.centery), 
+                       (rect.centerx + 10, rect.centery), 1)
+        pygame.draw.line(screen, (60, 60, 60), 
+                       (rect.centerx, rect.centery - 10), 
+                       (rect.centerx, rect.centery + 10), 1)
+        
+        # Bottom square: marker list with label
+        markers_label = small.render("Event Markers", True, (180, 180, 180))
+        screen.blit(markers_label, (cx - markers_label.get_width() // 2, rect.bottom + spacing - 20))
+        
         list_rect = pygame.Rect(cx - sq // 2, rect.bottom + spacing, sq, sq)
         pygame.draw.rect(screen, (20, 20, 20), list_rect, border_radius=6)
+        pygame.draw.rect(screen, (60, 60, 60), list_rect, 2, border_radius=6)  # Border
+        
+        # Draw markers
         y = list_rect.top + 8
-        for i in range(max(0, len(events) - 14), len(events)):
-            _, elapsed_str, wall_str, label = events[i]
-            line = f"{elapsed_str} : {label}"
-            surf = font.render(line, True, (230, 230, 230))
-            screen.blit(surf, (list_rect.left + 8, y))
-            y += surf.get_height() + 2
+        if len(events) == 0:
+            # Show placeholder text when no events
+            placeholder = small.render("No markers yet", True, (120, 120, 120))
+            screen.blit(placeholder, (list_rect.centerx - placeholder.get_width() // 2, 
+                                     list_rect.centery - placeholder.get_height() // 2))
+        else:
+            for i in range(max(0, len(events) - 14), len(events)):
+                if y + font.get_height() > list_rect.bottom - 8:
+                    break  # Stop if we run out of space
+                _, elapsed_str, wall_str, label = events[i]
+                line = f"{elapsed_str} : {label}"
+                surf = font.render(line, True, (230, 230, 230))
+                screen.blit(surf, (list_rect.left + 8, y))
+                y += surf.get_height() + 2
 
     last_calib_gaze = None
     key_log = []  # list of (time, label)
