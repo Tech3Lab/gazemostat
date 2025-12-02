@@ -148,11 +148,13 @@ class GazeClient:
 
     def calibrate_timeout(self, timeout_ms=1000):
         """Set the duration of each calibration point in milliseconds"""
-        return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" STATE="{timeout_ms}"/>')
+        # Try without STATE attribute - some versions use direct value
+        return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" VALUE="{timeout_ms}"/>')
 
     def calibrate_delay(self, delay_ms=200):
         """Set the duration of the animation before calibration at each point begins (milliseconds)"""
-        return self._send_command(f'<SET ID="CALIBRATE_DELAY" STATE="{delay_ms}"/>')
+        # Try without STATE attribute - some versions use direct value
+        return self._send_command(f'<SET ID="CALIBRATE_DELAY" VALUE="{delay_ms}"/>')
 
     def calibrate_result_summary(self):
         """Request calibration result summary"""
@@ -245,10 +247,10 @@ class GazeClient:
                                     self._push_sample(t, 0.5, 0.5, 2.5, True)
                             
                             # Parse calibration result summary: <ACK ID="CALIBRATE_RESULT_SUMMARY" ... />
-                            # Also check for any ACK messages related to calibration
-                            elif b'CALIBRATE' in line or (b'<ACK' in line and b'CALIBRATE' in line):
+                            # Only process CALIBRATE_RESULT_SUMMARY messages, not other calibration ACKs
+                            elif b'CALIBRATE_RESULT_SUMMARY' in line:
                                 # Debug: print raw message to see what we're receiving
-                                print(f"DEBUG: Received calibration-related message: {line_str}")
+                                print(f"DEBUG: Received calibration result summary: {line_str}")
                                 try:
                                     def get_attr(msg, attr, default):
                                         # Try with quotes first
@@ -311,16 +313,17 @@ class GazeClient:
                                     
                                     print(f"DEBUG: Parsed values - avg_error={avg_error}, num_points={num_points}, success={success}")
                                     
-                                    # Only store result if we got at least one meaningful value
-                                    if avg_error is not None or num_points is not None or success is not None:
+                                    # Only store result if this is actually a result summary with meaningful data
+                                    # Don't store ACK messages from other calibration commands (they have success=1 but no actual data)
+                                    if avg_error is not None or (num_points is not None and num_points > 0):
                                         with self.calib_result_lock:
                                             self.calib_result = {
                                                 'average_error': avg_error,
-                                                'num_points': num_points,
-                                                'success': success
+                                                'num_points': num_points if num_points is not None else 0,
+                                                'success': success if success is not None else (1 if num_points and num_points >= 4 else 0)
                                             }
                                     else:
-                                        print(f"DEBUG: No valid values found in calibration message")
+                                        print(f"DEBUG: No valid calibration result data found (ignoring ACK message)")
                                 except Exception as e:
                                     import traceback
                                     print(f"DEBUG: Error parsing calibration result: {e}")
@@ -864,8 +867,14 @@ def main():
                     else:
                         # Evaluate calibration quality based on result
                         avg_error = calib_result.get('average_error')
-                        num_points = calib_result.get('num_points', 0)
-                        success = calib_result.get('success', 0)
+                        num_points = calib_result.get('num_points')
+                        success = calib_result.get('success')
+                        
+                        # Handle None values to prevent TypeError
+                        if num_points is None:
+                            num_points = 0
+                        if success is None:
+                            success = 0
                         
                         # Debug: print calibration result for troubleshooting
                         print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error}")
