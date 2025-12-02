@@ -1235,8 +1235,12 @@ def main():
                     # Hide calibration window
                     gp.calibrate_show(False)
                     # Re-enable data fields after calibration (some devices may reset them)
-                    print("DEBUG: Re-enabling gaze data fields after calibration...")
-                    gp._enable_gaze_data_fields()
+                    # Run in background thread to avoid blocking UI
+                    def _reenable_fields():
+                        time.sleep(0.2)  # Small delay before re-enabling
+                        print("DEBUG: Re-enabling gaze data fields after calibration...")
+                        gp._enable_gaze_data_fields()
+                    threading.Thread(target=_reenable_fields, daemon=True).start()
                     # Reset override for next time
                     current_calib_override = None
                     state = "READY"
