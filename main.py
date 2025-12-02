@@ -786,7 +786,6 @@ def main():
 
         # Calibration sequencing
         if state == "CALIBRATING":
-            nonlocal calib_avg_error
             if not SIM_GAZE:
                 # Use OpenGaze API v2 calibration
                 # Check for calibration result from Gazepoint
