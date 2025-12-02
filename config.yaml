@@ -73,6 +73,23 @@ gp_host: 127.0.0.1
 #   Default: 4242
 gp_port: 4242
 
+# calibration_ok_threshold: Maximum average error for OK calibration quality
+#   - Calibration average error threshold in degrees (or units used by Gazepoint)
+#   - If average_error < this value, calibration is considered "OK" (green status)
+#   - Lower values mean stricter quality requirements
+#   - Only used when sim_gaze is false (OpenGaze API v2 calibration)
+#   Default: 1.0
+calibration_ok_threshold: 1.0
+
+# calibration_low_threshold: Maximum average error for low quality calibration
+#   - Calibration average error threshold in degrees (or units used by Gazepoint)
+#   - If average_error >= calibration_ok_threshold but < this value, calibration
+#     is considered "low quality" (orange status)
+#   - If average_error >= this value, calibration is considered "failed" (red status)
+#   - Only used when sim_gaze is false (OpenGaze API v2 calibration)
+#   Default: 2.0
+calibration_low_threshold: 2.0
+
 # ----------------------------------------------------------------------------
 # Hardware GPIO Settings
 # ----------------------------------------------------------------------------

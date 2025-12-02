@@ -26,10 +26,13 @@ FPS = 30
 GP_HOST, GP_PORT = "127.0.0.1", 4242
 MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
+CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
+CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
 
 # Load config.yaml if it exists
 def load_config():
     global SIM_GPIO, SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
+    global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -46,6 +49,8 @@ def load_config():
                     GP_PORT = config.get('gp_port', GP_PORT)
                     MODEL_PATH = config.get('model_path', MODEL_PATH)
                     FEATURE_WINDOW_MS = config.get('feature_window_ms', FEATURE_WINDOW_MS)
+                    CALIB_OK_THRESHOLD = config.get('calibration_ok_threshold', CALIB_OK_THRESHOLD)
+                    CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -82,6 +87,10 @@ class GazeClient:
         self._sim_connected = False
         self._sim_stream = False
         self._t0 = time.time()
+        self._sock = None  # Socket reference for sending commands
+        self._sock_lock = threading.Lock()  # Thread-safe socket access
+        self.calib_result = None  # Store calibration result summary
+        self.calib_result_lock = threading.Lock()  # Thread-safe calibration result access
 
     def start(self):
         if self._thr and self._thr.is_alive():
@@ -110,6 +119,50 @@ class GazeClient:
         if self._sim_connected:
             self._sim_stream = not self._sim_stream
 
+    # OpenGaze API v2 Calibration Commands
+    def _send_command(self, cmd):
+        """Send a command to Gazepoint (thread-safe)"""
+        if self.simulate:
+            return False  # Commands not supported in simulation mode
+        with self._sock_lock:
+            if self._sock is None:
+                return False
+            try:
+                self._sock.sendall(cmd.encode('utf-8') + b'\r\n')
+                return True
+            except Exception:
+                return False
+
+    def calibrate_show(self, show=True):
+        """Show or hide the calibration graphical window"""
+        state = "1" if show else "0"
+        return self._send_command(f'<SET ID="CALIBRATE_SHOW" STATE="{state}"/>')
+
+    def calibrate_clear(self):
+        """Clear the internal list of calibration points"""
+        return self._send_command('<SET ID="CALIBRATE_CLEAR" STATE="1"/>')
+
+    def calibrate_reset(self):
+        """Reset the internal list of calibration points to default values"""
+        return self._send_command('<SET ID="CALIBRATE_RESET" STATE="1"/>')
+
+    def calibrate_timeout(self, timeout_ms=1000):
+        """Set the duration of each calibration point in milliseconds"""
+        return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" STATE="{timeout_ms}"/>')
+
+    def calibrate_delay(self, delay_ms=200):
+        """Set the duration of the animation before calibration at each point begins (milliseconds)"""
+        return self._send_command(f'<SET ID="CALIBRATE_DELAY" STATE="{delay_ms}"/>')
+
+    def calibrate_result_summary(self):
+        """Request calibration result summary"""
+        return self._send_command('<GET ID="CALIBRATE_RESULT_SUMMARY" />')
+
+    def get_calibration_result(self):
+        """Get the latest calibration result summary"""
+        with self.calib_result_lock:
+            return self.calib_result
+
     # Real client with XML protocol parsing
     def _run_real(self):
         self.receiving = False
@@ -125,6 +178,10 @@ class GazeClient:
                 sock.connect((self.host, self.port))
                 sock.settimeout(0.1)
                 self.connected = True
+                
+                # Store socket reference for sending commands
+                with self._sock_lock:
+                    self._sock = sock
                 
                 # Enable data streaming via XML protocol
                 enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
@@ -145,12 +202,13 @@ class GazeClient:
                             if not line:
                                 continue
                             
+                            line_str = line.decode('utf-8', errors='ignore')
+                            
                             # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
                             if b'<REC' in line:
                                 self.receiving = True
                                 try:
                                     # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
-                                    line_str = line.decode('utf-8', errors='ignore')
                                     
                                     # Simple attribute extraction
                                     def get_attr(msg, attr, default):
@@ -181,6 +239,38 @@ class GazeClient:
                                     # Fallback on parse error
                                     t = time.time()
                                     self._push_sample(t, 0.5, 0.5, 2.5, True)
+                            
+                            # Parse calibration result summary: <ACK ID="CALIBRATE_RESULT_SUMMARY" ... />
+                            elif b'CALIBRATE_RESULT_SUMMARY' in line:
+                                try:
+                                    def get_attr(msg, attr, default):
+                                        idx = msg.find(attr + '="')
+                                        if idx == -1:
+                                            return default
+                                        start = idx + len(attr) + 2
+                                        end = msg.find('"', start)
+                                        if end == -1:
+                                            return default
+                                        try:
+                                            return float(msg[start:end])
+                                        except:
+                                            try:
+                                                return int(msg[start:end])
+                                            except:
+                                                return msg[start:end]
+                                    
+                                    avg_error = get_attr(line_str, 'AVERAGE_ERROR', None)
+                                    num_points = get_attr(line_str, 'NUM_POINTS', None)
+                                    success = get_attr(line_str, 'SUCCESS', None)
+                                    
+                                    with self.calib_result_lock:
+                                        self.calib_result = {
+                                            'average_error': avg_error,
+                                            'num_points': num_points,
+                                            'success': success
+                                        }
+                                except Exception:
+                                    pass
                     except socket.timeout:
                         continue
                     except Exception:
@@ -190,6 +280,8 @@ class GazeClient:
                 self.connected = False
                 self.receiving = False
             finally:
+                with self._sock_lock:
+                    self._sock = None
                 if sock:
                     try:
                         sock.close()
@@ -332,6 +424,7 @@ def main():
     calib_step_start = 0.0
     CALIB_DWELL = 0.9
     calib_quality = "none"  # none|ok|low|failed
+    calib_avg_error = None  # Average error value for display (when ok or low)
     current_calib_override = None  # None|'failed'|'low'
 
     # Collection
@@ -362,12 +455,35 @@ def main():
         calib_quality = "none"
         # Record override result for this calibration session (dev simulation)
         current_calib_override = override
-        # Clear previous calibration transform/state
-        aff = Affine2D()
-        calib_points = []
-        target_points = []
-        calib_step = 0
-        calib_step_start = time.time()
+        
+        # Use OpenGaze API v2 calibration if not in simulation mode
+        if not SIM_GAZE:
+            # Clear previous calibration
+            gp.calibrate_clear()
+            time.sleep(0.1)
+            # Reset calibration points
+            gp.calibrate_reset()
+            time.sleep(0.1)
+            # Set calibration timeout (1000ms per point)
+            gp.calibrate_timeout(1000)
+            time.sleep(0.1)
+            # Set calibration delay (200ms animation delay)
+            gp.calibrate_delay(200)
+            time.sleep(0.1)
+            # Show calibration window
+            gp.calibrate_show(True)
+            time.sleep(0.1)
+            # Clear calibration result
+            with gp.calib_result_lock:
+                gp.calib_result = None
+        else:
+            # Fallback to client-side calibration in simulation mode
+            # Clear previous calibration transform/state
+            aff = Affine2D()
+            calib_points = []
+            target_points = []
+            calib_step = 0
+            calib_step_start = time.time()
 
     def start_collection():
         nonlocal state, session_t0, next_task_id, task_open, events, gaze_samples
@@ -452,7 +568,7 @@ def main():
 
     def reset_app_state():
         nonlocal state, calib_status, receiving_hint, aff, calib_points, target_points
-        nonlocal calib_step, calib_step_start, calib_quality, current_calib_override
+        nonlocal calib_step, calib_step_start, calib_quality, calib_avg_error, current_calib_override
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze
@@ -465,6 +581,7 @@ def main():
         calib_step = -1
         calib_step_start = 0.0
         calib_quality = "none"
+        calib_avg_error = None
         current_calib_override = None
         session_t0 = None
         next_task_id = 1
@@ -507,6 +624,11 @@ def main():
         screen.blit(lbl_conn, (conn_x - lbl_conn.get_width() // 2, 30 + 16))
         lbl_cal = small.render("Calibration", True, (200, 200, 200))
         screen.blit(lbl_cal, (cal_x - lbl_cal.get_width() // 2, 30 + 16))
+        # Display calibration quality value if ok or low
+        if calib_quality in ("ok", "low") and calib_avg_error is not None:
+            error_str = f"{calib_avg_error:.2f}"
+            lbl_error = small.render(error_str, True, (180, 180, 180))
+            screen.blit(lbl_error, (cal_x - lbl_error.get_width() // 2, 30 + 16 + lbl_cal.get_height() + 2))
 
     def draw_preview_and_markers():
         # Stacked vertical squares: top preview, bottom marker list
@@ -664,54 +786,110 @@ def main():
 
         # Calibration sequencing
         if state == "CALIBRATING":
-            if calib_step == 0:
-                target = (0.1, 0.1)
-            elif calib_step == 1:
-                target = (0.9, 0.1)
-            elif calib_step == 2:
-                target = (0.9, 0.9)
-            elif calib_step == 3:
-                target = (0.1, 0.9)
-            else:
-                target = None
-
-            # collect samples during dwell
-            if target is not None:
-                tnow = time.time()
-                if tnow - calib_step_start < CALIB_DWELL:
-                    if last_calib_gaze is not None:
-                        calib_points.append(last_calib_gaze)
-                        target_points.append(target)
-                else:
-                    calib_step += 1
-                    calib_step_start = tnow
-            else:
-                # Finalize calibration outcome
-                if current_calib_override == "failed":
-                    calib_status = "red"
-                    calib_quality = "failed"
-                    set_info_msg("Calibration failed, try again", dur=3.0)
-                elif current_calib_override == "low":
-                    # Simulate a successful but low-quality calibration regardless of sample count
-                    calib_status = "orange"
-                    calib_quality = "low"
-                else:
-                    if len(calib_points) >= 4:
-                        # Fit simple affine raw->screen
-                        aff.fit(calib_points[:4], target_points[:4])
-                        calib_status = "green"
-                        calib_quality = "ok"
-                    elif SIM_GAZE:
-                        # In development, succeed even without enough samples
-                        calib_status = "green"
-                        calib_quality = "ok"
+            nonlocal calib_avg_error
+            if not SIM_GAZE:
+                # Use OpenGaze API v2 calibration
+                # Check for calibration result from Gazepoint
+                calib_result = gp.get_calibration_result()
+                if calib_result is not None:
+                    # Calibration completed, process result
+                    if current_calib_override == "failed":
+                        calib_status = "red"
+                        calib_quality = "failed"
+                        calib_avg_error = None
+                        set_info_msg("Calibration failed, try again", dur=3.0)
+                    elif current_calib_override == "low":
+                        calib_status = "orange"
+                        calib_quality = "low"
+                        # Use a simulated error value for override
+                        calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
+                        set_info_msg("Ready, low quality calibration", dur=2.0)
                     else:
+                        # Evaluate calibration quality based on result
+                        avg_error = calib_result.get('average_error')
+                        num_points = calib_result.get('num_points', 0)
+                        success = calib_result.get('success', 0)
+                        
+                        if success and num_points >= 4:
+                            if avg_error is not None and avg_error < CALIB_OK_THRESHOLD:
+                                calib_status = "green"
+                                calib_quality = "ok"
+                                calib_avg_error = avg_error
+                                set_info_msg("Calibration complete", dur=2.0)
+                            elif avg_error is not None and avg_error < CALIB_LOW_THRESHOLD:
+                                calib_status = "orange"
+                                calib_quality = "low"
+                                calib_avg_error = avg_error
+                                set_info_msg("Ready, low quality calibration", dur=2.0)
+                            else:
+                                calib_status = "red"
+                                calib_quality = "failed"
+                                calib_avg_error = None
+                                set_info_msg("Calibration failed, try again", dur=3.0)
+                        else:
+                            calib_status = "red"
+                            calib_quality = "failed"
+                            calib_avg_error = None
+                            set_info_msg("Calibration failed, try again", dur=3.0)
+                    
+                    # Hide calibration window
+                    gp.calibrate_show(False)
+                    # Reset override for next time
+                    current_calib_override = None
+                    state = "READY"
+                else:
+                    # Still calibrating, wait for result
+                    # Optionally request result summary periodically
+                    tnow = time.time()
+                    if tnow - calib_step_start > 0.5:  # Request every 500ms
+                        gp.calibrate_result_summary()
+                        calib_step_start = tnow
+            else:
+                # Client-side calibration for simulation mode
+                if calib_step == 0:
+                    target = (0.1, 0.1)
+                elif calib_step == 1:
+                    target = (0.9, 0.1)
+                elif calib_step == 2:
+                    target = (0.9, 0.9)
+                elif calib_step == 3:
+                    target = (0.1, 0.9)
+                else:
+                    target = None
+
+                # collect samples during dwell
+                if target is not None:
+                    tnow = time.time()
+                    if tnow - calib_step_start < CALIB_DWELL:
+                        if last_calib_gaze is not None:
+                            calib_points.append(last_calib_gaze)
+                            target_points.append(target)
+                    else:
+                        calib_step += 1
+                        calib_step_start = tnow
+                else:
+                    # Finalize calibration outcome
+                    if current_calib_override == "failed":
                         calib_status = "red"
                         calib_quality = "failed"
                         set_info_msg("Calibration failed, try again", dur=3.0)
-                # Reset override for next time
-                current_calib_override = None
-                state = "READY"
+                    elif current_calib_override == "low":
+                        # Simulate a successful but low-quality calibration regardless of sample count
+                        calib_status = "orange"
+                        calib_quality = "low"
+                    else:
+                        if len(calib_points) >= 4:
+                            # Fit simple affine raw->screen
+                            aff.fit(calib_points[:4], target_points[:4])
+                            calib_status = "green"
+                            calib_quality = "ok"
+                        else:
+                            # In development, succeed even without enough samples
+                            calib_status = "green"
+                            calib_quality = "ok"
+                    # Reset override for next time
+                    current_calib_override = None
+                    state = "READY"
 
         # Draw
         screen.fill((0, 0, 0))
