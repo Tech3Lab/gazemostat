@@ -875,60 +875,60 @@ def main():
                             gp.calib_result = None
                     else:
                         # Calibration completed (either with points or after sufficient time), process result
-                    if current_calib_override == "failed":
-                        calib_status = "red"
-                        calib_quality = "failed"
-                        calib_avg_error = None
-                        set_info_msg("Calibration failed, try again", dur=3.0)
-                    elif current_calib_override == "low":
-                        calib_status = "orange"
-                        calib_quality = "low"
-                        # Use a simulated error value for override
-                        calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
-                        set_info_msg("Ready, low quality calibration", dur=2.0)
-                    else:
-                        # Evaluate calibration quality based on result
-                        avg_error = calib_result.get('average_error')
-                        num_points = calib_result.get('num_points')
-                        success = calib_result.get('success')
-                        
-                        # Handle None values to prevent TypeError
-                        if num_points is None:
-                            num_points = 0
-                        if success is None:
-                            success = 0
-                        
-                        # Debug: print calibration result for troubleshooting
-                        print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error}")
-                        
-                        if success and num_points >= 4:
-                            if avg_error is not None and avg_error < CALIB_OK_THRESHOLD:
-                                calib_status = "green"
-                                calib_quality = "ok"
-                                calib_avg_error = avg_error
-                                set_info_msg("Calibration complete", dur=2.0)
-                            elif avg_error is not None and avg_error < CALIB_LOW_THRESHOLD:
-                                calib_status = "orange"
-                                calib_quality = "low"
-                                calib_avg_error = avg_error
-                                set_info_msg("Ready, low quality calibration", dur=2.0)
+                        if current_calib_override == "failed":
+                            calib_status = "red"
+                            calib_quality = "failed"
+                            calib_avg_error = None
+                            set_info_msg("Calibration failed, try again", dur=3.0)
+                        elif current_calib_override == "low":
+                            calib_status = "orange"
+                            calib_quality = "low"
+                            # Use a simulated error value for override
+                            calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
+                            set_info_msg("Ready, low quality calibration", dur=2.0)
+                        else:
+                            # Evaluate calibration quality based on result
+                            avg_error = calib_result.get('average_error')
+                            num_points = calib_result.get('num_points')
+                            success = calib_result.get('success')
+                            
+                            # Handle None values to prevent TypeError
+                            if num_points is None:
+                                num_points = 0
+                            if success is None:
+                                success = 0
+                            
+                            # Debug: print calibration result for troubleshooting
+                            print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error}")
+                            
+                            if success and num_points >= 4:
+                                if avg_error is not None and avg_error < CALIB_OK_THRESHOLD:
+                                    calib_status = "green"
+                                    calib_quality = "ok"
+                                    calib_avg_error = avg_error
+                                    set_info_msg("Calibration complete", dur=2.0)
+                                elif avg_error is not None and avg_error < CALIB_LOW_THRESHOLD:
+                                    calib_status = "orange"
+                                    calib_quality = "low"
+                                    calib_avg_error = avg_error
+                                    set_info_msg("Ready, low quality calibration", dur=2.0)
+                                else:
+                                    calib_status = "red"
+                                    calib_quality = "failed"
+                                    calib_avg_error = None
+                                    set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
                             else:
                                 calib_status = "red"
                                 calib_quality = "failed"
                                 calib_avg_error = None
-                                set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
-                        else:
-                            calib_status = "red"
-                            calib_quality = "failed"
-                            calib_avg_error = None
-                            fail_reason = f"success={success}, points={num_points}"
-                            set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
-                    
-                    # Hide calibration window
-                    gp.calibrate_show(False)
-                    # Reset override for next time
-                    current_calib_override = None
-                    state = "READY"
+                                fail_reason = f"success={success}, points={num_points}"
+                                set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
+                        
+                        # Hide calibration window
+                        gp.calibrate_show(False)
+                        # Reset override for next time
+                        current_calib_override = None
+                        state = "READY"
                 else:
                     # Still calibrating, wait for result
                     # Don't check for results too early - wait at least 10 seconds for user to complete calibration
