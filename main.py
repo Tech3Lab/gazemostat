@@ -266,18 +266,26 @@ class GazeClient:
                             # Log REC messages to see if gaze data is flowing
                             if b'<REC' in line:
                                 self._rec_count += 1
-                                # Log first 10 REC messages with full details, then every 60th to avoid spam
-                                if self._rec_count <= 10 or self._rec_count % 60 == 0:
+                                # Log first 3 REC messages with full raw content to see format
+                                if self._rec_count <= 3:
+                                    print(f"DEBUG: Raw REC message #{self._rec_count}: {line_str[:300]}")  # First 300 chars
+                                # Log every 60th message with parsed details
+                                elif self._rec_count % 60 == 0:
                                     # Extract validity to see if eyes are being tracked
                                     try:
+                                        # Try different possible validity attribute names
                                         valid_val = get_attr(line_str, 'FPOGV', None)
+                                        if valid_val is None:
+                                            valid_val = get_attr(line_str, 'FPOGV', None)  # Try without quotes
+                                        if valid_val is None:
+                                            valid_val = get_attr(line_str, 'VALID', None)
                                         gx = get_attr(line_str, 'FPOGX', None)
                                         gy = get_attr(line_str, 'FPOGY', None)
                                         if valid_val is not None:
                                             valid_str = "VALID" if valid_val > 0.5 else "INVALID"
                                             print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {valid_str}, gx={gx:.3f}, gy={gy:.3f})")
                                         else:
-                                            print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count}, no FPOGV found)")
+                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, gx={gx}, gy={gy}, no validity found)")
                                     except Exception as e:
                                         print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count}, parse error: {e})")
                             
