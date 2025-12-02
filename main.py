@@ -227,9 +227,19 @@ class GazeClient:
                     self._sock = sock
                 
                 # Enable data streaming via XML protocol
-                enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
-                sock.sendall(enable_cmd)
-                time.sleep(0.1)
+                # Use _send_command to wait for ACK
+                enable_sent = False
+                with self._sock_lock:
+                    if self._sock is not None:
+                        try:
+                            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
+                            self._sock.sendall(enable_cmd)
+                            enable_sent = True
+                        except Exception:
+                            pass
+                if enable_sent:
+                    # Wait a bit for ACK (it will be handled by ACK parser)
+                    time.sleep(0.2)
                 
                 buf = b""
                 while not self._stop.is_set():
@@ -247,10 +257,11 @@ class GazeClient:
                             
                             line_str = line.decode('utf-8', errors='ignore')
                             
-                            # Debug: log all messages to see what we're receiving
+                            # Debug: log all CAL and ACK messages
                             if b'<CAL' in line or b'<ACK' in line:
                                 print(f"DEBUG: Raw message: {line_str}")
-                            # Also log REC messages occasionally to see if gaze data is flowing
+                            
+                            # Log REC messages occasionally to see if gaze data is flowing
                             if b'<REC' in line:
                                 # Only log occasionally to avoid spam (every 60th message, ~1 per second at 60Hz)
                                 if not hasattr(self, '_rec_count'):
@@ -265,6 +276,10 @@ class GazeClient:
                                             print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, valid={valid_val})")
                                     except:
                                         print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count})")
+                            
+                            # Log any other XML messages we might be missing
+                            if line_str.strip().startswith('<') and b'<CAL' not in line and b'<ACK' not in line and b'<REC' not in line:
+                                print(f"DEBUG: Other XML message: {line_str[:200]}")  # Limit length to avoid spam
                             
                             # Helper function to extract XML attributes
                             def get_attr(msg, attr, default):
@@ -627,6 +642,11 @@ def main():
         
         # Use OpenGaze API v2 calibration if not in simulation mode
         if not SIM_GAZE:
+            # Ensure gaze data streaming is enabled (required for calibration)
+            # This should already be enabled on connection, but verify
+            gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1"/>')
+            time.sleep(0.1)
+            
             # Clear previous calibration
             gp.calibrate_clear()
             time.sleep(0.1)
@@ -654,6 +674,7 @@ def main():
             if gp.calibrate_start():
                 print("DEBUG: Calibration started, waiting for ACK...")
                 calib_step_start = time.time()  # Record when calibration actually started
+                print("DEBUG: Waiting for CALIB_RESULT_PT and subsequent calibration points...")
             else:
                 print("DEBUG: Failed to send CALIBRATE_START command")
                 set_info_msg("Failed to start calibration", dur=2.0)
