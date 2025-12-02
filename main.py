@@ -1063,8 +1063,18 @@ def main():
                     # Still calibrating, wait for CALIB_RESULT message
                     # The server will send CALIB_START_PT and CALIB_RESULT_PT messages for each point
                     # and finally CALIB_RESULT when calibration completes
-                    # Check if calibration has been running for too long (timeout after 60 seconds)
                     elapsed = time.time() - calib_step_start
+                    
+                    # If calibration has been running for more than 15 seconds, periodically request result summary
+                    # This is a workaround in case the server isn't sending CAL messages properly
+                    if elapsed > 15.0:
+                        last_check = getattr(start_calibration, '_last_result_check', 0)
+                        if elapsed - last_check >= 3.0:  # Check every 3 seconds
+                            print(f"DEBUG: Calibration running for {elapsed:.1f}s, requesting result summary...")
+                            gp.calibrate_result_summary()
+                            start_calibration._last_result_check = elapsed
+                    
+                    # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
                         print(f"DEBUG: Calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
                         set_info_msg("Calibration timeout - please try again", dur=3.0)
