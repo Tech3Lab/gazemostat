@@ -114,83 +114,93 @@ class GazeClient:
     def _run_real(self):
         self.receiving = False
         self.connected = False
-        sock = None
-        try:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            sock.settimeout(1.0)
-            sock.connect((self.host, self.port))
-            sock.settimeout(0.1)
-            self.connected = True
-            
-            # Enable data streaming via XML protocol
-            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
-            sock.sendall(enable_cmd)
-            time.sleep(0.1)
-            
-            buf = b""
-            while not self._stop.is_set():
-                try:
-                    data = sock.recv(4096)
-                    if not data:
-                        break
-                    buf += data
-                    
-                    # Parse XML messages (newline-delimited)
-                    while b'\r\n' in buf:
-                        line, buf = buf.split(b'\r\n', 1)
-                        if not line:
-                            continue
+        
+        # Retry loop: continuously attempt to connect until successful or stopped
+        while not self._stop.is_set():
+            sock = None
+            try:
+                # Attempt connection
+                sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+                sock.settimeout(1.0)
+                sock.connect((self.host, self.port))
+                sock.settimeout(0.1)
+                self.connected = True
+                
+                # Enable data streaming via XML protocol
+                enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
+                sock.sendall(enable_cmd)
+                time.sleep(0.1)
+                
+                buf = b""
+                while not self._stop.is_set():
+                    try:
+                        data = sock.recv(4096)
+                        if not data:
+                            break
+                        buf += data
                         
-                        # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
-                        if b'<REC' in line:
-                            self.receiving = True
-                            try:
-                                # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
-                                line_str = line.decode('utf-8', errors='ignore')
-                                
-                                # Simple attribute extraction
-                                def get_attr(msg, attr, default):
-                                    idx = msg.find(attr + '="')
-                                    if idx == -1:
-                                        return default
-                                    start = idx + len(attr) + 2
-                                    end = msg.find('"', start)
-                                    if end == -1:
-                                        return default
-                                    try:
-                                        return float(msg[start:end])
-                                    except:
-                                        return default
-                                
-                                gx = get_attr(line_str, 'FPOGX', 0.5)
-                                gy = get_attr(line_str, 'FPOGY', 0.5)
-                                valid = get_attr(line_str, 'FPOGV', 1.0) > 0.5
-                                pupil = get_attr(line_str, 'PUPILDIA', 2.5)
-                                
-                                # Normalize gaze coordinates (Gazepoint uses 0-1 range)
-                                gx = max(0.0, min(1.0, gx))
-                                gy = max(0.0, min(1.0, gy))
-                                
-                                t = time.time()
-                                self._push_sample(t, gx, gy, pupil, valid)
-                            except Exception:
-                                # Fallback on parse error
-                                t = time.time()
-                                self._push_sample(t, 0.5, 0.5, 2.5, True)
-                except socket.timeout:
-                    continue
-                except Exception:
-                    break
-        except Exception:
-            pass
-        finally:
-            if sock:
-                try:
-                    sock.close()
-                except:
-                    pass
-            self.connected = False
-            self.receiving = False
+                        # Parse XML messages (newline-delimited)
+                        while b'\r\n' in buf:
+                            line, buf = buf.split(b'\r\n', 1)
+                            if not line:
+                                continue
+                            
+                            # Parse REC message: <REC ... FPOGX="..." FPOGY="..." ... />
+                            if b'<REC' in line:
+                                self.receiving = True
+                                try:
+                                    # Extract FPOGX, FPOGY, FPOGV (validity), PUPILDIA (pupil diameter)
+                                    line_str = line.decode('utf-8', errors='ignore')
+                                    
+                                    # Simple attribute extraction
+                                    def get_attr(msg, attr, default):
+                                        idx = msg.find(attr + '="')
+                                        if idx == -1:
+                                            return default
+                                        start = idx + len(attr) + 2
+                                        end = msg.find('"', start)
+                                        if end == -1:
+                                            return default
+                                        try:
+                                            return float(msg[start:end])
+                                        except:
+                                            return default
+                                    
+                                    gx = get_attr(line_str, 'FPOGX', 0.5)
+                                    gy = get_attr(line_str, 'FPOGY', 0.5)
+                                    valid = get_attr(line_str, 'FPOGV', 1.0) > 0.5
+                                    pupil = get_attr(line_str, 'PUPILDIA', 2.5)
+                                    
+                                    # Normalize gaze coordinates (Gazepoint uses 0-1 range)
+                                    gx = max(0.0, min(1.0, gx))
+                                    gy = max(0.0, min(1.0, gy))
+                                    
+                                    t = time.time()
+                                    self._push_sample(t, gx, gy, pupil, valid)
+                                except Exception:
+                                    # Fallback on parse error
+                                    t = time.time()
+                                    self._push_sample(t, 0.5, 0.5, 2.5, True)
+                    except socket.timeout:
+                        continue
+                    except Exception:
+                        break
+            except Exception:
+                # Connection failed, will retry
+                self.connected = False
+                self.receiving = False
+            finally:
+                if sock:
+                    try:
+                        sock.close()
+                    except:
+                        pass
+                self.connected = False
+                self.receiving = False
+            
+            # Wait before retrying connection (if not stopped)
+            if not self._stop.is_set():
+                time.sleep(1.0)  # Wait 1 second before retrying
 
     # Simulated client
     def _run_sim(self):
