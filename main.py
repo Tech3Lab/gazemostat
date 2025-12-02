@@ -341,6 +341,30 @@ class GazeClient:
                                         ack_id_end = line_str.find('"', ack_id_start)
                                         if ack_id_end != -1:
                                             ack_id = line_str[ack_id_start:ack_id_end]
+                                            
+                                            # Special handling for CALIBRATE_RESULT_SUMMARY ACK
+                                            if ack_id == "CALIBRATE_RESULT_SUMMARY":
+                                                # Parse calibration result from ACK message
+                                                avg_error = get_attr(line_str, 'AVE_ERROR', None)
+                                                num_points = get_attr(line_str, 'VALID_POINTS', None)
+                                                
+                                                print(f"DEBUG: CALIBRATE_RESULT_SUMMARY - avg_error={avg_error}, valid_points={num_points}")
+                                                
+                                                # Store calibration result if we have data
+                                                if avg_error is not None or num_points is not None:
+                                                    # Only update if we have a meaningful result (not just 0,0)
+                                                    # or if calibration has been running for a while
+                                                    with self.calib_result_lock:
+                                                        # If we already have a result, only update if new one has points
+                                                        if self.calib_result is None or (num_points is not None and num_points > 0):
+                                                            success = 1 if (num_points is not None and num_points >= 4) else 0
+                                                            self.calib_result = {
+                                                                'average_error': avg_error if avg_error is not None else 0.0,
+                                                                'num_points': num_points if num_points is not None else 0,
+                                                                'success': success
+                                                            }
+                                                            print(f"DEBUG: Stored calibration result from CALIBRATE_RESULT_SUMMARY")
+                                            
                                             # Signal waiting thread if any
                                             with self._ack_lock:
                                                 if ack_id in self._ack_events:
