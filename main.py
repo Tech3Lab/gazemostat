@@ -145,6 +145,8 @@ class GazeClient:
             with self._ack_lock:
                 self._ack_events[wait_for_ack] = ack_received
         
+        # Send command with socket lock
+        send_success = False
         with self._sock_lock:
             if self._sock is None:
                 if wait_for_ack:
@@ -153,55 +155,60 @@ class GazeClient:
                 return False
             try:
                 self._sock.sendall(cmd.encode('utf-8') + b'\r\n')
-                if wait_for_ack and ack_received:
-                    # Wait for ACK message
-                    if ack_received.wait(timeout=timeout):
-                        with self._ack_lock:
-                            self._ack_events.pop(wait_for_ack, None)
-                        return True
-                    else:
-                        with self._ack_lock:
-                            self._ack_events.pop(wait_for_ack, None)
-                        print(f"DEBUG: Timeout waiting for ACK {wait_for_ack}")
-                        return False
-                return True
+                send_success = True
             except Exception as e:
                 if wait_for_ack:
                     with self._ack_lock:
                         self._ack_events.pop(wait_for_ack, None)
                 print(f"DEBUG: Exception sending command: {e}")
                 return False
+        
+        # Wait for ACK outside of socket lock to avoid blocking receive thread
+        if wait_for_ack and ack_received and send_success:
+            if ack_received.wait(timeout=timeout):
+                with self._ack_lock:
+                    self._ack_events.pop(wait_for_ack, None)
+                return True
+            else:
+                with self._ack_lock:
+                    self._ack_events.pop(wait_for_ack, None)
+                print(f"DEBUG: Timeout waiting for ACK {wait_for_ack}")
+                return False
+        
+        return send_success
 
     def calibrate_show(self, show=True):
         """Show or hide the calibration graphical window"""
         state = "1" if show else "0"
-        return self._send_command(f'<SET ID="CALIBRATE_SHOW" STATE="{state}"/>', wait_for_ack="CALIBRATE_SHOW")
+        return self._send_command(f'<SET ID="CALIBRATE_SHOW" VALUE="{state}" />', wait_for_ack="CALIBRATE_SHOW")
 
     def calibrate_clear(self):
         """Clear the internal list of calibration points"""
-        return self._send_command('<SET ID="CALIBRATE_CLEAR" STATE="1"/>')
+        return self._send_command('<SET ID="CALIBRATE_CLEAR" />')
 
     def calibrate_reset(self):
         """Reset the internal list of calibration points to default values"""
-        return self._send_command('<SET ID="CALIBRATE_RESET" STATE="1"/>')
+        return self._send_command('<SET ID="CALIBRATE_RESET" />')
 
     def calibrate_timeout(self, timeout_ms=1000):
         """Set the duration of each calibration point in milliseconds"""
-        # Try without STATE attribute - some versions use direct value
-        return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" VALUE="{timeout_ms}"/>')
+        # Convert milliseconds to seconds as per OpenGaze API specification
+        timeout_sec = timeout_ms / 1000.0
+        return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" VALUE="{timeout_sec}" />')
 
     def calibrate_delay(self, delay_ms=200):
         """Set the duration of the animation before calibration at each point begins (milliseconds)"""
-        # Try without STATE attribute - some versions use direct value
-        return self._send_command(f'<SET ID="CALIBRATE_DELAY" VALUE="{delay_ms}"/>')
+        # Convert milliseconds to seconds as per OpenGaze API specification
+        delay_sec = delay_ms / 1000.0
+        return self._send_command(f'<SET ID="CALIBRATE_DELAY" VALUE="{delay_sec}" />')
 
     def calibrate_result_summary(self):
         """Request calibration result summary"""
-        return self._send_command('<GET ID="CALIBRATE_RESULT_SUMMARY" />')
+        return self._send_command('<GET ID="CALIBRATE_RESULT_SUMMARY" />', wait_for_ack="CALIBRATE_RESULT_SUMMARY")
     
     def calibrate_start(self):
         """Start the calibration sequence"""
-        return self._send_command('<SET ID="CALIBRATE_START" STATE="1"/>', wait_for_ack="CALIBRATE_START")
+        return self._send_command('<SET ID="CALIBRATE_START" VALUE="1" />', wait_for_ack="CALIBRATE_START")
 
     def get_calibration_result(self):
         """Get the latest calibration result summary"""
@@ -234,7 +241,7 @@ class GazeClient:
                 with self._sock_lock:
                     if self._sock is not None:
                         try:
-                            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1"/>\r\n'
+                            enable_cmd = b'<SET ID="ENABLE_SEND_DATA" STATE="1" />\r\n'
                             self._sock.sendall(enable_cmd)
                             enable_sent = True
                         except Exception:
@@ -682,39 +689,52 @@ def main():
         if not SIM_GAZE:
             # Ensure gaze data streaming is enabled (required for calibration)
             # This should already be enabled on connection, but verify
-            gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1"/>')
+            print("DEBUG: Ensuring data streaming is enabled...")
+            gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
             time.sleep(0.1)
             
-            # Clear previous calibration
-            gp.calibrate_clear()
-            time.sleep(0.1)
-            # Reset calibration points
-            gp.calibrate_reset()
-            time.sleep(0.1)
-            # Set calibration timeout (1000ms per point)
-            gp.calibrate_timeout(1000)
-            time.sleep(0.1)
-            # Set calibration delay (200ms animation delay)
-            gp.calibrate_delay(200)
-            time.sleep(0.1)
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
+            
+            # Clear previous calibration points
+            print("DEBUG: Clearing calibration points...")
+            gp.calibrate_clear()
+            time.sleep(0.1)
+            
+            # Reset calibration points to default (5 points)
+            print("DEBUG: Resetting calibration points to default...")
+            gp.calibrate_reset()
+            time.sleep(0.1)
+            
+            # Set calibration timeout (1 second per point)
+            print("DEBUG: Setting calibration timeout...")
+            gp.calibrate_timeout(1000)
+            time.sleep(0.1)
+            
+            # Set calibration delay (200ms animation delay)
+            print("DEBUG: Setting calibration delay...")
+            gp.calibrate_delay(200)
+            time.sleep(0.1)
+            
             # Show calibration window and wait for ACK
+            print("DEBUG: Showing calibration window...")
             if gp.calibrate_show(True):
-                print("DEBUG: Calibration window shown, waiting for ACK...")
+                print("DEBUG: Calibration window shown successfully")
             else:
-                print("DEBUG: Failed to send CALIBRATE_SHOW command")
+                print("DEBUG: Failed to show calibration window")
                 set_info_msg("Failed to show calibration window", dur=2.0)
                 state = "READY"
                 return
+            
             # Start the calibration sequence and wait for ACK
+            print("DEBUG: Starting calibration...")
             if gp.calibrate_start():
-                print("DEBUG: Calibration started, waiting for ACK...")
+                print("DEBUG: Calibration started successfully")
                 calib_step_start = time.time()  # Record when calibration actually started
-                print("DEBUG: Waiting for CALIB_RESULT_PT and subsequent calibration points...")
+                print("DEBUG: Waiting for calibration to complete...")
             else:
-                print("DEBUG: Failed to send CALIBRATE_START command")
+                print("DEBUG: Failed to start calibration")
                 set_info_msg("Failed to start calibration", dur=2.0)
                 gp.calibrate_show(False)  # Hide calibration window
                 state = "READY"
