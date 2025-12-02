@@ -250,6 +250,21 @@ class GazeClient:
                             # Debug: log all messages to see what we're receiving
                             if b'<CAL' in line or b'<ACK' in line:
                                 print(f"DEBUG: Raw message: {line_str}")
+                            # Also log REC messages occasionally to see if gaze data is flowing
+                            if b'<REC' in line:
+                                # Only log occasionally to avoid spam (every 60th message, ~1 per second at 60Hz)
+                                if not hasattr(self, '_rec_count'):
+                                    self._rec_count = 0
+                                self._rec_count += 1
+                                if self._rec_count % 60 == 0:
+                                    # Extract validity to see if eyes are being tracked
+                                    try:
+                                        valid_start = line_str.find('FPOGV="')
+                                        if valid_start != -1:
+                                            valid_val = line_str[valid_start+7:valid_start+8]
+                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, valid={valid_val})")
+                                    except:
+                                        print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count})")
                             
                             # Helper function to extract XML attributes
                             def get_attr(msg, attr, default):
@@ -1021,7 +1036,16 @@ def main():
                     # Still calibrating, wait for CALIB_RESULT message
                     # The server will send CALIB_START_PT and CALIB_RESULT_PT messages for each point
                     # and finally CALIB_RESULT when calibration completes
-                    pass
+                    # Check if calibration has been running for too long (timeout after 60 seconds)
+                    elapsed = time.time() - calib_step_start
+                    if elapsed > 60.0:
+                        print(f"DEBUG: Calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
+                        set_info_msg("Calibration timeout - please try again", dur=3.0)
+                        gp.calibrate_show(False)
+                        current_calib_override = None
+                        state = "READY"
+                        calib_status = "red"
+                        calib_quality = "failed"
             else:
                 # Client-side calibration for simulation mode
                 if calib_step == 0:
