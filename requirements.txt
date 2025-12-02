@@ -1,9 +1,12 @@
 # Runtime requirements for the Gaze Tracking Application
 # Install with: pip install -r requirements.txt
 #
+# REQUIRED: Python 3.13.9 must be installed for this application to work
+#
 # IMPORTANT FOR WINDOWS: On fresh Windows installs, you may need:
-# 1. Microsoft Visual C++ Build Tools (download from Microsoft)
-# 2. Run: python -m pip install --upgrade pip setuptools wheel
+# 1. Python 3.13.9 (download from https://www.python.org/downloads/)
+# 2. Microsoft Visual C++ Build Tools (download from Microsoft)
+# 3. Run: python -m pip install --upgrade pip setuptools wheel
 #    before installing these requirements
 
 # Build tools (required for Python 3.12+ compatibility)
