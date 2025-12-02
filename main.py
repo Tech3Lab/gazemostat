@@ -180,7 +180,7 @@ class GazeClient:
     def calibrate_show(self, show=True):
         """Show or hide the calibration graphical window"""
         state = "1" if show else "0"
-        return self._send_command(f'<SET ID="CALIBRATE_SHOW" VALUE="{state}" />', wait_for_ack="CALIBRATE_SHOW")
+        return self._send_command(f'<SET ID="CALIBRATE_SHOW" STATE="{state}" />', wait_for_ack="CALIBRATE_SHOW")
 
     def calibrate_clear(self):
         """Clear the internal list of calibration points"""
@@ -208,7 +208,7 @@ class GazeClient:
     
     def calibrate_start(self):
         """Start the calibration sequence"""
-        return self._send_command('<SET ID="CALIBRATE_START" VALUE="1" />', wait_for_ack="CALIBRATE_START")
+        return self._send_command('<SET ID="CALIBRATE_START" STATE="1" />', wait_for_ack="CALIBRATE_START")
 
     def get_calibration_result(self):
         """Get the latest calibration result summary"""
