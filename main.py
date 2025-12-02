@@ -157,6 +157,10 @@ class GazeClient:
     def calibrate_result_summary(self):
         """Request calibration result summary"""
         return self._send_command('<GET ID="CALIBRATE_RESULT_SUMMARY" />')
+    
+    def calibrate_start(self):
+        """Start the calibration sequence"""
+        return self._send_command('<SET ID="CALIBRATE_START" STATE="1"/>')
 
     def get_calibration_result(self):
         """Get the latest calibration result summary"""
@@ -470,12 +474,15 @@ def main():
             # Set calibration delay (200ms animation delay)
             gp.calibrate_delay(200)
             time.sleep(0.1)
-            # Show calibration window
-            gp.calibrate_show(True)
-            time.sleep(0.1)
-            # Clear calibration result
+            # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
+            # Show calibration window
+            gp.calibrate_show(True)
+            time.sleep(0.2)
+            # Start the calibration sequence
+            gp.calibrate_start()
+            time.sleep(0.1)
         else:
             # Fallback to client-side calibration in simulation mode
             # Clear previous calibration transform/state
@@ -809,6 +816,9 @@ def main():
                         num_points = calib_result.get('num_points', 0)
                         success = calib_result.get('success', 0)
                         
+                        # Debug: print calibration result for troubleshooting
+                        print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error}")
+                        
                         if success and num_points >= 4:
                             if avg_error is not None and avg_error < CALIB_OK_THRESHOLD:
                                 calib_status = "green"
@@ -824,12 +834,13 @@ def main():
                                 calib_status = "red"
                                 calib_quality = "failed"
                                 calib_avg_error = None
-                                set_info_msg("Calibration failed, try again", dur=3.0)
+                                set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
                         else:
                             calib_status = "red"
                             calib_quality = "failed"
                             calib_avg_error = None
-                            set_info_msg("Calibration failed, try again", dur=3.0)
+                            fail_reason = f"success={success}, points={num_points}"
+                            set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
                     
                     # Hide calibration window
                     gp.calibrate_show(False)
@@ -838,11 +849,15 @@ def main():
                     state = "READY"
                 else:
                     # Still calibrating, wait for result
-                    # Optionally request result summary periodically
+                    # Don't check for results too early - wait at least 5 seconds for user to complete calibration
                     tnow = time.time()
-                    if tnow - calib_step_start > 0.5:  # Request every 500ms
-                        gp.calibrate_result_summary()
-                        calib_step_start = tnow
+                    elapsed = tnow - calib_step_start
+                    if elapsed > 5.0:  # Wait at least 5 seconds before checking
+                        # Request result summary periodically (every 1 second after initial wait)
+                        last_check = getattr(start_calibration, '_last_check', 0)
+                        if tnow - last_check >= 1.0:  # Check every 1 second
+                            gp.calibrate_result_summary()
+                            start_calibration._last_check = tnow
             else:
                 # Client-side calibration for simulation mode
                 if calib_step == 0:
