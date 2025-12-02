@@ -219,7 +219,7 @@ class GazeClient:
                 sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
                 sock.settimeout(1.0)
                 sock.connect((self.host, self.port))
-                sock.settimeout(0.1)
+                sock.settimeout(1.0)  # Increased timeout to ensure we don't miss messages
                 self.connected = True
                 
                 # Store socket reference for sending commands
@@ -246,6 +246,10 @@ class GazeClient:
                                 continue
                             
                             line_str = line.decode('utf-8', errors='ignore')
+                            
+                            # Debug: log all messages to see what we're receiving
+                            if b'<CAL' in line or b'<ACK' in line:
+                                print(f"DEBUG: Raw message: {line_str}")
                             
                             # Helper function to extract XML attributes
                             def get_attr(msg, attr, default):
@@ -306,13 +310,13 @@ class GazeClient:
                             # Parse CAL messages: <CAL ID="CALIB_START_PT" ... />, <CAL ID="CALIB_RESULT_PT" ... />, <CAL ID="CALIB_RESULT" ... />
                             elif b'<CAL' in line:
                                 try:
-                                    # Extract CAL ID
+                                    # Extract CAL ID (handle possible leading/trailing spaces)
                                     cal_id_start = line_str.find('ID="')
                                     if cal_id_start != -1:
                                         cal_id_start += 4
                                         cal_id_end = line_str.find('"', cal_id_start)
                                         if cal_id_end != -1:
-                                            cal_id = line_str[cal_id_start:cal_id_end]
+                                            cal_id = line_str[cal_id_start:cal_id_end].strip()
                                             
                                             if cal_id == "CALIB_RESULT":
                                                 # Parse final calibration result
@@ -389,6 +393,10 @@ class GazeClient:
                                                 caly = get_attr(line_str, 'CALY', None)
                                                 if pt is not None:
                                                     print(f"DEBUG: {cal_id} - Point {pt} at ({calx}, {caly})")
+                                                else:
+                                                    print(f"DEBUG: {cal_id} - Could not parse PT from: {line_str}")
+                                            else:
+                                                print(f"DEBUG: Unknown CAL ID: {cal_id} in message: {line_str}")
                                 except Exception as e:
                                     import traceback
                                     print(f"DEBUG: Error parsing CAL message: {e}")
@@ -417,6 +425,7 @@ class GazeClient:
                                     self._push_sample(t, 0.5, 0.5, 2.5, True)
                             
                     except socket.timeout:
+                        # Timeout is normal - continue reading
                         continue
                     except Exception:
                         break
