@@ -12,9 +12,11 @@
 # ----------------------------------------------------------------------------
 
 # sim_gpio: Enable GPIO hardware simulation via keyboard
-#   - true:  Use keyboard inputs (Z, X, N, B, M) and on-screen LED indicators
+#   - true:  Use keyboard inputs (Z, X, N, B, M, R) and on-screen LED indicators
 #            instead of physical GPIO hardware. Useful for development/testing
 #            without Arduino/microcontroller hardware.
+#            Keyboard shortcuts: Z=start calibration, X=start collection,
+#            N=marker toggle, B=stop collection, M=end session, R=reset app state
 #   - false: Use physical GPIO hardware via serial connection (requires
 #            microcontroller with buttons/LEDs connected)
 #   Default: true
@@ -25,7 +27,10 @@ sim_gpio: true
 #            controls (1=connect, 2=disconnect, 3=toggle stream) and synthetic
 #            gaze samples. Gaze data follows a Lissajous-like pattern.
 #   - false: Connect to real Gazepoint hardware via TCP/IP (requires Gazepoint
-#            tracker running on gp_host:gp_port)
+#            tracker running on gp_host:gp_port). The app will automatically
+#            detect and connect to Gazepoint hardware, retrying every 1 second
+#            until a connection is established. If the connection is lost, it
+#            will automatically attempt to reconnect.
 #   Default: true
 sim_gaze: true
 
@@ -41,6 +46,11 @@ developpement_xg_boost: false
 #   - true:  Display a cheat sheet overlay at the bottom of the screen showing
 #            all available keyboard shortcuts and recently pressed keys.
 #            Helpful during development to remember controls.
+#            Available shortcuts:
+#            - GPIO simulation (when sim_gpio=true): Z, X, N, B, M, R
+#            - Gazepoint simulation (when sim_gaze=true): 1, 2, 3, 4, 5
+#            - Universal: R (reset app state - clears calibration, collection,
+#              events, and analysis results, returns to READY state)
 #   - false: Hide the keyboard overlay for cleaner UI
 #   Default: true
 dev_show_keys: true

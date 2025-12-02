@@ -62,7 +62,7 @@ Minimalism: One central loop drives rendering; a few background threads handle G
 Provide defaults via `config.yaml` (or top‑level constants). Two backends keep code minimal and portable:
 
 - DevKeyboardBackend (no hardware):
-  - Inputs: `Z` start calibration, `X` start collection, `N` marker toggle (interprets START/END), `B` stop collection (begin analysis), `M` end session
+  - Inputs: `Z` start calibration, `X` start collection, `N` marker toggle (interprets START/END), `B` stop collection (begin analysis), `M` end session, `R` reset app state
   - LEDs: 4 on‑screen circles (corners) simulate the calibration LEDs
 
 - SerialGPIOBackend (Windows 11 + microcontroller over COM):
@@ -82,7 +82,8 @@ Note: This design avoids OS‑specific GPIO libraries on Windows while preservin
 - Connection: TCP to `host:port` (default `127.0.0.1:4242`).
 - Protocol: XML messages per line; send `<SET>` to enable streams (e.g., `<SET ID="ENABLE_SEND_DATA" STATE="1"/>`).
 - Stream parse: Read loop in a background thread with small queue for decoded samples.
-- Reconnect: On socket error, set connection status=orange, attempt backoff reconnect; red when failed, green on success.
+- Automatic connection detection: When `sim_gaze` is `false`, the app continuously attempts to connect to Gazepoint hardware. It will retry every 1 second until a connection is established, allowing the app to automatically detect when Gazepoint Control software becomes available.
+- Reconnect: On socket error or connection loss, the app automatically attempts to reconnect every 1 second. Connection status is shown in real-time: red=disconnected, green=connected.
 - Data captured: timestamp, gaze X/Y (display‑norm or device coords), pupil, validity flags.
 - Thread safety: push to `queue.Queue(maxsize=N)`; drop old samples if full to keep UI responsive.
 
@@ -96,6 +97,8 @@ Note: This design avoids OS‑specific GPIO libraries on Windows while preservin
   - `1` → Set connection = Connected (status circle green)
   - `2` → Set connection = Disconnected (status circle red; stop data)
   - `3` → Toggle Receiving Data on/off when connected (pulse/inner dot when on)
+- Reset functionality:
+  - `R` → Reset app state: returns to READY state, clears all calibration data, collection sessions, events, gaze samples, and analysis results. Useful for quickly restarting a session without closing the app.
 - Simulated data generator:
   - Background thread pushes ~60 Hz samples into the same queue API as the real client
   - Fields: timestamp `t`, gaze `gx, gy`, `pupil`, `valid`
@@ -256,7 +259,7 @@ Note: Real code adds keyboard/serial abstraction, calibration routine, gp_client
  - Dev gaze note: the simulator centers samples on the active target and can apply a known linear transform so the solver recovers it.
 
 ## 12) Error Handling & Robustness
-- Gazepoint reconnect with backoff (0.5s → 2s → 5s capped)
+- Gazepoint reconnect: When `sim_gaze` is `false`, the app automatically attempts to reconnect every 1 second if the connection fails or is lost. This allows automatic detection when Gazepoint Control software becomes available.
 - Serial backend optional: if COM device not found or protocol handshake fails, optionally enable GPIO simulation (if allowed by config)
 - Guard missing `logo.jpg` (fallback to solid color)
 - Model missing/corrupt: show ERROR, keep app running; allow retry
@@ -264,6 +267,7 @@ Note: Real code adds keyboard/serial abstraction, calibration routine, gp_client
 - If real Gazepoint TCP connection fails:
   - When `SIM_GAZE` is True, keep the simulator active so flows remain testable
   - Optionally auto‑enable `SIM_GAZE` on failure (configurable) to keep the app usable
+- Reset functionality: Press `R` at any time to reset the app state to READY, clearing all calibration, collection, and analysis data. Useful for quickly restarting without closing the app.
 
 ## 13) Configuration
 - `config.yaml` keys:
@@ -294,7 +298,8 @@ Notes:
 - Fixed 480×800 window; shows `logo.jpg` while loading
 - Status circles reflect Gazepoint connection and calibration state in real time
 - Start calibration via physical button from serial backend or `Z` when GPIO simulation is enabled; 4 LEDs controlled via serial or on‑screen when GPIO simulation is enabled
-- Session/task controls via physical buttons or `X/B/N/M` when GPIO simulation is enabled; `N` toggles task start/end; `B` stops collection to analyze
+- Session/task controls via physical buttons or `X/B/N/M/R` when GPIO simulation is enabled; `N` toggles task start/end; `B` stops collection to analyze; `R` resets app state
+- Automatic Gazepoint connection detection when `sim_gaze` is `false`; app continuously attempts to connect until successful
 - XGBoost model loads and produces a visible result after a collection; result displayed
 - ANALYZING shows a "Calculating…" progress bar; RESULTS shows a global score and an auto‑scrolling per‑task score list
 - Minimal code footprint with clear structure and graceful fallback when no serial device is present

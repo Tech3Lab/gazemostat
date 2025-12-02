@@ -450,6 +450,36 @@ def main():
         info_msg = msg
         info_msg_until = time.time() + dur
 
+    def reset_app_state():
+        nonlocal state, calib_status, receiving_hint, aff, calib_points, target_points
+        nonlocal calib_step, calib_step_start, calib_quality, current_calib_override
+        nonlocal session_t0, next_task_id, task_open, events, gaze_samples
+        nonlocal analyze_t0, per_task_scores, global_score, results_scroll
+        nonlocal info_msg, info_msg_until, last_calib_gaze
+        state = "READY"
+        calib_status = "red"
+        receiving_hint = False
+        aff = Affine2D()
+        calib_points = []
+        target_points = []
+        calib_step = -1
+        calib_step_start = 0.0
+        calib_quality = "none"
+        current_calib_override = None
+        session_t0 = None
+        next_task_id = 1
+        task_open = False
+        events = []
+        gaze_samples = []
+        analyze_t0 = 0.0
+        per_task_scores = {}
+        global_score = 0.0
+        results_scroll = 0.0
+        info_msg = None
+        info_msg_until = 0.0
+        last_calib_gaze = None
+        set_info_msg("App state reset", dur=2.0)
+
     def draw_status_header():
         conn_x = 50  # moved 20px to the right
         cal_x = WIDTH - 50  # moved 20px to the left
@@ -548,6 +578,9 @@ def main():
                 "4 — Start failed calibration (sim)",
                 "5 — Start bad calibration (low quality)",
             ]
+        cheat += [
+            "R — Reset app state",
+        ]
         last = [lbl for (_, lbl) in key_log[-6:]]
         # Build surfaces
         pad = 6
@@ -608,6 +641,12 @@ def main():
                     if SHOW_KEYS:
                         log_key("M")
                     running = False
+                elif ev.key == pygame.K_r:
+                    log_key("R")
+                    reset_app_state()
+                elif ev.key == pygame.K_r:
+                    log_key("R")
+                    reset_app_state()
 
         # Pull gaze samples
         # Show red when disconnected, green when connected
