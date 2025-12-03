@@ -8,18 +8,84 @@
 # main.py if needed for development purposes.
 
 # ----------------------------------------------------------------------------
-# Simulation Modes
+# GPIO Configuration
 # ----------------------------------------------------------------------------
 
-# sim_gpio: Enable GPIO hardware simulation via keyboard
-#   - true:  Use keyboard inputs (Z, X, N, B, M, R) and on-screen LED indicators
-#            instead of physical GPIO hardware. Useful for development/testing
-#            without Arduino/microcontroller hardware.
-#            Keyboard shortcuts: Z=start calibration, X=start collection,
-#            N=marker toggle, B=stop collection, M=end session, R=reset app state
-#   - false: Use physical GPIO hardware (LattePanda button on GP0+GND)
+# gpio_btn_marker_sim: Enable keyboard shortcut for marker button
+#   - true:  Enable "N" keyboard shortcut to toggle markers (START/END tasks)
+#            and show hint in HUD overlay
+#   - false: Disable keyboard shortcut for markers
 #   Default: true
-sim_gpio: false
+gpio_btn_marker_sim: true
+
+# gpio_btn_marker_enable: Enable hardware button for markers
+#   - true:  Enable physical GPIO button for toggling markers
+#            Works independently from gpio_btn_marker_sim
+#   - false: Disable hardware button for markers
+#   Default: false
+gpio_btn_marker_enable: true
+
+# gpio_btn_marker_pin: GPIO pin for marker button
+#   - GPIO line number for the marker toggle button
+#   - LattePanda Iota: GP0 = line 0
+#   - Connect button between this pin and GND (internal pull-up enabled)
+#   - Only used when gpio_btn_marker_enable is true
+#   Default: 0 (GP0)
+gpio_btn_marker_pin: 0
+
+# gpio_btn_marker_debounce: Marker button debounce time
+#   - Minimum time between button presses to prevent accidental double-presses
+#   - Value in seconds (e.g., 0.2 = 200ms)
+#   - Only used when gpio_btn_marker_enable is true
+#   Default: 0.2
+gpio_btn_marker_debounce: 0.2
+
+# gpio_led_calibration_sim: Enable on-screen LED simulation for calibration
+#   - true:  Show on-screen LED indicators during calibration
+#            Enables keyboard shortcuts: Z (start calibration), 
+#            X (start collection), B (stop collection)
+#   - false: Disable on-screen LED simulation and keyboard shortcuts
+#   Default: true
+gpio_led_calibration_sim: true
+
+# gpio_led_calibration_enable: Enable hardware LEDs for calibration
+#   - true:  Control physical GPIO LEDs during calibration sequence
+#   - false: Disable hardware LED control
+#   - Note: Hardware LED support requires additional implementation
+#   Default: false
+gpio_led_calibration_enable: false
+
+# gpio_led_calibration_led1_pin: GPIO pin for calibration LED 1
+#   - GPIO line number for first calibration point LED
+#   - LattePanda Iota: GP1 = line 1
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 1 (GP1)
+gpio_led_calibration_led1_pin: 1
+
+# gpio_led_calibration_led2_pin: GPIO pin for calibration LED 2
+#   - GPIO line number for second calibration point LED
+#   - LattePanda Iota: GP2 = line 2
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 2 (GP2)
+gpio_led_calibration_led2_pin: 2
+
+# gpio_led_calibration_led3_pin: GPIO pin for calibration LED 3
+#   - GPIO line number for third calibration point LED
+#   - LattePanda Iota: GP3 = line 3
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 3 (GP3)
+gpio_led_calibration_led3_pin: 3
+
+# gpio_led_calibration_led4_pin: GPIO pin for calibration LED 4
+#   - GPIO line number for fourth calibration point LED
+#   - LattePanda Iota: GP4 = line 4
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 4 (GP4)
+gpio_led_calibration_led4_pin: 4
+
+# ----------------------------------------------------------------------------
+# Simulation Modes
+# ----------------------------------------------------------------------------
 
 # sim_gaze: Enable Gazepoint eye tracker simulation
 #   - true:  Simulate Gazepoint connection and gaze data using keyboard
@@ -90,41 +156,15 @@ calibration_ok_threshold: 1.0
 calibration_low_threshold: 2.0
 
 # ----------------------------------------------------------------------------
-# Hardware GPIO Settings
+# Hardware GPIO Shared Settings
 # ----------------------------------------------------------------------------
 
-# serial_port: Serial port for GPIO hardware connection
-#   - COM port name (Windows) or device path (Linux/Mac) for microcontroller
-#   - Examples: "COM3" (Windows), "/dev/ttyUSB0" (Linux), "/dev/cu.usbserial" (Mac)
-#   - Empty string ("") enables auto-discovery by scanning for "HELLO" handshake
-#   - Only used when sim_gpio is false
-#   - If auto-discovery fails and sim_gpio is false, app will fall back to
-#     simulation mode (if allowed)
-#   Default: "" (auto-discover)
-serial_port: ""
-
-# gpio_chip: GPIO chip device path for LattePanda Iota
+# gpio_chip: GPIO chip device path for LattePanda
 #   - Device path for GPIO chip (Linux only)
 #   - LattePanda Iota typically uses /dev/gpiochip0
-#   - Only used when sim_gpio is false and gpiod is available
+#   - Used by both marker button and calibration LEDs when hardware GPIO is enabled
 #   Default: "/dev/gpiochip0"
 gpio_chip: "/dev/gpiochip0"
-
-# gpio_button_line: GPIO line number for marker button
-#   - GPIO line number (pin) for the marker toggle button
-#   - LattePanda Iota GP0 = line 0
-#   - Connect button between this pin and GND
-#   - Internal pull-up resistor is enabled (button pulls to GND when pressed)
-#   - Only used when sim_gpio is false and gpiod is available
-#   Default: 0 (GP0)
-gpio_button_line: 0
-
-# gpio_button_debounce: Button debounce time in seconds
-#   - Minimum time between button presses to prevent accidental double-presses
-#   - Value in seconds (e.g., 0.2 = 200ms)
-#   - Only used when sim_gpio is false and gpiod is available
-#   Default: 0.2
-gpio_button_debounce: 0.2
 
 # ----------------------------------------------------------------------------
 # Machine Learning Model Settings

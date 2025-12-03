@@ -16,7 +16,15 @@ except ImportError:
     print("Warning: PyYAML not installed. config.yaml will not be loaded.", file=sys.stderr)
 
 # Simulation toggles (can be overridden by config later)
-SIM_GPIO = True      # Keyboard + on-screen LEDs instead of hardware
+GPIO_BTN_MARKER_SIM = True       # Enable "N" keyboard shortcut for markers
+GPIO_BTN_MARKER_ENABLE = False   # Enable hardware button for markers
+GPIO_BTN_MARKER_PIN = 0          # GPIO pin for marker button (GP0)
+GPIO_LED_CALIBRATION_SIM = True  # Enable on-screen LED simulation
+GPIO_LED_CALIBRATION_ENABLE = False  # Enable hardware LEDs for calibration
+GPIO_LED_CALIBRATION_LED1_PIN = 1    # GP1
+GPIO_LED_CALIBRATION_LED2_PIN = 2    # GP2
+GPIO_LED_CALIBRATION_LED3_PIN = 3    # GP3
+GPIO_LED_CALIBRATION_LED4_PIN = 4    # GP4
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
@@ -29,14 +37,17 @@ FEATURE_WINDOW_MS = 1500
 CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
 CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
-GPIO_BUTTON_LINE = 0  # GPIO line for marker button (GP0)
-GPIO_BUTTON_DEBOUNCE = 0.2  # Button debounce time in seconds
+GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 
 # Load config.yaml if it exists
 def load_config():
-    global SIM_GPIO, SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
+    global GPIO_BTN_MARKER_SIM, GPIO_BTN_MARKER_ENABLE, GPIO_BTN_MARKER_PIN
+    global GPIO_LED_CALIBRATION_SIM, GPIO_LED_CALIBRATION_ENABLE
+    global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
+    global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
+    global SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD
-    global GPIO_CHIP, GPIO_BUTTON_LINE, GPIO_BUTTON_DEBOUNCE
+    global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -45,7 +56,18 @@ def load_config():
             with open(config_path, 'r') as f:
                 config = yaml.safe_load(f)
                 if config:
-                    SIM_GPIO = config.get('sim_gpio', SIM_GPIO)
+                    # GPIO marker button configuration
+                    GPIO_BTN_MARKER_SIM = config.get('gpio_btn_marker_sim', GPIO_BTN_MARKER_SIM)
+                    GPIO_BTN_MARKER_ENABLE = config.get('gpio_btn_marker_enable', GPIO_BTN_MARKER_ENABLE)
+                    GPIO_BTN_MARKER_PIN = config.get('gpio_btn_marker_pin', GPIO_BTN_MARKER_PIN)
+                    # GPIO calibration LED configuration
+                    GPIO_LED_CALIBRATION_SIM = config.get('gpio_led_calibration_sim', GPIO_LED_CALIBRATION_SIM)
+                    GPIO_LED_CALIBRATION_ENABLE = config.get('gpio_led_calibration_enable', GPIO_LED_CALIBRATION_ENABLE)
+                    GPIO_LED_CALIBRATION_LED1_PIN = config.get('gpio_led_calibration_led1_pin', GPIO_LED_CALIBRATION_LED1_PIN)
+                    GPIO_LED_CALIBRATION_LED2_PIN = config.get('gpio_led_calibration_led2_pin', GPIO_LED_CALIBRATION_LED2_PIN)
+                    GPIO_LED_CALIBRATION_LED3_PIN = config.get('gpio_led_calibration_led3_pin', GPIO_LED_CALIBRATION_LED3_PIN)
+                    GPIO_LED_CALIBRATION_LED4_PIN = config.get('gpio_led_calibration_led4_pin', GPIO_LED_CALIBRATION_LED4_PIN)
+                    # Other configuration
                     SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
                     SHOW_KEYS = config.get('dev_show_keys', SHOW_KEYS)
@@ -56,8 +78,7 @@ def load_config():
                     CALIB_OK_THRESHOLD = config.get('calibration_ok_threshold', CALIB_OK_THRESHOLD)
                     CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
                     GPIO_CHIP = config.get('gpio_chip', GPIO_CHIP)
-                    GPIO_BUTTON_LINE = config.get('gpio_button_line', GPIO_BUTTON_LINE)
-                    GPIO_BUTTON_DEBOUNCE = config.get('gpio_button_debounce', GPIO_BUTTON_DEBOUNCE)
+                    GPIO_BTN_MARKER_DEBOUNCE = config.get('gpio_btn_marker_debounce', GPIO_BTN_MARKER_DEBOUNCE)
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -807,11 +828,11 @@ def main():
     gp = GazeClient(simulate=SIM_GAZE)
     gp.start()
     
-    # Start GPIO button monitor for LattePanda Iota (if not in simulation mode)
+    # Start GPIO button monitor for LattePanda Iota (if enabled)
     gpio_monitor = None
-    if not SIM_GPIO and gpiod is not None:
-        gpio_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BUTTON_LINE, callback=gpio_button_callback)
-        gpio_monitor.debounce_time = GPIO_BUTTON_DEBOUNCE
+    if GPIO_BTN_MARKER_ENABLE and gpiod is not None:
+        gpio_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BTN_MARKER_PIN, callback=gpio_button_callback)
+        gpio_monitor.debounce_time = GPIO_BTN_MARKER_DEBOUNCE
         gpio_monitor.start()
     
     # Load XGBoost models at startup (if not in simulation mode)
@@ -1172,12 +1193,15 @@ def main():
         if not SHOW_KEYS:
             return
         cheat = []
-        if SIM_GPIO:
+        if GPIO_LED_CALIBRATION_SIM:
             cheat += [
                 "Z — Start calibration",
                 "X — Start collection",
-                "N — Marker (toggle start/end)",
                 "B — Stop collection (analyze)",
+            ]
+        if GPIO_BTN_MARKER_SIM:
+            cheat += [
+                "N — Marker (toggle start/end)",
             ]
         if SIM_GAZE:
             cheat += [
@@ -1227,17 +1251,15 @@ def main():
             center_y = icon_y + icon_size // 2
             pygame.draw.circle(screen, (0, 200, 100), (center_x, center_y), icon_size // 2)
             
-            # Draw checkmark symbol
-            # Checkmark points
-            check_points = [
-                (center_x - 8, center_y),
-                (center_x - 2, center_y + 8),
-                (center_x + 10, center_y - 10)
-            ]
-            pygame.draw.lines(screen, (255, 255, 255), False, check_points, 4)
+            # Draw "M" letter in white
+            m_font = pygame.font.SysFont(None, 32, bold=True)
+            m_text = m_font.render("M", True, (255, 255, 255))
+            m_x = center_x - m_text.get_width() // 2
+            m_y = center_y - m_text.get_height() // 2
+            screen.blit(m_text, (m_x, m_y))
             
-            # Draw "B" label below icon
-            label = small.render("Button", True, (200, 200, 200))
+            # Draw "Marker" label below icon
+            label = small.render("Marker", True, (200, 200, 200))
             label_x = center_x - label.get_width() // 2
             label_y = icon_y + icon_size + 4
             screen.blit(label, (label_x, label_y))
@@ -1247,7 +1269,7 @@ def main():
             if ev.type == pygame.QUIT:
                 running = False
             elif ev.type == pygame.KEYDOWN:
-                if SIM_GPIO and ev.key == pygame.K_z and state == "READY":
+                if GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_z and state == "READY":
                     log_key("Z")
                     start_calibration(override=None)
                 elif SIM_GAZE and ev.key == pygame.K_1:
@@ -1267,13 +1289,13 @@ def main():
                     # Start calibration with simulated low-quality result (same routine, overridden outcome)
                     log_key("5")
                     start_calibration(override="low")
-                elif SIM_GPIO and ev.key == pygame.K_x and state == "READY":
+                elif GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_x and state == "READY":
                     log_key("X")
                     start_collection()
-                elif SIM_GPIO and ev.key == pygame.K_n and state == "COLLECTING":
+                elif GPIO_BTN_MARKER_SIM and ev.key == pygame.K_n and state == "COLLECTING":
                     log_key("N")
                     marker_toggle()
-                elif SIM_GPIO and ev.key == pygame.K_b and state == "COLLECTING":
+                elif GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_b and state == "COLLECTING":
                     log_key("B")
                     stop_collection_begin_analysis()
                 elif ev.key == pygame.K_m:
@@ -1447,8 +1469,8 @@ def main():
         screen.fill((0, 0, 0))
         draw_status_header()
 
-        # On-screen calibration LED hints in SIM_GPIO
-        if state == "CALIBRATING" and SIM_GPIO:
+        # On-screen calibration LED hints
+        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_SIM:
             led_pos = [
                 (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
                 (int(WIDTH * 0.9), int(HEIGHT * 0.15)),
