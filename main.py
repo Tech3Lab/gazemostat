@@ -28,6 +28,7 @@ GPIO_LED_CALIBRATION_LED4_PIN = 4    # GP4
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
+FULLSCREEN = True    # Run app in fullscreen mode
 
 WIDTH, HEIGHT = 480, 800
 FPS = 30
@@ -45,7 +46,7 @@ def load_config():
     global GPIO_LED_CALIBRATION_SIM, GPIO_LED_CALIBRATION_ENABLE
     global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
     global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
-    global SIM_GAZE, SIM_XGB, SHOW_KEYS, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
+    global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     if yaml is None:
@@ -71,6 +72,7 @@ def load_config():
                     SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
                     SHOW_KEYS = config.get('dev_show_keys', SHOW_KEYS)
+                    FULLSCREEN = config.get('fullscreen', FULLSCREEN)
                     GP_HOST = config.get('gp_host', GP_HOST)
                     GP_PORT = config.get('gp_port', GP_PORT)
                     MODEL_PATH = config.get('model_path', MODEL_PATH)
@@ -800,7 +802,11 @@ def draw_circle(screen, color, pos, r=12):
 
 def main():
     pygame.init()
-    screen = pygame.display.set_mode((WIDTH, HEIGHT))
+    # Set up display flags: frameless + optional fullscreen
+    display_flags = pygame.NOFRAME
+    if FULLSCREEN:
+        display_flags |= pygame.FULLSCREEN
+    screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
     pygame.display.set_caption("Gaze App")
     font = pygame.font.SysFont(None, 26)
     big = pygame.font.SysFont(None, 40)

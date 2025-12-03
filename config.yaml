@@ -120,6 +120,14 @@ developpement_xg_boost: false
 #   Default: true
 dev_show_keys: true
 
+# fullscreen: Run application in fullscreen mode
+#   - true:  Run in fullscreen mode (recommended for production use)
+#            The app window is always frameless (no title bar or borders)
+#   - false: Run in windowed mode (frameless window at 480x800 resolution)
+#            Useful for development and testing
+#   Default: true
+fullscreen: true
+
 # ----------------------------------------------------------------------------
 # Gazepoint Eye Tracker Settings
 # ----------------------------------------------------------------------------
