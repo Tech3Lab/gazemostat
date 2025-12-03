@@ -756,6 +756,8 @@ class GPIOButtonMonitor:
             line.request(consumer="marker_button", type=gpiod.LINE_REQ_DIR_IN, flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
             
             print(f"GPIO button monitoring started on {self.gpio_chip} line {self.gpio_line}")
+            print(f"DEBUG: Button wiring - connect between GP{self.gpio_line} and GND")
+            print(f"DEBUG: Pull-up enabled - button pressed = 0, released = 1")
             
             last_state = 1  # Released (pull-up)
             
@@ -763,14 +765,22 @@ class GPIOButtonMonitor:
                 # Read button state (0 = pressed, 1 = released)
                 current_state = line.get_value()
                 
+                # Debug: Log state changes
+                if current_state != last_state:
+                    print(f"DEBUG: GPIO line {self.gpio_line} changed: {last_state} -> {current_state}")
+                
                 # Detect falling edge (button press)
                 if last_state == 1 and current_state == 0:
                     # Button pressed
                     now = time.time()
+                    print(f"DEBUG: Button press detected at {now:.3f}")
                     if now - self._last_press_time > self.debounce_time:
                         self._last_press_time = now
+                        print(f"DEBUG: Calling button callback (debounce passed)")
                         if self.callback:
                             self.callback()
+                    else:
+                        print(f"DEBUG: Button press ignored (debounce: {now - self._last_press_time:.3f}s < {self.debounce_time}s)")
                 
                 last_state = current_state
                 time.sleep(0.01)  # Poll at 100Hz
@@ -837,9 +847,14 @@ def main():
     # Start GPIO button monitor for LattePanda Iota (if enabled)
     gpio_monitor = None
     if GPIO_BTN_MARKER_ENABLE and gpiod is not None:
+        print(f"DEBUG: Starting GPIO button monitor on {GPIO_CHIP} line {GPIO_BTN_MARKER_PIN}")
         gpio_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BTN_MARKER_PIN, callback=gpio_button_callback)
         gpio_monitor.debounce_time = GPIO_BTN_MARKER_DEBOUNCE
         gpio_monitor.start()
+    elif GPIO_BTN_MARKER_ENABLE and gpiod is None:
+        print("WARNING: GPIO button enabled but gpiod library not available!")
+    else:
+        print("DEBUG: GPIO button disabled in config")
     
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
@@ -1076,9 +1091,12 @@ def main():
     def gpio_button_callback():
         """Called when GPIO button is pressed"""
         nonlocal button_pressed_until
+        print(f"DEBUG: GPIO button pressed! Current state: {state}")
         if state == "COLLECTING":
             marker_toggle()
-            print("DEBUG: GPIO button pressed - marker toggled")
+            print("DEBUG: Marker toggled")
+        else:
+            print(f"DEBUG: Button ignored - not in COLLECTING state (current: {state})")
 
     def draw_status_header():
         conn_x = 50  # moved 20px to the right
