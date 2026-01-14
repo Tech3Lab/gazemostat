@@ -50,8 +50,8 @@ gpio_led_calibration_sim: true
 
 # gpio_led_calibration_enable: Enable hardware LEDs for calibration
 #   - true:  Control physical GPIO LEDs during calibration sequence
+#            LEDs are wired: LED+ to GPIO pin (GP1-GP4), LED- through resistor to GND
 #   - false: Disable hardware LED control
-#   - Note: Hardware LED support requires additional implementation
 #   Default: false
 gpio_led_calibration_enable: false
 

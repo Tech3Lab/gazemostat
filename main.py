@@ -791,6 +791,109 @@ class GPIOButtonMonitor:
             traceback.print_exc()
 
 
+class GPIOLEDController:
+    """Control GPIO LEDs for calibration on LattePanda Iota (GP1-GP4)"""
+    def __init__(self, gpio_chip="/dev/gpiochip0", led_pins=None):
+        self.gpio_chip = gpio_chip
+        self.led_pins = led_pins or [1, 2, 3, 4]  # Default: GP1, GP2, GP3, GP4
+        self._chip = None
+        self._lines = []
+        self._initialized = False
+        self._current_led = -1  # Currently active LED (-1 = all off)
+        
+    def start(self):
+        """Initialize GPIO lines for LED output"""
+        if gpiod is None:
+            print("Warning: gpiod not available, GPIO LED control disabled.", file=sys.stderr)
+            return False
+        
+        if self._initialized:
+            return True
+        
+        try:
+            self._chip = gpiod.Chip(self.gpio_chip)
+            self._lines = []
+            
+            for pin in self.led_pins:
+                line = self._chip.get_line(pin)
+                # Configure as output, initially LOW (LED off)
+                line.request(consumer="calib_led", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
+                self._lines.append(line)
+            
+            self._initialized = True
+            print(f"GPIO LED controller initialized on {self.gpio_chip}")
+            print(f"DEBUG: LED pins: {self.led_pins}")
+            print(f"DEBUG: LED wiring - connect LED+ to GP pin, LED- through resistor to GND")
+            return True
+            
+        except Exception as e:
+            print(f"Warning: GPIO LED controller failed to initialize: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+            self._initialized = False
+            return False
+    
+    def stop(self):
+        """Release GPIO lines and turn off all LEDs"""
+        self.all_off()
+        for line in self._lines:
+            try:
+                line.release()
+            except Exception:
+                pass
+        self._lines = []
+        self._initialized = False
+        self._current_led = -1
+    
+    def set_led(self, led_index):
+        """Turn on a specific LED (0-3) and turn off all others"""
+        if not self._initialized:
+            return
+        
+        if led_index == self._current_led:
+            return  # Already in desired state
+        
+        try:
+            for i, line in enumerate(self._lines):
+                if i == led_index:
+                    line.set_value(1)  # Turn ON
+                else:
+                    line.set_value(0)  # Turn OFF
+            
+            self._current_led = led_index
+            if led_index >= 0:
+                print(f"DEBUG: LED {led_index + 1} ON (GP{self.led_pins[led_index]})")
+            
+        except Exception as e:
+            print(f"Warning: Failed to set LED {led_index}: {e}", file=sys.stderr)
+    
+    def all_off(self):
+        """Turn off all LEDs"""
+        if not self._initialized:
+            return
+        
+        try:
+            for line in self._lines:
+                line.set_value(0)
+            self._current_led = -1
+            print("DEBUG: All LEDs OFF")
+        except Exception as e:
+            print(f"Warning: Failed to turn off LEDs: {e}", file=sys.stderr)
+    
+    def all_on(self):
+        """Turn on all LEDs (useful for testing)"""
+        if not self._initialized:
+            return
+        
+        try:
+            for line in self._lines:
+                line.set_value(1)
+            self._current_led = -2  # Special value for "all on"
+            print("DEBUG: All LEDs ON")
+        except Exception as e:
+            print(f"Warning: Failed to turn on LEDs: {e}", file=sys.stderr)
+
+
 def time_strings(t0):
     now = time.time()
     elapsed_ms = int((now - t0) * 1000)
@@ -855,6 +958,23 @@ def main():
         print("WARNING: GPIO button enabled but gpiod library not available!")
     else:
         print("DEBUG: GPIO button disabled in config")
+    
+    # Start GPIO LED controller for calibration LEDs (if enabled)
+    led_controller = None
+    if GPIO_LED_CALIBRATION_ENABLE and gpiod is not None:
+        led_pins = [
+            GPIO_LED_CALIBRATION_LED1_PIN,
+            GPIO_LED_CALIBRATION_LED2_PIN,
+            GPIO_LED_CALIBRATION_LED3_PIN,
+            GPIO_LED_CALIBRATION_LED4_PIN,
+        ]
+        print(f"DEBUG: Initializing GPIO LED controller on {GPIO_CHIP} pins {led_pins}")
+        led_controller = GPIOLEDController(gpio_chip=GPIO_CHIP, led_pins=led_pins)
+        led_controller.start()
+    elif GPIO_LED_CALIBRATION_ENABLE and gpiod is None:
+        print("WARNING: GPIO LED calibration enabled but gpiod library not available!")
+    else:
+        print("DEBUG: GPIO LED calibration disabled in config")
     
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
@@ -1504,6 +1624,13 @@ def main():
             for i, p in enumerate(led_pos):
                 color = (0, 255, 0) if i == calib_step else (60, 60, 60)
                 pygame.draw.circle(screen, color, p, 8)
+        
+        # Hardware LED control during calibration
+        if led_controller is not None:
+            if state == "CALIBRATING" and calib_step >= 0 and calib_step < 4:
+                led_controller.set_led(calib_step)
+            else:
+                led_controller.all_off()
 
         if state == "READY":
             # Message logic based on connection and calibration
@@ -1604,6 +1731,8 @@ def main():
     gp.stop()
     if gpio_monitor:
         gpio_monitor.stop()
+    if led_controller:
+        led_controller.stop()
     pygame.quit()
 
 
