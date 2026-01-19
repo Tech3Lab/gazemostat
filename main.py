@@ -1721,12 +1721,19 @@ def main():
                 # Note: We can't directly know which point Gazepoint is on, so we cycle through LEDs
                 # This is a simplification - in practice, Gazepoint manages the calibration sequence
                 # We just provide visual targets with LEDs
+                # Calculate estimated calibration point based on elapsed time
+                elapsed = time.time() - calib_step_start
+                total_time_per_point = (CALIB_DELAY + CALIB_DWELL) * 5  # Assume 5 points default
+                estimated_point = int((elapsed % total_time_per_point) / (CALIB_DELAY + CALIB_DWELL))
+                # Update calib_step for on-screen LED display
+                if estimated_point < 4:
+                    calib_step = estimated_point
+                else:
+                    # For 5th point or beyond, set to -1 (no LED highlighted)
+                    calib_step = -1
+                
+                # Control hardware LEDs
                 if led_controller is not None:
-                    # Cycle through LEDs to guide user through calibration points
-                    # This is approximate since we don't know Gazepoint's exact point timing
-                    elapsed = time.time() - calib_step_start
-                    total_time_per_point = (CALIB_DELAY + CALIB_DWELL) * 5  # Assume 5 points default
-                    estimated_point = int((elapsed % total_time_per_point) / (CALIB_DELAY + CALIB_DWELL))
                     if estimated_point < 4:
                         led_controller.set_led(estimated_point)
                     else:
