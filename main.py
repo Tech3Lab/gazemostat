@@ -836,6 +836,9 @@ class GPIOLEDController:
             print(f"GPIO LED controller initialized on {self.gpio_chip}")
             print(f"DEBUG: LED pins: {self.led_pins}")
             print(f"DEBUG: LED wiring - connect LED+ to GP pin, LED- through resistor to GND")
+            print(f"DEBUG: NOTE: GPIO pins output 3.3V (not 5V) with limited current (~2-4mA)")
+            print(f"DEBUG: If LEDs don't light, they may need a transistor/MOSFET driver circuit")
+            print(f"DEBUG: Test LEDs with keys: T (all), Q/W/E/U (individual)")
             return True
             
         except Exception as e:
@@ -895,15 +898,45 @@ class GPIOLEDController:
     def all_on(self):
         """Turn on all LEDs (useful for testing)"""
         if not self._initialized:
+            print("DEBUG: Cannot turn on LEDs - controller not initialized")
             return
         
         try:
-            for line in self._lines:
+            for i, line in enumerate(self._lines):
                 line.set_value(1)
+                # Verify the value was set
+                actual_value = line.get_value()
+                print(f"DEBUG: LED {i+1} (GP{self.led_pins[i]}) set to {actual_value}")
             self._current_led = -2  # Special value for "all on"
-            print("DEBUG: All LEDs ON")
+            print("DEBUG: All LEDs ON - verify with multimeter if LEDs don't light")
+            print("DEBUG: Note: GPIO pins output 3.3V, not 5V. LEDs may need transistor/MOSFET driver.")
         except Exception as e:
             print(f"Warning: Failed to turn on LEDs: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
+    
+    def test_led(self, led_index, duration=2.0):
+        """Test a specific LED by turning it on for a duration"""
+        if not self._initialized:
+            print(f"DEBUG: Cannot test LED {led_index} - controller not initialized")
+            return
+        
+        if led_index < 0 or led_index >= len(self._lines):
+            print(f"DEBUG: Invalid LED index {led_index} (valid: 0-{len(self._lines)-1})")
+            return
+        
+        try:
+            print(f"DEBUG: Testing LED {led_index + 1} (GP{self.led_pins[led_index]}) for {duration}s...")
+            self._lines[led_index].set_value(1)
+            actual_value = self._lines[led_index].get_value()
+            print(f"DEBUG: GPIO pin GP{self.led_pins[led_index]} set to {actual_value}")
+            time.sleep(duration)
+            self._lines[led_index].set_value(0)
+            print(f"DEBUG: LED {led_index + 1} test complete")
+        except Exception as e:
+            print(f"Warning: Failed to test LED {led_index}: {e}", file=sys.stderr)
+            import traceback
+            traceback.print_exc()
 
 
 def time_strings(t0):
@@ -1376,6 +1409,11 @@ def main():
             cheat += [
                 "N — Marker (toggle start/end)",
             ]
+        if led_controller is not None:
+            cheat += [
+                "T — Test all LEDs",
+                "Q/W/E/U — Test LED 1/2/3/4",
+            ]
         if SIM_GAZE:
             cheat += [
                 "1 — Gaze: Connected",
@@ -1475,9 +1513,29 @@ def main():
                     if SHOW_KEYS:
                         log_key("M")
                     running = False
-                elif ev.key == pygame.K_r:
-                    log_key("R")
-                    reset_app_state()
+                # LED testing shortcuts (for debugging)
+                elif ev.key == pygame.K_t and led_controller is not None:
+                    # T key: Test all LEDs
+                    log_key("T")
+                    print("DEBUG: Testing all LEDs...")
+                    led_controller.all_on()
+                    threading.Thread(target=lambda: (time.sleep(2), led_controller.all_off()), daemon=True).start()
+                elif ev.key == pygame.K_q and led_controller is not None:
+                    # Q key: Test LED 1
+                    log_key("Q")
+                    led_controller.test_led(0, duration=1.0)
+                elif ev.key == pygame.K_w and led_controller is not None:
+                    # W key: Test LED 2
+                    log_key("W")
+                    led_controller.test_led(1, duration=1.0)
+                elif ev.key == pygame.K_e and led_controller is not None:
+                    # E key: Test LED 3
+                    log_key("E")
+                    led_controller.test_led(2, duration=1.0)
+                elif ev.key == pygame.K_u and led_controller is not None:
+                    # U key: Test LED 4
+                    log_key("U")
+                    led_controller.test_led(3, duration=1.0)
                 elif ev.key == pygame.K_r:
                     log_key("R")
                     reset_app_state()
