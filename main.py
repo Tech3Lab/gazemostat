@@ -19,7 +19,8 @@ except ImportError:
 GPIO_BTN_MARKER_SIM = True       # Enable "N" keyboard shortcut for markers
 GPIO_BTN_MARKER_ENABLE = False   # Enable hardware button for markers
 GPIO_BTN_MARKER_PIN = 0          # GPIO pin for marker button (GP0)
-GPIO_LED_CALIBRATION_SIM = True  # Enable on-screen LED simulation
+GPIO_LED_CALIBRATION_DISPLAY = True  # Enable on-screen LED display
+GPIO_LED_CALIBRATION_KEYBOARD = True  # Enable keyboard shortcuts for calibration
 GPIO_LED_CALIBRATION_ENABLE = False  # Enable hardware LEDs for calibration
 GPIO_LED_CALIBRATION_LED1_PIN = 1    # GP1
 GPIO_LED_CALIBRATION_LED2_PIN = 2    # GP2
@@ -43,7 +44,7 @@ GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 # Load config.yaml if it exists
 def load_config():
     global GPIO_BTN_MARKER_SIM, GPIO_BTN_MARKER_ENABLE, GPIO_BTN_MARKER_PIN
-    global GPIO_LED_CALIBRATION_SIM, GPIO_LED_CALIBRATION_ENABLE
+    global GPIO_LED_CALIBRATION_DISPLAY, GPIO_LED_CALIBRATION_KEYBOARD, GPIO_LED_CALIBRATION_ENABLE
     global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
     global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
@@ -62,7 +63,8 @@ def load_config():
                     GPIO_BTN_MARKER_ENABLE = config.get('gpio_btn_marker_enable', GPIO_BTN_MARKER_ENABLE)
                     GPIO_BTN_MARKER_PIN = config.get('gpio_btn_marker_pin', GPIO_BTN_MARKER_PIN)
                     # GPIO calibration LED configuration
-                    GPIO_LED_CALIBRATION_SIM = config.get('gpio_led_calibration_sim', GPIO_LED_CALIBRATION_SIM)
+                    GPIO_LED_CALIBRATION_DISPLAY = config.get('gpio_led_calibration_display', GPIO_LED_CALIBRATION_DISPLAY)
+                    GPIO_LED_CALIBRATION_KEYBOARD = config.get('gpio_led_calibration_keyboard', GPIO_LED_CALIBRATION_KEYBOARD)
                     GPIO_LED_CALIBRATION_ENABLE = config.get('gpio_led_calibration_enable', GPIO_LED_CALIBRATION_ENABLE)
                     GPIO_LED_CALIBRATION_LED1_PIN = config.get('gpio_led_calibration_led1_pin', GPIO_LED_CALIBRATION_LED1_PIN)
                     GPIO_LED_CALIBRATION_LED2_PIN = config.get('gpio_led_calibration_led2_pin', GPIO_LED_CALIBRATION_LED2_PIN)
@@ -1337,7 +1339,7 @@ def main():
         if not SHOW_KEYS:
             return
         cheat = []
-        if GPIO_LED_CALIBRATION_SIM:
+        if GPIO_LED_CALIBRATION_KEYBOARD:
             cheat += [
                 "Z — Start calibration",
                 "X — Start collection",
@@ -1413,7 +1415,7 @@ def main():
             if ev.type == pygame.QUIT:
                 running = False
             elif ev.type == pygame.KEYDOWN:
-                if GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_z and state == "READY":
+                if GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_z and state == "READY":
                     log_key("Z")
                     start_calibration(override=None)
                 elif SIM_GAZE and ev.key == pygame.K_1:
@@ -1433,13 +1435,13 @@ def main():
                     # Start calibration with simulated low-quality result (same routine, overridden outcome)
                     log_key("5")
                     start_calibration(override="low")
-                elif GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_x and state == "READY":
+                elif GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_x and state == "READY":
                     log_key("X")
                     start_collection()
                 elif GPIO_BTN_MARKER_SIM and ev.key == pygame.K_n and state == "COLLECTING":
                     log_key("N")
                     marker_toggle()
-                elif GPIO_LED_CALIBRATION_SIM and ev.key == pygame.K_b and state == "COLLECTING":
+                elif GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_b and state == "COLLECTING":
                     log_key("B")
                     stop_collection_begin_analysis()
                 elif ev.key == pygame.K_m:
@@ -1614,7 +1616,7 @@ def main():
         draw_status_header()
 
         # On-screen calibration LED hints
-        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_SIM:
+        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY:
             led_pos = [
                 (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
                 (int(WIDTH * 0.9), int(HEIGHT * 0.15)),

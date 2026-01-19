@@ -40,13 +40,19 @@ gpio_btn_marker_pin: 0
 #   Default: 0.2
 gpio_btn_marker_debounce: 0.2
 
-# gpio_led_calibration_sim: Enable on-screen LED simulation for calibration
-#   - true:  Show on-screen LED indicators during calibration
-#            Enables keyboard shortcuts: Z (start calibration), 
-#            X (start collection), B (stop collection)
-#   - false: Disable on-screen LED simulation and keyboard shortcuts
+# gpio_led_calibration_display: Enable on-screen LED display for calibration
+#   - true:  Show on-screen LED indicators during calibration sequence
+#            Displays visual LED circles at calibration points
+#   - false: Hide on-screen LED indicators
 #   Default: true
-gpio_led_calibration_sim: true
+gpio_led_calibration_display: true
+
+# gpio_led_calibration_keyboard: Enable keyboard shortcuts for calibration
+#   - true:  Enable keyboard shortcuts: Z (start calibration), 
+#            X (start collection), B (stop collection)
+#   - false: Disable keyboard shortcuts for calibration
+#   Default: true
+gpio_led_calibration_keyboard: true
 
 # gpio_led_calibration_enable: Enable hardware LEDs for calibration
 #   - true:  Control physical GPIO LEDs during calibration sequence
