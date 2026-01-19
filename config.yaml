@@ -55,9 +55,10 @@ gpio_led_calibration_display: true
 gpio_led_calibration_keyboard: true
 
 # gp_calibration_method: Calibration method to use
-#   - "LED":     Use custom LED-based calibration (collects gaze samples at 4 LED points
-#                and computes affine transform). Works with both simulation and real hardware.
-#                This method does not require the Gazepoint Control overlay.
+#   - "LED":     Use LED-based calibration with Gazepoint server-side calibration.
+#                Uses Gazepoint's calibration API with overlay hidden, and guides user
+#                with physical LEDs at 4 corners. Gazepoint performs calibration computation.
+#                Works with real hardware (not in simulation mode). No manual post-processing.
 #   - "OVERLAY": Use Gazepoint Control's built-in overlay calibration window.
 #                Requires Gazepoint Control software to be running.
 #                Only works with real hardware (not in simulation mode).
@@ -73,6 +74,22 @@ gp_calibration_method: LED
 #   - false: Disable hardware LED control
 #   Default: true
 gpio_led_calibration_enable: true
+
+# calib_delay: Delay after LED turns on before collecting gaze samples
+#   - Time in seconds to wait after LED turns on before starting data collection
+#   - Gives user time to move their eyes to look at the LED
+#   - Value in seconds (e.g., 0.3 = 300ms)
+#   - Only used when gp_calibration_method is "LED" or "BOTH"
+#   Default: 0.3
+calib_delay: 0.3
+
+# calib_dwell: Duration to collect gaze samples at each calibration point
+#   - Time in seconds to collect gaze samples after the delay period
+#   - Longer durations provide more samples but take more time
+#   - Value in seconds (e.g., 0.9 = 900ms)
+#   - Only used when gp_calibration_method is "LED" or "BOTH"
+#   Default: 0.9
+calib_dwell: 0.9
 
 # gpio_led_calibration_led1_pin: GPIO pin for calibration LED 1
 #   - GPIO line number for first calibration point LED

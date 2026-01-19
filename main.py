@@ -39,6 +39,8 @@ MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
 CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
 CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
+CALIB_DELAY = 0.3  # Delay after LED turns on before collecting samples (seconds)
+CALIB_DWELL = 0.9  # Duration to collect samples (seconds)
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 
@@ -51,7 +53,7 @@ def load_config():
     global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
     global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
-    global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD
+    global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     if yaml is None:
         return
@@ -91,6 +93,8 @@ def load_config():
                     FEATURE_WINDOW_MS = config.get('feature_window_ms', FEATURE_WINDOW_MS)
                     CALIB_OK_THRESHOLD = config.get('calibration_ok_threshold', CALIB_OK_THRESHOLD)
                     CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
+                    CALIB_DELAY = config.get('calib_delay', CALIB_DELAY)
+                    CALIB_DWELL = config.get('calib_dwell', CALIB_DWELL)
                     GPIO_CHIP = config.get('gpio_chip', GPIO_CHIP)
                     GPIO_BTN_MARKER_DEBOUNCE = config.get('gpio_btn_marker_debounce', GPIO_BTN_MARKER_DEBOUNCE)
         except Exception as e:
@@ -1039,9 +1043,10 @@ def main():
     target_points = []
     calib_step = -1
     calib_step_start = 0.0
+    calib_collect_start = 0.0  # When to start collecting samples (after delay)
     using_led_calib = False  # Flag for LED-based calibration active
     using_overlay_calib = False  # Flag for overlay calibration active
-    CALIB_DWELL = 0.9
+    # CALIB_DELAY and CALIB_DWELL are loaded from config.yaml in load_config()
     calib_quality = "none"  # none|ok|low|failed
     calib_avg_error = None  # Average error value for display (when ok or low)
     current_calib_override = None  # None|'failed'|'low'
@@ -1088,15 +1093,64 @@ def main():
             gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
             time.sleep(0.1)
         
-        # Initialize LED-based calibration if enabled
+        # Initialize LED-based calibration if enabled (use Gazepoint server-side calibration with overlay hidden)
         if using_led_calib:
-            print("DEBUG: Initializing LED-based calibration...")
-            # Clear previous calibration transform/state
-            aff = Affine2D()
-            calib_points = []
-            target_points = []
-            calib_step = 0
-            calib_step_start = time.time()
+            print("DEBUG: Starting LED-based calibration with Gazepoint server...")
+            # Clear calibration result before starting
+            with gp.calib_result_lock:
+                gp.calib_result = None
+            
+            # Clear previous calibration points
+            print("DEBUG: Clearing calibration points...")
+            gp.calibrate_clear()
+            time.sleep(0.1)
+            
+            # Reset calibration points to default (5 points)
+            print("DEBUG: Resetting calibration points to default...")
+            gp.calibrate_reset()
+            time.sleep(0.1)
+            
+            # Set calibration timeout based on dwell time (convert seconds to milliseconds)
+            timeout_ms = int(CALIB_DWELL * 1000)
+            print(f"DEBUG: Setting calibration timeout to {timeout_ms}ms...")
+            gp.calibrate_timeout(timeout_ms)
+            time.sleep(0.1)
+            
+            # Set calibration delay (convert seconds to milliseconds)
+            delay_ms = int(CALIB_DELAY * 1000)
+            print(f"DEBUG: Setting calibration delay to {delay_ms}ms...")
+            gp.calibrate_delay(delay_ms)
+            time.sleep(0.1)
+            
+            # Hide calibration window (use LEDs instead of overlay)
+            print("DEBUG: Hiding calibration window (using LEDs)...")
+            if gp.calibrate_show(False):
+                print("DEBUG: Calibration window hidden successfully")
+            else:
+                print("DEBUG: Failed to hide calibration window")
+                set_info_msg("Failed to configure calibration", dur=2.0)
+                using_led_calib = False
+                # If overlay calibration is also disabled, abort
+                if not using_overlay_calib:
+                    state = "READY"
+                    return
+            
+            # Start the calibration sequence and wait for ACK
+            if using_led_calib:
+                print("DEBUG: Starting Gazepoint calibration (LED-based)...")
+                if gp.calibrate_start():
+                    print("DEBUG: LED-based calibration started successfully")
+                    calib_step_start = time.time()  # Record when calibration started
+                    print("DEBUG: Waiting for calibration to complete...")
+                else:
+                    print("DEBUG: Failed to start LED-based calibration")
+                    set_info_msg("Failed to start calibration", dur=2.0)
+                    gp.calibrate_show(False)  # Ensure calibration window is hidden
+                    using_led_calib = False
+                    # If overlay calibration is also disabled, abort
+                    if not using_overlay_calib:
+                        state = "READY"
+                        return
         
         # Start overlay calibration if enabled (only works with real hardware)
         if using_overlay_calib:
@@ -1239,7 +1293,7 @@ def main():
 
     def reset_app_state():
         nonlocal state, calib_status, receiving_hint, aff, calib_points, target_points
-        nonlocal calib_step, calib_step_start, calib_quality, calib_avg_error, current_calib_override
+        nonlocal calib_step, calib_step_start, calib_collect_start, calib_quality, calib_avg_error, current_calib_override
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
@@ -1251,6 +1305,7 @@ def main():
         target_points = []
         calib_step = -1
         calib_step_start = 0.0
+        calib_collect_start = 0.0
         calib_quality = "none"
         calib_avg_error = None
         current_calib_override = None
@@ -1659,36 +1714,29 @@ def main():
                             calib_status = "red"
                             calib_quality = "failed"
             
-            # Handle LED-based calibration (if enabled)
+            # Handle LED-based calibration (if enabled) - uses Gazepoint server-side calibration
             led_complete = False
             if using_led_calib:
-                if calib_step == 0:
-                    target = (0.1, 0.1)
-                elif calib_step == 1:
-                    target = (0.9, 0.1)
-                elif calib_step == 2:
-                    target = (0.9, 0.9)
-                elif calib_step == 3:
-                    target = (0.1, 0.9)
-                else:
-                    target = None
-
-                # Control hardware LEDs during calibration
-                if led_controller is not None and target is not None:
-                    led_controller.set_led(calib_step)
-
-                # Collect samples during dwell
-                if target is not None:
-                    tnow = time.time()
-                    if tnow - calib_step_start < CALIB_DWELL:
-                        if last_calib_gaze is not None:
-                            calib_points.append(last_calib_gaze)
-                            target_points.append(target)
+                # Control hardware LEDs during calibration based on Gazepoint's calibration point progression
+                # Note: We can't directly know which point Gazepoint is on, so we cycle through LEDs
+                # This is a simplification - in practice, Gazepoint manages the calibration sequence
+                # We just provide visual targets with LEDs
+                if led_controller is not None:
+                    # Cycle through LEDs to guide user through calibration points
+                    # This is approximate since we don't know Gazepoint's exact point timing
+                    elapsed = time.time() - calib_step_start
+                    total_time_per_point = (CALIB_DELAY + CALIB_DWELL) * 5  # Assume 5 points default
+                    estimated_point = int((elapsed % total_time_per_point) / (CALIB_DELAY + CALIB_DWELL))
+                    if estimated_point < 4:
+                        led_controller.set_led(estimated_point)
                     else:
-                        calib_step += 1
-                        calib_step_start = tnow
-                else:
-                    # Finalize LED-based calibration outcome
+                        # For 5th point or beyond, cycle back or turn off
+                        led_controller.all_off()
+                
+                # Wait for Gazepoint calibration result (same as overlay calibration)
+                calib_result = gp.get_calibration_result()
+                if calib_result is not None:
+                    # Calibration completed - process result
                     led_complete = True
                     using_led_calib = False
                     if led_controller is not None:
@@ -1697,29 +1745,94 @@ def main():
                     if current_calib_override == "failed":
                         calib_status = "red"
                         calib_quality = "failed"
+                        calib_avg_error = None
                         set_info_msg("Calibration failed, try again", dur=3.0)
                     elif current_calib_override == "low":
-                        # Simulate a successful but low-quality calibration regardless of sample count
                         calib_status = "orange"
                         calib_quality = "low"
+                        # Use a simulated error value for override
+                        calib_avg_error = CALIB_LOW_THRESHOLD - 0.1
+                        set_info_msg("Ready, low quality calibration", dur=2.0)
                     else:
-                        if len(calib_points) >= 4:
-                            # Fit simple affine raw->screen
-                            aff.fit(calib_points[:4], target_points[:4])
-                            calib_status = "green"
-                            calib_quality = "ok"
-                            set_info_msg("LED calibration complete", dur=2.0)
+                        # Evaluate calibration quality based on Gazepoint result
+                        avg_error = calib_result.get('average_error')
+                        num_points = calib_result.get('num_points')
+                        success = calib_result.get('success')
+                        
+                        # Handle None values to prevent TypeError
+                        if num_points is None:
+                            num_points = 0
+                        if success is None:
+                            success = 0
+                        if avg_error is None:
+                            avg_error = 0.0
+                        
+                        # Debug: print calibration result for troubleshooting
+                        print(f"LED calibration result: success={success}, num_points={num_points}, avg_error={avg_error:.4f}")
+                        
+                        if success and num_points >= 4:
+                            if avg_error < CALIB_OK_THRESHOLD:
+                                calib_status = "green"
+                                calib_quality = "ok"
+                                calib_avg_error = avg_error
+                                set_info_msg("LED calibration complete", dur=2.0)
+                            elif avg_error < CALIB_LOW_THRESHOLD:
+                                calib_status = "orange"
+                                calib_quality = "low"
+                                calib_avg_error = avg_error
+                                set_info_msg("Ready, low quality calibration", dur=2.0)
+                            else:
+                                calib_status = "red"
+                                calib_quality = "failed"
+                                calib_avg_error = None
+                                set_info_msg(f"Calibration failed (error: {avg_error:.2f}), try again", dur=3.0)
                         else:
-                            # In development, succeed even without enough samples
-                            calib_status = "green"
-                            calib_quality = "ok"
-                            set_info_msg("LED calibration complete", dur=2.0)
+                            calib_status = "red"
+                            calib_quality = "failed"
+                            calib_avg_error = None
+                            fail_reason = f"success={success}, points={num_points}"
+                            set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
                     
+                    # Hide calibration window (should already be hidden, but ensure it)
+                    gp.calibrate_show(False)
+                    # Re-enable data fields after calibration (some devices may reset them)
+                    # Run in background thread to avoid blocking UI
+                    def _reenable_fields():
+                        time.sleep(0.2)  # Small delay before re-enabling
+                        print("DEBUG: Re-enabling gaze data fields after calibration...")
+                        gp._enable_gaze_data_fields()
+                    threading.Thread(target=_reenable_fields, daemon=True).start()
+                    # Reset override for next time
+                    current_calib_override = None
                     # If overlay calibration is also active, don't change state yet
                     if not using_overlay_calib:
-                        # Reset override for next time
-                        current_calib_override = None
                         state = "READY"
+                else:
+                    # Still calibrating, wait for CALIB_RESULT message from Gazepoint
+                    elapsed = time.time() - calib_step_start
+                    
+                    # If calibration has been running for more than 15 seconds, periodically request result summary
+                    if elapsed > 15.0:
+                        last_check = getattr(start_calibration, '_last_result_check', 0)
+                        if elapsed - last_check >= 3.0:  # Check every 3 seconds
+                            print(f"DEBUG: LED calibration running for {elapsed:.1f}s, requesting result summary...")
+                            gp.calibrate_result_summary()
+                            start_calibration._last_result_check = elapsed
+                    
+                    # Check if calibration has been running for too long (timeout after 60 seconds)
+                    if elapsed > 60.0:
+                        print(f"DEBUG: LED calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
+                        set_info_msg("Calibration timeout - please try again", dur=3.0)
+                        gp.calibrate_show(False)
+                        if led_controller is not None:
+                            led_controller.all_off()
+                        using_led_calib = False
+                        # If overlay calibration is also disabled, abort
+                        if not using_overlay_calib:
+                            current_calib_override = None
+                            state = "READY"
+                            calib_status = "red"
+                            calib_quality = "failed"
             
             # If both calibrations are complete, finalize
             if (overlay_complete or not using_overlay_calib) and (led_complete or not using_led_calib):
@@ -1990,16 +2103,25 @@ def extract_features(gaze_samples, events, session_t0, aff):
     gaze_array = np.array([(s.get('gx', 0.5), s.get('gy', 0.5), s.get('pupil', 2.5), s.get('valid', True)) 
                            for s in gaze_samples])
     
-    # Apply calibration transform if available
+    # Apply calibration transform if available (only for client-side calibration)
+    # Note: When using Gazepoint calibration API (LED or OVERLAY), the data is already calibrated
+    # by Gazepoint server, so we should not apply Affine2D transform in that case.
+    # We only apply Affine2D for client-side calibration (not currently used in LED mode).
     if aff and len(gaze_array) > 0:
-        calibrated_gaze = []
-        for gx, gy, pupil, valid in gaze_array:
-            if valid:
-                cx, cy = aff.apply(gx, gy)
-                calibrated_gaze.append((cx, cy, pupil, valid))
-            else:
-                calibrated_gaze.append((gx, gy, pupil, valid))
-        gaze_array = np.array(calibrated_gaze)
+        # Check if we should skip Affine2D application
+        # If calibration was done via Gazepoint API, data is already calibrated
+        # For now, we apply it if aff is not identity (meaning client-side calibration was used)
+        # But since LED calibration now uses Gazepoint API, this should rarely be needed
+        is_identity = np.allclose(aff.A, np.array([[1, 0, 0], [0, 1, 0]]))
+        if not is_identity:
+            calibrated_gaze = []
+            for gx, gy, pupil, valid in gaze_array:
+                if valid:
+                    cx, cy = aff.apply(gx, gy)
+                    calibrated_gaze.append((cx, cy, pupil, valid))
+                else:
+                    calibrated_gaze.append((gx, gy, pupil, valid))
+            gaze_array = np.array(calibrated_gaze)
     
     gx = gaze_array[:, 0]
     gy = gaze_array[:, 1]
