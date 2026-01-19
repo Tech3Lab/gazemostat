@@ -21,7 +21,8 @@ GPIO_BTN_MARKER_ENABLE = False   # Enable hardware button for markers
 GPIO_BTN_MARKER_PIN = 0          # GPIO pin for marker button (GP0)
 GPIO_LED_CALIBRATION_DISPLAY = True  # Enable on-screen LED display
 GPIO_LED_CALIBRATION_KEYBOARD = True  # Enable keyboard shortcuts for calibration
-GPIO_LED_CALIBRATION_ENABLE = False  # Enable hardware LEDs for calibration
+GP_CALIBRATION_METHOD = "LED"  # Calibration method: "LED", "OVERLAY", or "BOTH"
+GPIO_LED_CALIBRATION_ENABLE = True  # Enable hardware LEDs for calibration
 GPIO_LED_CALIBRATION_LED1_PIN = 1    # GP1
 GPIO_LED_CALIBRATION_LED2_PIN = 2    # GP2
 GPIO_LED_CALIBRATION_LED3_PIN = 3    # GP3
@@ -29,7 +30,7 @@ GPIO_LED_CALIBRATION_LED4_PIN = 4    # GP4
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
-FULLSCREEN = True    # Run app in fullscreen mode
+FULLSCREEN = False    # Run app in fullscreen mode
 
 WIDTH, HEIGHT = 480, 800
 FPS = 30
@@ -44,7 +45,9 @@ GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 # Load config.yaml if it exists
 def load_config():
     global GPIO_BTN_MARKER_SIM, GPIO_BTN_MARKER_ENABLE, GPIO_BTN_MARKER_PIN
-    global GPIO_LED_CALIBRATION_DISPLAY, GPIO_LED_CALIBRATION_KEYBOARD, GPIO_LED_CALIBRATION_ENABLE
+    global GPIO_LED_CALIBRATION_DISPLAY, GPIO_LED_CALIBRATION_KEYBOARD
+    global GP_CALIBRATION_METHOD
+    global GPIO_LED_CALIBRATION_ENABLE
     global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
     global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
@@ -65,6 +68,13 @@ def load_config():
                     # GPIO calibration LED configuration
                     GPIO_LED_CALIBRATION_DISPLAY = config.get('gpio_led_calibration_display', GPIO_LED_CALIBRATION_DISPLAY)
                     GPIO_LED_CALIBRATION_KEYBOARD = config.get('gpio_led_calibration_keyboard', GPIO_LED_CALIBRATION_KEYBOARD)
+                    # Load calibration method enum, validate it
+                    calib_method = config.get('gp_calibration_method', GP_CALIBRATION_METHOD)
+                    if calib_method.upper() in ("LED", "OVERLAY", "BOTH"):
+                        GP_CALIBRATION_METHOD = calib_method.upper()
+                    else:
+                        print(f"Warning: Invalid gp_calibration_method '{calib_method}', using default 'LED'", file=sys.stderr)
+                        GP_CALIBRATION_METHOD = "LED"
                     GPIO_LED_CALIBRATION_ENABLE = config.get('gpio_led_calibration_enable', GPIO_LED_CALIBRATION_ENABLE)
                     GPIO_LED_CALIBRATION_LED1_PIN = config.get('gpio_led_calibration_led1_pin', GPIO_LED_CALIBRATION_LED1_PIN)
                     GPIO_LED_CALIBRATION_LED2_PIN = config.get('gpio_led_calibration_led2_pin', GPIO_LED_CALIBRATION_LED2_PIN)
@@ -996,6 +1006,8 @@ def main():
     target_points = []
     calib_step = -1
     calib_step_start = 0.0
+    using_led_calib = False  # Flag for LED-based calibration active
+    using_overlay_calib = False  # Flag for overlay calibration active
     CALIB_DWELL = 0.9
     calib_quality = "none"  # none|ok|low|failed
     calib_avg_error = None  # Average error value for display (when ok or low)
@@ -1023,7 +1035,7 @@ def main():
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
     def start_calibration(override=None):
-        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error
+        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error, using_led_calib, using_overlay_calib
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
@@ -1033,14 +1045,29 @@ def main():
         # Record override result for this calibration session (dev simulation)
         current_calib_override = override
         
-        # Use OpenGaze API v2 calibration if not in simulation mode
+        # Initialize flags for which calibration methods are active based on enum
+        using_led_calib = GP_CALIBRATION_METHOD in ("LED", "BOTH")
+        using_overlay_calib = GP_CALIBRATION_METHOD in ("OVERLAY", "BOTH") and not SIM_GAZE
+        
+        # Ensure gaze data streaming is enabled (required for both calibration methods)
         if not SIM_GAZE:
-            # Ensure gaze data streaming is enabled (required for calibration)
-            # This should already be enabled on connection, but verify
             print("DEBUG: Ensuring data streaming is enabled...")
             gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
             time.sleep(0.1)
-            
+        
+        # Initialize LED-based calibration if enabled
+        if using_led_calib:
+            print("DEBUG: Initializing LED-based calibration...")
+            # Clear previous calibration transform/state
+            aff = Affine2D()
+            calib_points = []
+            target_points = []
+            calib_step = 0
+            calib_step_start = time.time()
+        
+        # Start overlay calibration if enabled (only works with real hardware)
+        if using_overlay_calib:
+            print("DEBUG: Starting overlay calibration...")
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
@@ -1072,29 +1099,27 @@ def main():
             else:
                 print("DEBUG: Failed to show calibration window")
                 set_info_msg("Failed to show calibration window", dur=2.0)
-                state = "READY"
-                return
+                using_overlay_calib = False
+                # If LED calibration is also disabled, abort
+                if not using_led_calib:
+                    state = "READY"
+                    return
             
             # Start the calibration sequence and wait for ACK
-            print("DEBUG: Starting calibration...")
-            if gp.calibrate_start():
-                print("DEBUG: Calibration started successfully")
-                calib_step_start = time.time()  # Record when calibration actually started
-                print("DEBUG: Waiting for calibration to complete...")
-            else:
-                print("DEBUG: Failed to start calibration")
-                set_info_msg("Failed to start calibration", dur=2.0)
-                gp.calibrate_show(False)  # Hide calibration window
-                state = "READY"
-                return
-        else:
-            # Fallback to client-side calibration in simulation mode
-            # Clear previous calibration transform/state
-            aff = Affine2D()
-            calib_points = []
-            target_points = []
-            calib_step = 0
-            calib_step_start = time.time()
+            if using_overlay_calib:
+                print("DEBUG: Starting overlay calibration...")
+                if gp.calibrate_start():
+                    print("DEBUG: Overlay calibration started successfully")
+                    print("DEBUG: Waiting for calibration to complete...")
+                else:
+                    print("DEBUG: Failed to start overlay calibration")
+                    set_info_msg("Failed to start overlay calibration", dur=2.0)
+                    gp.calibrate_show(False)  # Hide calibration window
+                    using_overlay_calib = False
+                    # If LED calibration is also disabled, abort
+                    if not using_led_calib:
+                        state = "READY"
+                        return
 
     def start_collection():
         nonlocal state, session_t0, next_task_id, task_open, events, gaze_samples
@@ -1184,7 +1209,7 @@ def main():
         nonlocal calib_step, calib_step_start, calib_quality, calib_avg_error, current_calib_override
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
-        nonlocal info_msg, info_msg_until, last_calib_gaze
+        nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
         state = "READY"
         calib_status = "red"
         receiving_hint = False
@@ -1196,6 +1221,8 @@ def main():
         calib_quality = "none"
         calib_avg_error = None
         current_calib_override = None
+        using_led_calib = False
+        using_overlay_calib = False
         session_t0 = None
         next_task_id = 1
         task_open = False
@@ -1471,7 +1498,9 @@ def main():
 
         # Calibration sequencing
         if state == "CALIBRATING":
-            if not SIM_GAZE:
+            # Handle overlay calibration (if enabled)
+            overlay_complete = False
+            if using_overlay_calib:
                 # Use OpenGaze API v2 calibration
                 # Wait for CALIB_RESULT message from Gazepoint (sent after calibration completes)
                 calib_result = gp.get_calibration_result()
@@ -1539,9 +1568,13 @@ def main():
                     threading.Thread(target=_reenable_fields, daemon=True).start()
                     # Reset override for next time
                     current_calib_override = None
-                    state = "READY"
+                    overlay_complete = True
+                    using_overlay_calib = False
+                    # If LED calibration is also active, don't change state yet
+                    if not using_led_calib:
+                        state = "READY"
                 else:
-                    # Still calibrating, wait for CALIB_RESULT message
+                    # Still calibrating overlay, wait for CALIB_RESULT message
                     # The server will send CALIB_START_PT and CALIB_RESULT_PT messages for each point
                     # and finally CALIB_RESULT when calibration completes
                     elapsed = time.time() - calib_step_start
@@ -1551,21 +1584,26 @@ def main():
                     if elapsed > 15.0:
                         last_check = getattr(start_calibration, '_last_result_check', 0)
                         if elapsed - last_check >= 3.0:  # Check every 3 seconds
-                            print(f"DEBUG: Calibration running for {elapsed:.1f}s, requesting result summary...")
+                            print(f"DEBUG: Overlay calibration running for {elapsed:.1f}s, requesting result summary...")
                             gp.calibrate_result_summary()
                             start_calibration._last_result_check = elapsed
                     
                     # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
-                        print(f"DEBUG: Calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
-                        set_info_msg("Calibration timeout - please try again", dur=3.0)
+                        print(f"DEBUG: Overlay calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
+                        set_info_msg("Overlay calibration timeout - please try again", dur=3.0)
                         gp.calibrate_show(False)
-                        current_calib_override = None
-                        state = "READY"
-                        calib_status = "red"
-                        calib_quality = "failed"
-            else:
-                # Client-side calibration for simulation mode
+                        using_overlay_calib = False
+                        # If LED calibration is also disabled, abort
+                        if not using_led_calib:
+                            current_calib_override = None
+                            state = "READY"
+                            calib_status = "red"
+                            calib_quality = "failed"
+            
+            # Handle LED-based calibration (if enabled)
+            led_complete = False
+            if using_led_calib:
                 if calib_step == 0:
                     target = (0.1, 0.1)
                 elif calib_step == 1:
@@ -1577,7 +1615,11 @@ def main():
                 else:
                     target = None
 
-                # collect samples during dwell
+                # Control hardware LEDs during calibration
+                if led_controller is not None and target is not None:
+                    led_controller.set_led(calib_step)
+
+                # Collect samples during dwell
                 if target is not None:
                     tnow = time.time()
                     if tnow - calib_step_start < CALIB_DWELL:
@@ -1588,7 +1630,12 @@ def main():
                         calib_step += 1
                         calib_step_start = tnow
                 else:
-                    # Finalize calibration outcome
+                    # Finalize LED-based calibration outcome
+                    led_complete = True
+                    using_led_calib = False
+                    if led_controller is not None:
+                        led_controller.all_off()
+                    
                     if current_calib_override == "failed":
                         calib_status = "red"
                         calib_quality = "failed"
@@ -1603,11 +1650,23 @@ def main():
                             aff.fit(calib_points[:4], target_points[:4])
                             calib_status = "green"
                             calib_quality = "ok"
+                            set_info_msg("LED calibration complete", dur=2.0)
                         else:
                             # In development, succeed even without enough samples
                             calib_status = "green"
                             calib_quality = "ok"
-                    # Reset override for next time
+                            set_info_msg("LED calibration complete", dur=2.0)
+                    
+                    # If overlay calibration is also active, don't change state yet
+                    if not using_overlay_calib:
+                        # Reset override for next time
+                        current_calib_override = None
+                        state = "READY"
+            
+            # If both calibrations are complete, finalize
+            if (overlay_complete or not using_overlay_calib) and (led_complete or not using_led_calib):
+                if state == "CALIBRATING":
+                    # Both are done, finalize
                     current_calib_override = None
                     state = "READY"
 
@@ -1615,8 +1674,8 @@ def main():
         screen.fill((0, 0, 0))
         draw_status_header()
 
-        # On-screen calibration LED hints
-        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY:
+        # On-screen calibration LED hints (only for LED-based calibration)
+        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY and using_led_calib:
             led_pos = [
                 (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
                 (int(WIDTH * 0.9), int(HEIGHT * 0.15)),
@@ -1627,12 +1686,13 @@ def main():
                 color = (0, 255, 0) if i == calib_step else (60, 60, 60)
                 pygame.draw.circle(screen, color, p, 8)
         
-        # Hardware LED control during calibration
+        # Hardware LED control during LED-based calibration
+        # (LED control during calibration is handled in the calibration loop above)
         if led_controller is not None:
-            if state == "CALIBRATING" and calib_step >= 0 and calib_step < 4:
-                led_controller.set_led(calib_step)
-            else:
-                led_controller.all_off()
+            if state != "CALIBRATING" or not using_led_calib:
+                # Turn off LEDs when not calibrating or when not using LED-based calibration
+                if state != "CALIBRATING" or calib_step < 0 or calib_step >= 4:
+                    led_controller.all_off()
 
         if state == "READY":
             # Message logic based on connection and calibration

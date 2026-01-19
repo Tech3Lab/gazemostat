@@ -54,12 +54,25 @@ gpio_led_calibration_display: true
 #   Default: true
 gpio_led_calibration_keyboard: true
 
+# gp_calibration_method: Calibration method to use
+#   - "LED":     Use custom LED-based calibration (collects gaze samples at 4 LED points
+#                and computes affine transform). Works with both simulation and real hardware.
+#                This method does not require the Gazepoint Control overlay.
+#   - "OVERLAY": Use Gazepoint Control's built-in overlay calibration window.
+#                Requires Gazepoint Control software to be running.
+#                Only works with real hardware (not in simulation mode).
+#   - "BOTH":    Use both LED-based and overlay calibration simultaneously.
+#                Both methods will run in parallel during calibration.
+#   Default: "LED"
+gp_calibration_method: LED
+
 # gpio_led_calibration_enable: Enable hardware LEDs for calibration
 #   - true:  Control physical GPIO LEDs during calibration sequence
 #            LEDs are wired: LED+ to GPIO pin (GP1-GP4), LED- through resistor to GND
+#            Only used when gp_calibration_method is "LED" or "BOTH"
 #   - false: Disable hardware LED control
-#   Default: false
-gpio_led_calibration_enable: false
+#   Default: true
+gpio_led_calibration_enable: true
 
 # gpio_led_calibration_led1_pin: GPIO pin for calibration LED 1
 #   - GPIO line number for first calibration point LED
@@ -131,8 +144,8 @@ dev_show_keys: true
 #            The app window is always frameless (no title bar or borders)
 #   - false: Run in windowed mode (frameless window at 480x800 resolution)
 #            Useful for development and testing
-#   Default: true
-fullscreen: true
+#   Default: false
+fullscreen: false
 
 # ----------------------------------------------------------------------------
 # Gazepoint Eye Tracker Settings
