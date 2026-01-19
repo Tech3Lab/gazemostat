@@ -1386,12 +1386,32 @@ def main():
         pygame.draw.rect(screen, (60, 60, 60), rect, 2, border_radius=6)  # Border
         
         if last_calib_gaze is not None:
-            gx, gy = last_calib_gaze
-            dx = rect.left + int(gx * rect.width)
-            dy = rect.top + int(gy * rect.height)
-            pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
-            # Draw a small trail effect
-            pygame.draw.circle(screen, (0, 150, 200), (dx, dy), 8, 1)
+            # Handle new format: (gx, gy, valid) or old format: (gx, gy)
+            if len(last_calib_gaze) == 3:
+                gx, gy, valid = last_calib_gaze
+            else:
+                gx, gy = last_calib_gaze
+                valid = True  # Assume valid for old format compatibility
+            
+            if valid:
+                # Valid gaze: draw at actual position
+                # Gazepoint coordinates: gx=0.0 (left), gx=1.0 (right), gy=0.0 (top), gy=1.0 (bottom)
+                # Map normalized coordinates (0-1) to preview rectangle pixels
+                dx = rect.left + int(gx * rect.width)
+                dy = rect.top + int(gy * rect.height)
+                # Clamp to rectangle bounds to prevent drawing outside
+                dx = max(rect.left, min(rect.right - 1, dx))
+                dy = max(rect.top, min(rect.bottom - 1, dy))
+                pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+                # Draw a small trail effect
+                pygame.draw.circle(screen, (0, 150, 200), (dx, dy), 8, 1)
+            else:
+                # Invalid gaze: show blinking red marker at center
+                blink_rate = 0.5  # Blink every 0.5 seconds
+                should_show = int(time.time() / blink_rate) % 2 == 0
+                if should_show:
+                    pygame.draw.circle(screen, (255, 0, 0), (rect.centerx, rect.centery), 8)
+                    pygame.draw.circle(screen, (200, 0, 0), (rect.centerx, rect.centery), 10, 2)
         
         # Draw crosshair in center for reference
         pygame.draw.line(screen, (60, 60, 60), 
@@ -1604,8 +1624,11 @@ def main():
                 s = gp.q.get_nowait()
                 if state == "COLLECTING":
                     gaze_samples.append(s)
-                # Remember last for preview
-                last_calib_gaze = (max(0.0, min(1.0, s.get("gx", 0.5))), max(0.0, min(1.0, s.get("gy", 0.5))))
+                # Remember last for preview (include validity)
+                gx_val = max(0.0, min(1.0, s.get("gx", 0.5)))
+                gy_val = max(0.0, min(1.0, s.get("gy", 0.5)))
+                valid_val = s.get("valid", True)
+                last_calib_gaze = (gx_val, gy_val, valid_val)
         except queue.Empty:
             pass
 
@@ -1902,10 +1925,30 @@ def main():
                 pygame.draw.rect(screen, (30, 30, 30), rect, border_radius=6)
                 
                 # Draw gaze position
-                gx, gy = last_calib_gaze
-                dx = rect.left + int(gx * rect.width)
-                dy = rect.top + int(gy * rect.height)
-                pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+                # Handle new format: (gx, gy, valid) or old format: (gx, gy)
+                if len(last_calib_gaze) == 3:
+                    gx, gy, valid = last_calib_gaze
+                else:
+                    gx, gy = last_calib_gaze
+                    valid = True  # Assume valid for old format compatibility
+                
+                if valid:
+                    # Valid gaze: draw at actual position
+                    # Gazepoint coordinates: gx=0.0 (left), gx=1.0 (right), gy=0.0 (top), gy=1.0 (bottom)
+                    # Map normalized coordinates (0-1) to preview rectangle pixels
+                    dx = rect.left + int(gx * rect.width)
+                    dy = rect.top + int(gy * rect.height)
+                    # Clamp to rectangle bounds to prevent drawing outside
+                    dx = max(rect.left, min(rect.right - 1, dx))
+                    dy = max(rect.top, min(rect.bottom - 1, dy))
+                    pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+                else:
+                    # Invalid gaze: show blinking red marker at center
+                    blink_rate = 0.5  # Blink every 0.5 seconds
+                    should_show = int(time.time() / blink_rate) % 2 == 0
+                    if should_show:
+                        pygame.draw.circle(screen, (255, 0, 0), (rect.centerx, rect.centery), 8)
+                        pygame.draw.circle(screen, (200, 0, 0), (rect.centerx, rect.centery), 10, 2)
                 
                 # Draw crosshair in center for reference
                 pygame.draw.line(screen, (60, 60, 60), 
