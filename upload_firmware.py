@@ -254,19 +254,38 @@ def compile_firmware(cli_path, firmware_path):
         print_error(f"Firmware file not found: {firmware_path}")
         return False
     
-    # Arduino CLI accepts the .ino file directly
-    # This avoids issues where it might look for a .ino file matching the directory name
-    firmware_name = firmware_path.name
+    # Arduino CLI requires the sketch directory name to match the .ino filename
+    # Create a temporary sketch directory with the correct structure
+    firmware_name = firmware_path.stem  # filename without extension
+    script_dir = firmware_path.parent
+    temp_sketch_dir = script_dir / firmware_name
     
-    print_info(f"Compiling {firmware_name}...")
-    print_info(f"  Full path: {firmware_path}")
+    # Create temporary sketch directory if it doesn't exist or is outdated
+    needs_copy = False
+    if not temp_sketch_dir.exists():
+        needs_copy = True
+    else:
+        # Check if the .ino file in temp dir is older than source
+        temp_ino = temp_sketch_dir / firmware_path.name
+        if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
+            needs_copy = True
     
-    # Pass the .ino file directly to arduino-cli
+    if needs_copy:
+        print_info(f"Creating temporary sketch directory: {temp_sketch_dir}")
+        temp_sketch_dir.mkdir(exist_ok=True)
+        # Copy the .ino file to the temp directory
+        import shutil
+        shutil.copy2(firmware_path, temp_sketch_dir / firmware_path.name)
+        print_info(f"Copied {firmware_path.name} to sketch directory")
+    
+    print_info(f"Compiling {firmware_path.name} from sketch directory {temp_sketch_dir}...")
+    
+    # Pass the sketch directory to arduino-cli (directory name must match .ino filename)
     success, stdout, stderr = run_arduino_cli(cli_path, [
         "compile",
         "--fqbn", BOARD_FQBN,
         "--verbose",
-        str(firmware_path)
+        str(temp_sketch_dir)
     ])
     
     if not success:
@@ -312,14 +331,27 @@ def upload_via_uf2(firmware_path):
     # Ensure firmware_path is absolute
     firmware_path = Path(firmware_path).resolve()
     
+    # Arduino CLI requires the sketch directory name to match the .ino filename
+    firmware_name = firmware_path.stem  # filename without extension
+    script_dir = firmware_path.parent
+    temp_sketch_dir = script_dir / firmware_name
+    
+    # Create temporary sketch directory if needed
+    temp_sketch_dir.mkdir(exist_ok=True)
+    temp_ino = temp_sketch_dir / firmware_path.name
+    if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
+        import shutil
+        shutil.copy2(firmware_path, temp_ino)
+        print_info(f"Copied {firmware_path.name} to sketch directory for compilation")
+    
     print_info(f"Compiling {firmware_path.name} for UF2 generation...")
     
-    # Pass the .ino file directly to arduino-cli
+    # Pass the sketch directory to arduino-cli
     success, stdout, stderr = run_arduino_cli(cli_path, [
         "compile",
         "--fqbn", BOARD_FQBN,
         "--output-dir", str(build_dir),
-        str(firmware_path)
+        str(temp_sketch_dir)
     ])
     
     if not success:
@@ -406,13 +438,25 @@ def upload_firmware(cli_path, firmware_path, port=None):
     # Ensure firmware_path is absolute
     firmware_path = Path(firmware_path).resolve()
     
-    # Pass the .ino file directly to arduino-cli
+    # Arduino CLI requires the sketch directory name to match the .ino filename
+    firmware_name = firmware_path.stem  # filename without extension
+    script_dir = firmware_path.parent
+    temp_sketch_dir = script_dir / firmware_name
+    
+    # Ensure sketch directory exists with the .ino file
+    temp_sketch_dir.mkdir(exist_ok=True)
+    temp_ino = temp_sketch_dir / firmware_path.name
+    if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
+        import shutil
+        shutil.copy2(firmware_path, temp_ino)
+    
+    # Pass the sketch directory to arduino-cli
     cmd = [
         "upload",
         "--fqbn", BOARD_FQBN,
         "--port", port,
         "--verbose",
-        str(firmware_path)
+        str(temp_sketch_dir)
     ]
     
     success, stdout, stderr = run_arduino_cli(cli_path, cmd, check=False)
