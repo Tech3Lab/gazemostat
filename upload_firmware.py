@@ -15,6 +15,7 @@ import zipfile
 import json
 import string
 import time
+import argparse
 from pathlib import Path
 
 # Verify we're on Windows
@@ -25,10 +26,11 @@ if platform.system() != "Windows":
 
 # Configuration
 ARDUINO_CLI_VERSION = "0.35.3"  # Latest stable version
-FIRMWARE_FILE = "neopixel_controller.ino"
+DEFAULT_FIRMWARE_FILE = "firmware.ino"  # Default firmware filename
 BOARD_FQBN = "rp2040:rp2040:rpipico"  # Raspberry Pi Pico / RP2040
 LIBRARY_NAME = "Adafruit NeoPixel"
 LIBRARY_VERSION = "1.11.2"  # Or latest
+CONFIG_FILE = "config.yaml"  # Configuration file path
 
 # Windows-specific settings
 ARDUINO_CLI_NAME = "arduino-cli.exe"
@@ -411,20 +413,84 @@ def upload_firmware(cli_path, firmware_path, port=None):
     return True
 
 
+def load_config_firmware_path():
+    """Load firmware path from config.yaml if available"""
+    script_dir = Path(__file__).parent
+    config_path = script_dir / CONFIG_FILE
+    
+    if not config_path.exists():
+        return None
+    
+    try:
+        import yaml
+        with open(config_path, 'r') as f:
+            config = yaml.safe_load(f)
+            if config and 'firmware_path' in config:
+                firmware_path = config['firmware_path']
+                # If relative, resolve from config file's directory
+                if not Path(firmware_path).is_absolute():
+                    firmware_path = script_dir / firmware_path
+                return Path(firmware_path).resolve()
+    except ImportError:
+        print_info("PyYAML not available, cannot load config.yaml")
+    except Exception as e:
+        print_info(f"Could not load config.yaml: {e}")
+    
+    return None
+
+
 def main():
     """Main function"""
+    # Parse command-line arguments
+    parser = argparse.ArgumentParser(
+        description="Upload NeoPixel firmware to LattePanda Iota RP2040",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python upload_firmware.py
+  python upload_firmware.py --firmware firmware.ino
+  python upload_firmware.py --firmware C:\\path\\to\\firmware.ino
+        """
+    )
+    parser.add_argument(
+        '--firmware', '-f',
+        type=str,
+        default=None,
+        help=f'Path to firmware .ino file (default: from config.yaml or {DEFAULT_FIRMWARE_FILE} in script directory)'
+    )
+    args = parser.parse_args()
+    
     print("\n" + "="*60)
     print("  RP2040 NeoPixel Firmware Upload Script")
     print("="*60)
     
-    # Check if firmware file exists
-    script_dir = Path(__file__).parent
-    firmware_path = script_dir / FIRMWARE_FILE
+    # Determine firmware file path (priority: CLI arg > config.yaml > default)
+    if args.firmware:
+        # User specified a path via command line
+        firmware_path = Path(args.firmware).resolve()
+    else:
+        # Try to load from config.yaml
+        config_firmware_path = load_config_firmware_path()
+        if config_firmware_path:
+            firmware_path = config_firmware_path
+            print_info(f"Using firmware path from config.yaml: {firmware_path}")
+        else:
+            # Default: look in script directory
+            script_dir = Path(__file__).parent
+            firmware_path = script_dir / DEFAULT_FIRMWARE_FILE
     
+    # Check if firmware file exists
     if not firmware_path.exists():
         print_error(f"Firmware file not found: {firmware_path}")
-        print_info("Make sure neopixel_controller.ino is in the same directory as this script")
+        if args.firmware:
+            print_info("Check that the specified path is correct")
+        else:
+            print_info(f"Make sure firmware file exists at the configured path")
+            print_info(f"  - Check config.yaml 'firmware_path' setting")
+            print_info(f"  - Or specify a path with: python upload_firmware.py --firmware <path>")
         return 1
+    
+    print_info(f"Using firmware file: {firmware_path}")
     
     # Check/install Arduino CLI
     cli_path = check_arduino_cli()

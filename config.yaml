@@ -133,6 +133,14 @@ neopixel_serial_baud: 115200
 #   - RP2040 GPIO pins are 3.3V - NeoPixels typically work with 3.3V data signals
 #   - Power NeoPixels from 5V supply (LattePanda has 5V pins available)
 
+# firmware_path: Path to RP2040 firmware file for upload
+#   - Path to the .ino firmware file for the RP2040 NeoPixel controller
+#   - Can be relative (from project directory) or absolute path
+#   - Used by upload_firmware.py script to locate firmware
+#   - Default: "firmware.ino" (in project directory)
+#   Default: "firmware.ino"
+firmware_path: firmware.ino
+
 # neopixel_count: Number of NeoPixel LEDs in chain
 #   - Total number of NeoPixels connected in series
 #   - Should match the physical number of NeoPixels wired

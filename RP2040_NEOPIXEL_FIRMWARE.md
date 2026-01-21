@@ -6,10 +6,84 @@ This guide explains how to program the onboard RP2040 on the LattePanda Iota to 
 
 - LattePanda Iota with onboard RP2040
 - USB cable to connect LattePanda to your computer
-- Arduino IDE (or PlatformIO)
+- Windows computer (for automated script) OR Arduino IDE (for manual method)
 - NeoPixel LEDs (WS2812/SK6812) - 4 LEDs chained in series
+- Python 3.x (for automated script method)
 
-## Step 1: Install Arduino IDE and RP2040 Support
+## Upload Methods
+
+There are two ways to upload the firmware:
+
+1. **Automated Python Script (Recommended)** - Easiest method, handles everything automatically
+2. **Manual Arduino IDE** - Traditional method using Arduino IDE GUI
+
+Choose the method that works best for you.
+
+---
+
+## Method 1: Automated Python Script (Recommended for Windows)
+
+This is the easiest method - the script handles everything automatically.
+
+### Step 1: Run the Upload Script
+
+1. **Open Command Prompt or PowerShell** on Windows
+
+2. **Navigate to the project directory**:
+   ```cmd
+   cd path\to\thermostat
+   ```
+
+3. **Run the upload script**:
+   ```cmd
+   python upload_firmware.py
+   ```
+
+### What the Script Does
+
+The script automatically:
+- ✅ Checks if Arduino CLI is installed (downloads and installs if needed)
+- ✅ Installs RP2040 board support
+- ✅ Installs Adafruit NeoPixel library
+- ✅ Compiles the firmware (`firmware.ino`)
+- ✅ Detects RP2040 bootloader drive or COM port
+- ✅ Uploads the firmware
+
+### Step 2: Enter Bootloader Mode (if needed)
+
+If the script can't find the RP2040 automatically:
+
+1. **Locate the buttons** on your LattePanda Iota:
+   - **BOOTSEL** button (bootloader select)
+   - **RST** button (reset)
+
+2. **Enter bootloader mode**:
+   - Press and **hold** the **BOOTSEL** button
+   - While holding BOOTSEL, press and release the **RST** button
+   - Release the **BOOTSEL** button
+   - Windows should detect a USB drive named `RPI-RP2`
+
+3. **Run the script again**:
+   ```cmd
+   python upload_firmware.py
+   ```
+
+The script will detect the bootloader drive and upload the firmware automatically.
+
+### Troubleshooting the Script
+
+- **"Arduino CLI not found"** - The script will download it automatically on first run
+- **"No RP2040 device found"** - Enter bootloader mode (see Step 2 above)
+- **"Compilation failed"** - Check that `firmware.ino` exists (or check `firmware_path` in config.yaml)
+- **"Upload failed"** - Try entering bootloader mode manually, or check USB cable
+
+---
+
+## Method 2: Manual Arduino IDE Upload
+
+If you prefer using the Arduino IDE GUI, follow these steps:
+
+### Step 1: Install Arduino IDE and RP2040 Support
 
 1. **Download Arduino IDE** from https://www.arduino.cc/en/software
    - Version 2.x recommended, but 1.8.x also works
@@ -33,7 +107,7 @@ This guide explains how to program the onboard RP2040 on the LattePanda Iota to 
    - Search for "Adafruit NeoPixel"
    - Install "Adafruit NeoPixel" by Adafruit
 
-## Step 2: Upload Firmware to RP2040
+### Step 2: Upload Firmware to RP2040
 
 ### Enter Bootloader Mode
 
@@ -65,13 +139,15 @@ This guide explains how to program the onboard RP2040 on the LattePanda Iota to 
 
 ### Upload the Firmware
 
-1. Copy the firmware code (see `neopixel_controller.ino` below)
+1. Copy the firmware code (see `firmware.ino` below)
 2. Paste it into Arduino IDE
 3. Click **Upload** button
 4. Wait for compilation and upload to complete
 5. The RP2040 will automatically reboot after upload
 
 **Note**: After the first upload, Arduino IDE can auto-reset the board, so you may not need to manually enter bootloader mode for subsequent uploads.
+
+---
 
 ## Step 3: Wiring
 
@@ -94,6 +170,8 @@ NeoPixel Chain:
 - Ensure **common ground** between RP2040 and NeoPixel power supply
 - For 4 pixels at 30% brightness: ~72mA total current needed
 
+---
+
 ## Step 4: Test the Connection
 
 1. After uploading firmware, the RP2040 should send "HELLO NEOPIXEL" over serial
@@ -105,9 +183,13 @@ NeoPixel Chain:
    - `PIXEL:0:255:255:255` (turn on first pixel white)
    - `ALL:OFF` (turn off all pixels)
 
+---
+
 ## Firmware Code
 
-Create a new Arduino sketch and paste this code:
+The firmware code is in `firmware.ino` in the project directory (or as configured in `config.yaml`).
+
+If using Arduino IDE manually, create a new Arduino sketch and paste this code:
 
 ```cpp
 // NeoPixel Controller for LattePanda Iota RP2040
@@ -328,20 +410,32 @@ Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 - Change `NEO_GRB` to `NEO_RGB` in the code
 - Or swap red/green values in your commands
 
-## Alternative: MicroPython
+---
 
-If you prefer MicroPython instead of Arduino:
+## Quick Reference: Upload Methods Comparison
 
-1. Flash MicroPython firmware to RP2040
-2. Use `neopixel` library (built into MicroPython)
-3. Implement the same serial protocol in Python
+| Method | Pros | Cons | Best For |
+|--------|------|------|----------|
+| **Python Script** | ✅ Fully automated<br>✅ No GUI needed<br>✅ Handles all setup | ❌ Windows only<br>❌ Requires Python | Quick setup, automation |
+| **Arduino IDE** | ✅ Visual interface<br>✅ Cross-platform<br>✅ Good for learning | ❌ Manual setup<br>❌ More steps | Learning, debugging, non-Windows |
 
-The protocol and commands remain the same regardless of programming language.
+---
 
 ## Next Steps
 
 Once the firmware is uploaded and tested:
 
-1. The Python application will auto-detect the RP2040 via serial
-2. Calibration will automatically control the NeoPixels
-3. Use keyboard shortcuts (T, Q, W, E, U) to test LEDs from the application
+1. **Verify Serial Communication**:
+   - Open Serial Monitor (115200 baud)
+   - You should see "HELLO NEOPIXEL" message
+   - Test commands work correctly
+
+2. **Run the Main Application**:
+   - The Python application will auto-detect the RP2040 via serial
+   - Calibration will automatically control the NeoPixels
+   - Use keyboard shortcuts (T, Q, W, E, U) to test LEDs from the application
+
+3. **Troubleshooting**:
+   - If the app can't find the RP2040, check the COM port in `config.yaml`
+   - Make sure baud rate matches (115200)
+   - Verify NeoPixels are wired correctly
