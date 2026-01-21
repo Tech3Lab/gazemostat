@@ -34,3 +34,8 @@ pyserial>=3.5          # Serial communication for Arduino/microcontroller GPIO b
 gpiod>=2.0.0           # Linux GPIO support for LattePanda and other embedded boards
                        # Required for physical button support on LattePanda Iota
 
+# NeoPixel LED Control (required when gpio_led_calibration_enable is true)
+rpi-ws281x>=5.0.0      # NeoPixel library for WS2812/SK6812 RGB LEDs
+                       # Required for NeoPixel calibration LEDs (chained in series)
+                       # Note: May require root/sudo permissions or proper udev rules on some systems
+

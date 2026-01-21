@@ -22,11 +22,15 @@ GPIO_BTN_MARKER_PIN = 0          # GPIO pin for marker button (GP0)
 GPIO_LED_CALIBRATION_DISPLAY = True  # Enable on-screen LED display
 GPIO_LED_CALIBRATION_KEYBOARD = True  # Enable keyboard shortcuts for calibration
 GP_CALIBRATION_METHOD = "LED"  # Calibration method: "LED", "OVERLAY", or "BOTH"
-GPIO_LED_CALIBRATION_ENABLE = True  # Enable hardware LEDs for calibration
-GPIO_LED_CALIBRATION_LED1_PIN = 1    # GP1
-GPIO_LED_CALIBRATION_LED2_PIN = 2    # GP2
-GPIO_LED_CALIBRATION_LED3_PIN = 3    # GP3
-GPIO_LED_CALIBRATION_LED4_PIN = 4    # GP4
+GPIO_LED_CALIBRATION_ENABLE = True  # Enable hardware NeoPixel LEDs for calibration
+NEOPIXEL_DATA_PIN = 1  # GPIO pin for NeoPixel data line
+NEOPIXEL_COUNT = 4  # Number of NeoPixels in chain
+NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0
+NEOPIXEL_COLOR_ORDER = "GRB"  # Color order: "RGB", "GRB", etc.
+NEOPIXEL_FREQUENCY = 800000  # PWM frequency in Hz
+NEOPIXEL_DMA_CHANNEL = 5  # DMA channel for hardware timing
+NEOPIXEL_INVERT = False  # Invert signal
+NEOPIXEL_PIXEL_TYPE = "WS2812"  # Pixel type: "WS2812", "SK6812", etc.
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
@@ -50,8 +54,9 @@ def load_config():
     global GPIO_LED_CALIBRATION_DISPLAY, GPIO_LED_CALIBRATION_KEYBOARD
     global GP_CALIBRATION_METHOD
     global GPIO_LED_CALIBRATION_ENABLE
-    global GPIO_LED_CALIBRATION_LED1_PIN, GPIO_LED_CALIBRATION_LED2_PIN
-    global GPIO_LED_CALIBRATION_LED3_PIN, GPIO_LED_CALIBRATION_LED4_PIN
+    global NEOPIXEL_DATA_PIN, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
+    global NEOPIXEL_COLOR_ORDER, NEOPIXEL_FREQUENCY, NEOPIXEL_DMA_CHANNEL
+    global NEOPIXEL_INVERT, NEOPIXEL_PIXEL_TYPE
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
@@ -78,10 +83,15 @@ def load_config():
                         print(f"Warning: Invalid gp_calibration_method '{calib_method}', using default 'LED'", file=sys.stderr)
                         GP_CALIBRATION_METHOD = "LED"
                     GPIO_LED_CALIBRATION_ENABLE = config.get('gpio_led_calibration_enable', GPIO_LED_CALIBRATION_ENABLE)
-                    GPIO_LED_CALIBRATION_LED1_PIN = config.get('gpio_led_calibration_led1_pin', GPIO_LED_CALIBRATION_LED1_PIN)
-                    GPIO_LED_CALIBRATION_LED2_PIN = config.get('gpio_led_calibration_led2_pin', GPIO_LED_CALIBRATION_LED2_PIN)
-                    GPIO_LED_CALIBRATION_LED3_PIN = config.get('gpio_led_calibration_led3_pin', GPIO_LED_CALIBRATION_LED3_PIN)
-                    GPIO_LED_CALIBRATION_LED4_PIN = config.get('gpio_led_calibration_led4_pin', GPIO_LED_CALIBRATION_LED4_PIN)
+                    # NeoPixel configuration
+                    NEOPIXEL_DATA_PIN = config.get('neopixel_data_pin', NEOPIXEL_DATA_PIN)
+                    NEOPIXEL_COUNT = config.get('neopixel_count', NEOPIXEL_COUNT)
+                    NEOPIXEL_BRIGHTNESS = config.get('neopixel_brightness', NEOPIXEL_BRIGHTNESS)
+                    NEOPIXEL_COLOR_ORDER = config.get('neopixel_color_order', NEOPIXEL_COLOR_ORDER)
+                    NEOPIXEL_FREQUENCY = config.get('neopixel_frequency', NEOPIXEL_FREQUENCY)
+                    NEOPIXEL_DMA_CHANNEL = config.get('neopixel_dma_channel', NEOPIXEL_DMA_CHANNEL)
+                    NEOPIXEL_INVERT = config.get('neopixel_invert', NEOPIXEL_INVERT)
+                    NEOPIXEL_PIXEL_TYPE = config.get('neopixel_pixel_type', NEOPIXEL_PIXEL_TYPE)
                     # Other configuration
                     SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
@@ -125,6 +135,16 @@ try:
 except ImportError:
     gpiod = None
     print("Warning: gpiod not installed. GPIO button support disabled.", file=sys.stderr)
+
+try:
+    from rpi_ws281x import PixelStrip, Color
+    import rpi_ws281x as ws
+    rpi_ws281x_available = True
+except ImportError:
+    rpi_ws281x = None
+    ws = None
+    rpi_ws281x_available = False
+    # This will be checked when NeoPixel controller is initialized - will raise error if needed
 
 
 class GazeClient:
@@ -807,140 +827,205 @@ class GPIOButtonMonitor:
             traceback.print_exc()
 
 
-class GPIOLEDController:
-    """Control GPIO LEDs for calibration on LattePanda Iota (GP1-GP4)"""
-    def __init__(self, gpio_chip="/dev/gpiochip0", led_pins=None):
-        self.gpio_chip = gpio_chip
-        self.led_pins = led_pins or [1, 2, 3, 4]  # Default: GP1, GP2, GP3, GP4
-        self._chip = None
-        self._lines = []
+class NeoPixelController:
+    """Control NeoPixel LEDs for calibration (chained in series)"""
+    def __init__(self, data_pin=1, num_pixels=4, brightness=0.3, 
+                 pixel_type="WS2812", color_order="GRB", frequency=800000,
+                 dma_channel=5, invert=False):
+        self.data_pin = data_pin
+        self.num_pixels = num_pixels
+        self.brightness = brightness
+        self.pixel_type = pixel_type
+        self.color_order = color_order
+        self.frequency = frequency
+        self.dma_channel = dma_channel
+        self.invert = invert
+        self._strip = None
         self._initialized = False
         self._current_led = -1  # Currently active LED (-1 = all off)
         
     def start(self):
-        """Initialize GPIO lines for LED output"""
-        if gpiod is None:
-            print("Warning: gpiod not available, GPIO LED control disabled.", file=sys.stderr)
-            return False
+        """Initialize NeoPixel strip"""
+        if not rpi_ws281x_available:
+            raise ImportError(
+                "rpi-ws281x library is required but not installed. "
+                "Install with: pip install rpi-ws281x"
+            )
         
         if self._initialized:
             return True
         
         try:
-            self._chip = gpiod.Chip(self.gpio_chip)
-            self._lines = []
+            # Map color order string to library constant
+            # rpi_ws281x uses: ws.WS2811_STRIP_RGB, ws.WS2811_STRIP_GRB, etc.
+            strip_type_map = {
+                "RGB": ws.WS2811_STRIP_RGB,
+                "GRB": ws.WS2811_STRIP_GRB,
+                "RGBW": ws.WS2811_STRIP_RGBW,
+                "GRBW": ws.WS2811_STRIP_GRBW,
+            }
+            strip_type = strip_type_map.get(self.color_order.upper(), ws.WS2811_STRIP_GRB)
             
-            for pin in self.led_pins:
-                line = self._chip.get_line(pin)
-                # Configure as output, initially LOW (LED off)
-                line.request(consumer="calib_led", type=gpiod.LINE_REQ_DIR_OUT, default_vals=[0])
-                self._lines.append(line)
+            # Create PixelStrip instance
+            self._strip = PixelStrip(
+                num=self.num_pixels,
+                pin=self.data_pin,
+                freq_hz=self.frequency,
+                dma=self.dma_channel,
+                invert=self.invert,
+                brightness=int(255 * self.brightness),
+                channel=0,
+                strip_type=strip_type
+            )
+            
+            # Initialize the library
+            self._strip.begin()
+            
+            # Turn off all pixels initially
+            self.all_off()
             
             self._initialized = True
-            print(f"GPIO LED controller initialized on {self.gpio_chip}")
-            print(f"DEBUG: LED pins: {self.led_pins}")
-            print(f"DEBUG: LED wiring - connect LED+ to GP pin, LED- through resistor to GND")
-            print(f"DEBUG: NOTE: GPIO pins output 3.3V (not 5V) with limited current (~2-4mA)")
-            print(f"DEBUG: If LEDs don't light, they may need a transistor/MOSFET driver circuit")
+            print(f"NeoPixel controller initialized")
+            print(f"DEBUG: Data pin: GP{self.data_pin}")
+            print(f"DEBUG: Pixel count: {self.num_pixels}")
+            print(f"DEBUG: Brightness: {self.brightness * 100:.0f}%")
+            print(f"DEBUG: Pixel type: {self.pixel_type}")
+            print(f"DEBUG: Color order: {self.color_order}")
             print(f"DEBUG: Test LEDs with keys: T (all), Q/W/E/U (individual)")
             return True
             
         except Exception as e:
-            print(f"Warning: GPIO LED controller failed to initialize: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
-            self._initialized = False
-            return False
+            error_msg = (
+                f"NeoPixel controller failed to initialize: {e}\n"
+                f"Possible causes:\n"
+                f"  - Insufficient permissions (may need root/sudo or udev rules)\n"
+                f"  - GPIO pin {self.data_pin} unavailable or in use\n"
+                f"  - Hardware not connected properly\n"
+                f"  - DMA channel {self.dma_channel} conflict\n"
+                f"Install rpi-ws281x with: pip install rpi-ws281x"
+            )
+            raise RuntimeError(error_msg) from e
     
     def stop(self):
-        """Release GPIO lines and turn off all LEDs"""
+        """Cleanup and turn off all NeoPixels"""
         self.all_off()
-        for line in self._lines:
+        if self._strip is not None:
             try:
-                line.release()
+                # PixelStrip doesn't have explicit cleanup, but we ensure all are off
+                self._strip = None
             except Exception:
                 pass
-        self._lines = []
         self._initialized = False
         self._current_led = -1
     
-    def set_led(self, led_index):
-        """Turn on a specific LED (0-3) and turn off all others"""
+    def set_led(self, led_index, color=(255, 255, 255)):
+        """Turn on a specific NeoPixel (0-3) with color and turn off all others"""
         if not self._initialized:
-            return
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
+        
+        if led_index < 0 or led_index >= self.num_pixels:
+            raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
         if led_index == self._current_led:
             return  # Already in desired state
         
         try:
-            for i, line in enumerate(self._lines):
+            # Turn off all pixels first
+            for i in range(self.num_pixels):
                 if i == led_index:
-                    line.set_value(1)  # Turn ON
+                    # Set the active pixel to the specified color
+                    r, g, b = color
+                    self._strip.setPixelColor(i, Color(r, g, b))
                 else:
-                    line.set_value(0)  # Turn OFF
+                    # Turn off other pixels
+                    self._strip.setPixelColor(i, Color(0, 0, 0))
+            
+            # Update the strip
+            self._strip.show()
             
             self._current_led = led_index
             if led_index >= 0:
-                print(f"DEBUG: LED {led_index + 1} ON (GP{self.led_pins[led_index]})")
+                r, g, b = color
+                print(f"DEBUG: NeoPixel {led_index} ON (GP{self.data_pin}, RGB=({r},{g},{b}))")
             
         except Exception as e:
-            print(f"Warning: Failed to set LED {led_index}: {e}", file=sys.stderr)
+            raise RuntimeError(f"Failed to set NeoPixel {led_index}: {e}") from e
     
     def all_off(self):
-        """Turn off all LEDs"""
+        """Turn off all NeoPixels"""
         if not self._initialized:
             return
         
         try:
-            for line in self._lines:
-                line.set_value(0)
+            for i in range(self.num_pixels):
+                self._strip.setPixelColor(i, Color(0, 0, 0))
+            self._strip.show()
             self._current_led = -1
-            print("DEBUG: All LEDs OFF")
+            print("DEBUG: All NeoPixels OFF")
         except Exception as e:
-            print(f"Warning: Failed to turn off LEDs: {e}", file=sys.stderr)
+            raise RuntimeError(f"Failed to turn off NeoPixels: {e}") from e
     
-    def all_on(self):
-        """Turn on all LEDs (useful for testing)"""
+    def all_on(self, color=(255, 255, 255)):
+        """Turn on all NeoPixels with specified color (useful for testing)"""
         if not self._initialized:
-            print("DEBUG: Cannot turn on LEDs - controller not initialized")
-            return
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
         try:
-            for i, line in enumerate(self._lines):
-                line.set_value(1)
-                # Verify the value was set
-                actual_value = line.get_value()
-                print(f"DEBUG: LED {i+1} (GP{self.led_pins[i]}) set to {actual_value}")
+            r, g, b = color
+            for i in range(self.num_pixels):
+                self._strip.setPixelColor(i, Color(r, g, b))
+            self._strip.show()
             self._current_led = -2  # Special value for "all on"
-            print("DEBUG: All LEDs ON - verify with multimeter if LEDs don't light")
-            print("DEBUG: Note: GPIO pins output 3.3V, not 5V. LEDs may need transistor/MOSFET driver.")
+            print(f"DEBUG: All NeoPixels ON (RGB=({r},{g},{b}))")
         except Exception as e:
-            print(f"Warning: Failed to turn on LEDs: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            raise RuntimeError(f"Failed to turn on NeoPixels: {e}") from e
     
-    def test_led(self, led_index, duration=2.0):
-        """Test a specific LED by turning it on for a duration"""
+    def set_color(self, led_index, r, g, b):
+        """Set specific RGB color for a NeoPixel"""
         if not self._initialized:
-            print(f"DEBUG: Cannot test LED {led_index} - controller not initialized")
-            return
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
-        if led_index < 0 or led_index >= len(self._lines):
-            print(f"DEBUG: Invalid LED index {led_index} (valid: 0-{len(self._lines)-1})")
-            return
+        if led_index < 0 or led_index >= self.num_pixels:
+            raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
         try:
-            print(f"DEBUG: Testing LED {led_index + 1} (GP{self.led_pins[led_index]}) for {duration}s...")
-            self._lines[led_index].set_value(1)
-            actual_value = self._lines[led_index].get_value()
-            print(f"DEBUG: GPIO pin GP{self.led_pins[led_index]} set to {actual_value}")
-            time.sleep(duration)
-            self._lines[led_index].set_value(0)
-            print(f"DEBUG: LED {led_index + 1} test complete")
+            self._strip.setPixelColor(led_index, Color(r, g, b))
+            self._strip.show()
         except Exception as e:
-            print(f"Warning: Failed to test LED {led_index}: {e}", file=sys.stderr)
-            import traceback
-            traceback.print_exc()
+            raise RuntimeError(f"Failed to set NeoPixel {led_index} color: {e}") from e
+    
+    def set_brightness(self, brightness):
+        """Adjust brightness (0.0-1.0)"""
+        if not self._initialized:
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
+        
+        if brightness < 0.0 or brightness > 1.0:
+            raise ValueError(f"Brightness must be between 0.0 and 1.0, got {brightness}")
+        
+        try:
+            self.brightness = brightness
+            self._strip.setBrightness(int(255 * brightness))
+            self._strip.show()
+        except Exception as e:
+            raise RuntimeError(f"Failed to set brightness: {e}") from e
+    
+    def test_led(self, led_index, duration=2.0, color=(255, 255, 255)):
+        """Test a specific NeoPixel by turning it on for a duration"""
+        if not self._initialized:
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
+        
+        if led_index < 0 or led_index >= self.num_pixels:
+            raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
+        
+        try:
+            r, g, b = color
+            print(f"DEBUG: Testing NeoPixel {led_index} (GP{self.data_pin}) for {duration}s...")
+            self.set_led(led_index, color)
+            time.sleep(duration)
+            self.all_off()
+            print(f"DEBUG: NeoPixel {led_index} test complete")
+        except Exception as e:
+            raise RuntimeError(f"Failed to test NeoPixel {led_index}: {e}") from e
 
 
 def time_strings(t0):
@@ -1008,22 +1093,25 @@ def main():
     else:
         print("DEBUG: GPIO button disabled in config")
     
-    # Start GPIO LED controller for calibration LEDs (if enabled)
+    # Start NeoPixel controller for calibration LEDs (if enabled)
     led_controller = None
-    if GPIO_LED_CALIBRATION_ENABLE and gpiod is not None:
-        led_pins = [
-            GPIO_LED_CALIBRATION_LED1_PIN,
-            GPIO_LED_CALIBRATION_LED2_PIN,
-            GPIO_LED_CALIBRATION_LED3_PIN,
-            GPIO_LED_CALIBRATION_LED4_PIN,
-        ]
-        print(f"DEBUG: Initializing GPIO LED controller on {GPIO_CHIP} pins {led_pins}")
-        led_controller = GPIOLEDController(gpio_chip=GPIO_CHIP, led_pins=led_pins)
+    if GPIO_LED_CALIBRATION_ENABLE:
+        print(f"DEBUG: Initializing NeoPixel controller")
+        print(f"DEBUG: Data pin: GP{NEOPIXEL_DATA_PIN}, Count: {NEOPIXEL_COUNT}, Brightness: {NEOPIXEL_BRIGHTNESS}")
+        led_controller = NeoPixelController(
+            data_pin=NEOPIXEL_DATA_PIN,
+            num_pixels=NEOPIXEL_COUNT,
+            brightness=NEOPIXEL_BRIGHTNESS,
+            pixel_type=NEOPIXEL_PIXEL_TYPE,
+            color_order=NEOPIXEL_COLOR_ORDER,
+            frequency=NEOPIXEL_FREQUENCY,
+            dma_channel=NEOPIXEL_DMA_CHANNEL,
+            invert=NEOPIXEL_INVERT
+        )
+        # start() will raise error if library unavailable or initialization fails
         led_controller.start()
-    elif GPIO_LED_CALIBRATION_ENABLE and gpiod is None:
-        print("WARNING: GPIO LED calibration enabled but gpiod library not available!")
     else:
-        print("DEBUG: GPIO LED calibration disabled in config")
+        print("DEBUG: NeoPixel calibration disabled in config")
     
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
@@ -1875,7 +1963,7 @@ def main():
         screen.fill((0, 0, 0))
         draw_status_header()
 
-        # On-screen calibration LED hints (only for LED-based calibration)
+        # On-screen calibration NeoPixel hints (only for LED-based calibration)
         if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY and using_led_calib:
             led_pos = [
                 (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
@@ -1884,7 +1972,9 @@ def main():
                 (int(WIDTH * 0.1), int(HEIGHT * 0.85)),
             ]
             for i, p in enumerate(led_pos):
-                color = (0, 255, 0) if i == calib_step else (60, 60, 60)
+                # Use white (255, 255, 255) for active NeoPixel to match hardware default
+                # Use dark gray for inactive pixels
+                color = (255, 255, 255) if i == calib_step else (60, 60, 60)
                 pygame.draw.circle(screen, color, p, 8)
         
         # Hardware LED control during LED-based calibration

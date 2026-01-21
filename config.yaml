@@ -67,11 +67,14 @@ gpio_led_calibration_keyboard: true
 #   Default: "LED"
 gp_calibration_method: LED
 
-# gpio_led_calibration_enable: Enable hardware LEDs for calibration
-#   - true:  Control physical GPIO LEDs during calibration sequence
-#            LEDs are wired: LED+ to GPIO pin (GP1-GP4), LED- through resistor to GND
+# gpio_led_calibration_enable: Enable hardware NeoPixel LEDs for calibration
+#   - true:  Control physical NeoPixel LEDs during calibration sequence
+#            NeoPixels are chained in series: data pin connects to first pixel,
+#            DOUT of first connects to DIN of second, etc.
+#            Power: 5V power supply (not 3.3V GPIO)
+#            Ground: Common ground connection
 #            Only used when gp_calibration_method is "LED" or "BOTH"
-#   - false: Disable hardware LED control
+#   - false: Disable hardware NeoPixel control
 #   Default: true
 gpio_led_calibration_enable: true
 
@@ -91,33 +94,67 @@ calib_delay: 0.3
 #   Default: 0.9
 calib_dwell: 0.9
 
-# gpio_led_calibration_led1_pin: GPIO pin for calibration LED 1
-#   - GPIO line number for first calibration point LED
-#   - LattePanda Iota: GP1 = line 1
+# neopixel_data_pin: GPIO pin for NeoPixel data line
+#   - GPIO line number for NeoPixel data signal
+#   - LattePanda Iota: GP1 = line 1 (example)
+#   - Connect NeoPixel DIN to this GPIO pin
+#   - Note: May need level shifter if GPIO outputs 3.3V (NeoPixels expect 5V data)
 #   - Only used when gpio_led_calibration_enable is true
 #   Default: 1 (GP1)
-gpio_led_calibration_led1_pin: 1
+neopixel_data_pin: 1
 
-# gpio_led_calibration_led2_pin: GPIO pin for calibration LED 2
-#   - GPIO line number for second calibration point LED
-#   - LattePanda Iota: GP2 = line 2
+# neopixel_count: Number of NeoPixel LEDs in chain
+#   - Total number of NeoPixels connected in series
+#   - Should match the physical number of NeoPixels wired
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: 2 (GP2)
-gpio_led_calibration_led2_pin: 2
+#   Default: 4
+neopixel_count: 4
 
-# gpio_led_calibration_led3_pin: GPIO pin for calibration LED 3
-#   - GPIO line number for third calibration point LED
-#   - LattePanda Iota: GP3 = line 3
+# neopixel_brightness: Brightness level for NeoPixels
+#   - Brightness value from 0.0 (off) to 1.0 (full brightness)
+#   - Lower values reduce power consumption
+#   - Recommended: 0.3 (30%) for calibration visibility without excessive power draw
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: 3 (GP3)
-gpio_led_calibration_led3_pin: 3
+#   Default: 0.3
+neopixel_brightness: 0.3
 
-# gpio_led_calibration_led4_pin: GPIO pin for calibration LED 4
-#   - GPIO line number for fourth calibration point LED
-#   - LattePanda Iota: GP4 = line 4
+# neopixel_color_order: Color order for NeoPixel protocol
+#   - Color channel order: "RGB", "GRB", "RGBW", etc.
+#   - Most WS2812 NeoPixels use "GRB" order
+#   - Check your NeoPixel datasheet for correct order
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: 4 (GP4)
-gpio_led_calibration_led4_pin: 4
+#   Default: "GRB"
+neopixel_color_order: GRB
+
+# neopixel_frequency: PWM frequency for NeoPixel data signal
+#   - Frequency in Hz for the data protocol
+#   - WS2812 typically uses 800000 Hz (800 kHz)
+#   - SK6812 may use different frequency
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 800000
+neopixel_frequency: 800000
+
+# neopixel_dma_channel: DMA channel for hardware timing
+#   - DMA channel number for hardware-accelerated timing (Linux-specific)
+#   - Used by rpi-ws281x library for precise timing
+#   - Default channel 5 is usually available
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 5
+neopixel_dma_channel: 5
+
+# neopixel_invert: Invert NeoPixel data signal
+#   - true:  Invert the data signal (for level shifters that invert)
+#   - false: Normal signal polarity
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: false
+neopixel_invert: false
+
+# neopixel_pixel_type: NeoPixel type identifier
+#   - Pixel type string: "WS2812", "SK6812", etc.
+#   - Used by library to determine protocol details
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: "WS2812"
+neopixel_pixel_type: WS2812
 
 # ----------------------------------------------------------------------------
 # Simulation Modes
