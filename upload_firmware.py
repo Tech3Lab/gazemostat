@@ -419,24 +419,40 @@ def load_config_firmware_path():
     config_path = script_dir / CONFIG_FILE
     
     if not config_path.exists():
+        print_info(f"Config file not found at {config_path}, using default")
         return None
     
     try:
         import yaml
+    except ImportError:
+        print_info("PyYAML not available, cannot load config.yaml - using default")
+        return None
+    
+    try:
         with open(config_path, 'r') as f:
             config = yaml.safe_load(f)
             if config and 'firmware_path' in config:
-                firmware_path = config['firmware_path']
-                # If relative, resolve from config file's directory
-                if not Path(firmware_path).is_absolute():
+                firmware_path_str = config['firmware_path']
+                if not firmware_path_str:
+                    print_info("firmware_path is empty in config.yaml, using default")
+                    return None
+                
+                # If relative, resolve from config file's directory (project root)
+                firmware_path = Path(firmware_path_str)
+                if not firmware_path.is_absolute():
                     firmware_path = script_dir / firmware_path
-                return Path(firmware_path).resolve()
-    except ImportError:
-        print_info("PyYAML not available, cannot load config.yaml")
+                
+                resolved_path = firmware_path.resolve()
+                print_info(f"Loaded firmware_path from config.yaml: {firmware_path_str} -> {resolved_path}")
+                return resolved_path
+            else:
+                print_info("firmware_path not found in config.yaml, using default")
+                return None
     except Exception as e:
-        print_info(f"Could not load config.yaml: {e}")
-    
-    return None
+        print_error(f"Error loading config.yaml: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
 
 
 def main():
@@ -466,18 +482,23 @@ Examples:
     
     # Determine firmware file path (priority: CLI arg > config.yaml > default)
     if args.firmware:
-        # User specified a path via command line
+        # User specified a path via command line (highest priority)
         firmware_path = Path(args.firmware).resolve()
+        print_info(f"Using firmware path from command line: {firmware_path}")
     else:
-        # Try to load from config.yaml
+        # Try to load from config.yaml first
         config_firmware_path = load_config_firmware_path()
-        if config_firmware_path:
+        if config_firmware_path and config_firmware_path.exists():
             firmware_path = config_firmware_path
             print_info(f"Using firmware path from config.yaml: {firmware_path}")
         else:
-            # Default: look in script directory
+            # Fall back to default: look in script directory
             script_dir = Path(__file__).parent
             firmware_path = script_dir / DEFAULT_FIRMWARE_FILE
+            if config_firmware_path:
+                print_info(f"Config path {config_firmware_path} not found, using default: {firmware_path}")
+            else:
+                print_info(f"Using default firmware path: {firmware_path}")
     
     # Check if firmware file exists
     if not firmware_path.exists():
