@@ -835,22 +835,80 @@ class NeoPixelController:
         
         try:
             ports = serial.tools.list_ports.comports()
+            print(f"DEBUG: Scanning {len(ports)} serial ports for NeoPixel controller...")
+            
             for port in ports:
+                print(f"DEBUG: Checking port {port.device} ({port.description})...")
                 try:
-                    # Try to open port and look for "HELLO NEOPIXEL" message
-                    test_serial = serial.Serial(port.device, self.serial_baud, timeout=1.0)
-                    time.sleep(0.5)  # Give microcontroller time to send hello
+                    # Try to open port
+                    test_serial = serial.Serial(port.device, self.serial_baud, timeout=2.0)
+                    
+                    # Clear any existing data
+                    test_serial.reset_input_buffer()
+                    
+                    # Wait a bit and read any available data (might be HELLO message)
+                    time.sleep(0.5)
+                    lines_read = []
+                    start_time = time.time()
+                    while time.time() - start_time < 1.5:  # Read for up to 1.5 seconds
+                        if test_serial.in_waiting > 0:
+                            try:
+                                line = test_serial.readline().decode('utf-8', errors='ignore').strip()
+                                if line:
+                                    lines_read.append(line)
+                                    print(f"DEBUG: Port {port.device} received: {line}")
+                                    if "HELLO" in line.upper() and "NEOPIXEL" in line.upper():
+                                        test_serial.close()
+                                        print(f"DEBUG: Found NeoPixel controller on {port.device}")
+                                        return port.device
+                            except UnicodeDecodeError:
+                                continue
+                        time.sleep(0.1)
+                    
+                    # If no HELLO message, try sending a PING/HELLO command to see if device responds
+                    test_serial.reset_input_buffer()
+                    test_serial.write(b"PING\n")
+                    test_serial.flush()
+                    time.sleep(0.3)
+                    
                     if test_serial.in_waiting > 0:
-                        line = test_serial.readline().decode('utf-8', errors='ignore').strip()
-                        if "HELLO" in line.upper() and "NEOPIXEL" in line.upper():
+                        response = test_serial.readline().decode('utf-8', errors='ignore').strip()
+                        print(f"DEBUG: Port {port.device} responded to PING: {response}")
+                        if "HELLO" in response.upper() and "NEOPIXEL" in response.upper():
+                            # Device responded with HELLO NEOPIXEL - confirmed!
                             test_serial.close()
+                            print(f"DEBUG: Found NeoPixel controller on {port.device} (responded to PING)")
                             return port.device
+                    
+                    # Try a harmless command as fallback
+                    test_serial.reset_input_buffer()
+                    test_serial.write(b"ALL:OFF\n")
+                    test_serial.flush()
+                    time.sleep(0.3)
+                    
+                    if test_serial.in_waiting > 0:
+                        response = test_serial.readline().decode('utf-8', errors='ignore').strip()
+                        print(f"DEBUG: Port {port.device} responded to ALL:OFF: {response}")
+                        if "ACK" in response.upper() or "ERROR" in response.upper():
+                            # Device responded - likely our NeoPixel controller
+                            test_serial.close()
+                            print(f"DEBUG: Found responsive device on {port.device} (assuming NeoPixel controller)")
+                            return port.device
+                    
                     test_serial.close()
-                except (serial.SerialException, UnicodeDecodeError):
+                except serial.SerialException as e:
+                    print(f"DEBUG: Port {port.device} not available: {e}")
                     continue
+                except Exception as e:
+                    print(f"DEBUG: Error testing port {port.device}: {e}")
+                    continue
+                    
         except Exception as e:
             print(f"DEBUG: Error scanning serial ports: {e}")
+            import traceback
+            traceback.print_exc()
         
+        print("DEBUG: No NeoPixel controller found on any port")
         return None
     
     def _send_command(self, command):
@@ -886,13 +944,30 @@ class NeoPixelController:
                 print("DEBUG: Auto-detecting NeoPixel serial port...")
                 port = self._find_serial_port()
                 if port is None:
-                    raise RuntimeError(
+                    # List available ports for user reference
+                    available_ports = []
+                    try:
+                        if pyserial_available:
+                            ports = serial.tools.list_ports.comports()
+                            available_ports = [p.device for p in ports]
+                    except:
+                        pass
+                    
+                    error_msg = (
                         "Could not auto-detect NeoPixel microcontroller.\n"
                         "Make sure:\n"
-                        "  - Microcontroller is connected via USB\n"
-                        "  - Microcontroller sends 'HELLO NEOPIXEL' on boot\n"
-                        "  - Or specify neopixel_serial_port in config.yaml"
+                        "  - RP2040 is connected via USB\n"
+                        "  - RP2040 firmware is uploaded and running\n"
+                        "  - RP2040 sends 'HELLO NEOPIXEL' on boot (or responds to commands)\n"
                     )
+                    if available_ports:
+                        error_msg += f"  - Available COM ports: {', '.join(available_ports)}\n"
+                        error_msg += f"  - Try specifying one in config.yaml: neopixel_serial_port: \"{available_ports[0]}\"\n"
+                    else:
+                        error_msg += "  - No COM ports found - check USB connection\n"
+                    error_msg += "  - Or specify neopixel_serial_port in config.yaml"
+                    
+                    raise RuntimeError(error_msg)
                 print(f"DEBUG: Auto-detected NeoPixel port: {port}")
             else:
                 print(f"DEBUG: Using specified NeoPixel port: {port}")

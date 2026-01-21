@@ -18,22 +18,25 @@ void setup() {
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
   
-  // Wait for serial port to open (optional, for USB serial)
-  // Uncomment if you want to wait for serial connection:
-  // while (!Serial) {
-  //   delay(10);
-  // }
+  // Wait for serial port to open (for USB serial on RP2040)
+  // This ensures the port is ready before sending messages
+  while (!Serial) {
+    delay(10);
+  }
+  
+  // Small delay to ensure serial is fully ready
+  delay(100);
   
   // Initialize NeoPixel strip
   strip.begin();
   strip.setBrightness(global_brightness);
   strip.show(); // Initialize all pixels to 'off'
   
-  // Send hello message for auto-detection
-  Serial.println("HELLO NEOPIXEL");
-  
-  // Small delay to ensure message is sent
-  delay(100);
+  // Send hello message for auto-detection (send multiple times for reliability)
+  for (int i = 0; i < 3; i++) {
+    Serial.println("HELLO NEOPIXEL");
+    delay(50);
+  }
 }
 
 void loop() {
@@ -49,6 +52,13 @@ void loop() {
 }
 
 void processCommand(String cmd) {
+  // Handle special commands first
+  if (cmd == "PING" || cmd == "HELLO") {
+    // Respond to ping/hello for connection testing
+    Serial.println("HELLO NEOPIXEL");
+    return;
+  }
+  
   // Parse command format: COMMAND:param1:param2:...
   int firstColon = cmd.indexOf(':');
   if (firstColon < 0) {
