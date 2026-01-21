@@ -69,9 +69,12 @@ gp_calibration_method: LED
 
 # gpio_led_calibration_enable: Enable hardware NeoPixel LEDs for calibration
 #   - true:  Control physical NeoPixel LEDs during calibration sequence
-#            NeoPixels are chained in series: data pin connects to first pixel,
-#            DOUT of first connects to DIN of second, etc.
-#            Power: 5V power supply (not 3.3V GPIO)
+#            NeoPixels are controlled via the LattePanda Iota's onboard RP2040
+#            (or external microcontroller) via USB serial communication
+#            The RP2040/microcontroller handles NeoPixel timing and protocol
+#            NeoPixels are chained in series: DOUT of first connects to DIN of second, etc.
+#            Power: 5V power supply (not 3.3V GPIO) - use LattePanda's 5V pin or external supply
+#            Data: Connect NeoPixel DIN to one of RP2040's GPIO pins (e.g., GP1)
 #            Ground: Common ground connection
 #            Only used when gp_calibration_method is "LED" or "BOTH"
 #   - false: Disable hardware NeoPixel control
@@ -94,14 +97,41 @@ calib_delay: 0.3
 #   Default: 0.9
 calib_dwell: 0.9
 
-# neopixel_data_pin: GPIO pin for NeoPixel data line
-#   - GPIO line number for NeoPixel data signal
-#   - LattePanda Iota: GP1 = line 1 (example)
-#   - Connect NeoPixel DIN to this GPIO pin
-#   - Note: May need level shifter if GPIO outputs 3.3V (NeoPixels expect 5V data)
+# neopixel_serial_port: Serial port for NeoPixel controller
+#   - COM port name on Windows (e.g., "COM3") or device path on Linux (e.g., "/dev/ttyUSB0")
+#   - For LattePanda Iota: Use the RP2040 USB serial port (appears as COM port on Windows)
+#   - Leave empty ("") to auto-detect by scanning for microcontroller
+#   - RP2040/microcontroller should send "HELLO NEOPIXEL" on boot for auto-detection
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: 1 (GP1)
-neopixel_data_pin: 1
+#   Default: "" (auto-detect)
+neopixel_serial_port: ""
+
+# neopixel_serial_baud: Serial communication baud rate
+#   - Baud rate for serial communication with NeoPixel microcontroller
+#   - Common values: 9600, 115200
+#   - Must match microcontroller's baud rate setting
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 115200
+neopixel_serial_baud: 115200
+
+# Serial Protocol (RP2040/microcontroller must implement):
+#   PC→RP2040 commands (newline-terminated):
+#     - INIT:<count>:<brightness>  - Initialize with pixel count and brightness (0-255)
+#     - PIXEL:<idx>:<r>:<g>:<b>    - Set pixel at index to RGB color (0-255 each)
+#     - ALL:OFF                     - Turn off all pixels
+#     - ALL:ON:<r>:<g>:<b>          - Turn on all pixels to RGB color
+#     - BRIGHTNESS:<value>          - Set global brightness (0-255)
+#   RP2040→PC messages (optional, for debugging):
+#     - HELLO NEOPIXEL              - Sent on boot for auto-detection
+#     - ACK                         - Command acknowledged
+#     - ERROR:<message>             - Error occurred
+#
+# Note for LattePanda Iota:
+#   - The onboard RP2040 can be programmed to handle NeoPixels
+#   - Connect NeoPixel DIN to an RP2040 GPIO pin (e.g., GP1)
+#   - Use RP2040's hardware PWM for precise NeoPixel timing
+#   - RP2040 GPIO pins are 3.3V - NeoPixels typically work with 3.3V data signals
+#   - Power NeoPixels from 5V supply (LattePanda has 5V pins available)
 
 # neopixel_count: Number of NeoPixel LEDs in chain
 #   - Total number of NeoPixels connected in series
@@ -126,35 +156,8 @@ neopixel_brightness: 0.3
 #   Default: "GRB"
 neopixel_color_order: GRB
 
-# neopixel_frequency: PWM frequency for NeoPixel data signal
-#   - Frequency in Hz for the data protocol
-#   - WS2812 typically uses 800000 Hz (800 kHz)
-#   - SK6812 may use different frequency
-#   - Only used when gpio_led_calibration_enable is true
-#   Default: 800000
-neopixel_frequency: 800000
-
-# neopixel_dma_channel: DMA channel for hardware timing
-#   - DMA channel number for hardware-accelerated timing (Linux-specific)
-#   - Used by rpi-ws281x library for precise timing
-#   - Default channel 5 is usually available
-#   - Only used when gpio_led_calibration_enable is true
-#   Default: 5
-neopixel_dma_channel: 5
-
-# neopixel_invert: Invert NeoPixel data signal
-#   - true:  Invert the data signal (for level shifters that invert)
-#   - false: Normal signal polarity
-#   - Only used when gpio_led_calibration_enable is true
-#   Default: false
-neopixel_invert: false
-
-# neopixel_pixel_type: NeoPixel type identifier
-#   - Pixel type string: "WS2812", "SK6812", etc.
-#   - Used by library to determine protocol details
-#   - Only used when gpio_led_calibration_enable is true
-#   Default: "WS2812"
-neopixel_pixel_type: WS2812
+# Note: NeoPixel hardware settings (frequency, color order, pixel type) are configured
+# on the microcontroller side. The PC only sends RGB color values via serial.
 
 # ----------------------------------------------------------------------------
 # Simulation Modes

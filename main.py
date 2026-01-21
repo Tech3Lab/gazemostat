@@ -23,14 +23,10 @@ GPIO_LED_CALIBRATION_DISPLAY = True  # Enable on-screen LED display
 GPIO_LED_CALIBRATION_KEYBOARD = True  # Enable keyboard shortcuts for calibration
 GP_CALIBRATION_METHOD = "LED"  # Calibration method: "LED", "OVERLAY", or "BOTH"
 GPIO_LED_CALIBRATION_ENABLE = True  # Enable hardware NeoPixel LEDs for calibration
-NEOPIXEL_DATA_PIN = 1  # GPIO pin for NeoPixel data line
+NEOPIXEL_SERIAL_PORT = ""  # Serial port (empty = auto-detect)
+NEOPIXEL_SERIAL_BAUD = 115200  # Serial baud rate
 NEOPIXEL_COUNT = 4  # Number of NeoPixels in chain
-NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0
-NEOPIXEL_COLOR_ORDER = "GRB"  # Color order: "RGB", "GRB", etc.
-NEOPIXEL_FREQUENCY = 800000  # PWM frequency in Hz
-NEOPIXEL_DMA_CHANNEL = 5  # DMA channel for hardware timing
-NEOPIXEL_INVERT = False  # Invert signal
-NEOPIXEL_PIXEL_TYPE = "WS2812"  # Pixel type: "WS2812", "SK6812", etc.
+NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0 (sent to microcontroller)
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
@@ -54,9 +50,7 @@ def load_config():
     global GPIO_LED_CALIBRATION_DISPLAY, GPIO_LED_CALIBRATION_KEYBOARD
     global GP_CALIBRATION_METHOD
     global GPIO_LED_CALIBRATION_ENABLE
-    global NEOPIXEL_DATA_PIN, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
-    global NEOPIXEL_COLOR_ORDER, NEOPIXEL_FREQUENCY, NEOPIXEL_DMA_CHANNEL
-    global NEOPIXEL_INVERT, NEOPIXEL_PIXEL_TYPE
+    global NEOPIXEL_SERIAL_PORT, NEOPIXEL_SERIAL_BAUD, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
@@ -83,15 +77,11 @@ def load_config():
                         print(f"Warning: Invalid gp_calibration_method '{calib_method}', using default 'LED'", file=sys.stderr)
                         GP_CALIBRATION_METHOD = "LED"
                     GPIO_LED_CALIBRATION_ENABLE = config.get('gpio_led_calibration_enable', GPIO_LED_CALIBRATION_ENABLE)
-                    # NeoPixel configuration
-                    NEOPIXEL_DATA_PIN = config.get('neopixel_data_pin', NEOPIXEL_DATA_PIN)
+                    # NeoPixel serial configuration
+                    NEOPIXEL_SERIAL_PORT = config.get('neopixel_serial_port', NEOPIXEL_SERIAL_PORT)
+                    NEOPIXEL_SERIAL_BAUD = config.get('neopixel_serial_baud', NEOPIXEL_SERIAL_BAUD)
                     NEOPIXEL_COUNT = config.get('neopixel_count', NEOPIXEL_COUNT)
                     NEOPIXEL_BRIGHTNESS = config.get('neopixel_brightness', NEOPIXEL_BRIGHTNESS)
-                    NEOPIXEL_COLOR_ORDER = config.get('neopixel_color_order', NEOPIXEL_COLOR_ORDER)
-                    NEOPIXEL_FREQUENCY = config.get('neopixel_frequency', NEOPIXEL_FREQUENCY)
-                    NEOPIXEL_DMA_CHANNEL = config.get('neopixel_dma_channel', NEOPIXEL_DMA_CHANNEL)
-                    NEOPIXEL_INVERT = config.get('neopixel_invert', NEOPIXEL_INVERT)
-                    NEOPIXEL_PIXEL_TYPE = config.get('neopixel_pixel_type', NEOPIXEL_PIXEL_TYPE)
                     # Other configuration
                     SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
@@ -137,13 +127,12 @@ except ImportError:
     print("Warning: gpiod not installed. GPIO button support disabled.", file=sys.stderr)
 
 try:
-    from rpi_ws281x import PixelStrip, Color
-    import rpi_ws281x as ws
-    rpi_ws281x_available = True
+    import serial
+    import serial.tools.list_ports
+    pyserial_available = True
 except ImportError:
-    rpi_ws281x = None
-    ws = None
-    rpi_ws281x_available = False
+    serial = None
+    pyserial_available = False
     # This will be checked when NeoPixel controller is initialized - will raise error if needed
 
 
@@ -828,93 +817,144 @@ class GPIOButtonMonitor:
 
 
 class NeoPixelController:
-    """Control NeoPixel LEDs for calibration (chained in series)"""
-    def __init__(self, data_pin=1, num_pixels=4, brightness=0.3, 
-                 pixel_type="WS2812", color_order="GRB", frequency=800000,
-                 dma_channel=5, invert=False):
-        self.data_pin = data_pin
+    """Control NeoPixel LEDs via serial communication with microcontroller (Windows/Linux compatible)"""
+    def __init__(self, serial_port="", serial_baud=115200, num_pixels=4, brightness=0.3):
+        self.serial_port = serial_port
+        self.serial_baud = serial_baud
         self.num_pixels = num_pixels
         self.brightness = brightness
-        self.pixel_type = pixel_type
-        self.color_order = color_order
-        self.frequency = frequency
-        self.dma_channel = dma_channel
-        self.invert = invert
-        self._strip = None
+        self._serial = None
         self._initialized = False
         self._current_led = -1  # Currently active LED (-1 = all off)
+        self._lock = threading.Lock()  # Thread lock for serial access
         
+    def _find_serial_port(self):
+        """Auto-detect serial port by looking for microcontroller"""
+        if not pyserial_available:
+            return None
+        
+        try:
+            ports = serial.tools.list_ports.comports()
+            for port in ports:
+                try:
+                    # Try to open port and look for "HELLO NEOPIXEL" message
+                    test_serial = serial.Serial(port.device, self.serial_baud, timeout=1.0)
+                    time.sleep(0.5)  # Give microcontroller time to send hello
+                    if test_serial.in_waiting > 0:
+                        line = test_serial.readline().decode('utf-8', errors='ignore').strip()
+                        if "HELLO" in line.upper() and "NEOPIXEL" in line.upper():
+                            test_serial.close()
+                            return port.device
+                    test_serial.close()
+                except (serial.SerialException, UnicodeDecodeError):
+                    continue
+        except Exception as e:
+            print(f"DEBUG: Error scanning serial ports: {e}")
+        
+        return None
+    
+    def _send_command(self, command):
+        """Send command to microcontroller via serial"""
+        if not self._initialized or self._serial is None:
+            return False
+        
+        try:
+            with self._lock:
+                cmd_str = command + "\n"
+                self._serial.write(cmd_str.encode('utf-8'))
+                self._serial.flush()
+                return True
+        except Exception as e:
+            print(f"Warning: Failed to send NeoPixel command '{command}': {e}", file=sys.stderr)
+            return False
+    
     def start(self):
-        """Initialize NeoPixel strip"""
-        if not rpi_ws281x_available:
+        """Initialize serial connection to NeoPixel microcontroller"""
+        if not pyserial_available:
             raise ImportError(
-                "rpi-ws281x library is required but not installed. "
-                "Install with: pip install rpi-ws281x"
+                "pyserial library is required but not installed. "
+                "Install with: pip install pyserial"
             )
         
         if self._initialized:
             return True
         
         try:
-            # Map color order string to library constant
-            # rpi_ws281x uses: ws.WS2811_STRIP_RGB, ws.WS2811_STRIP_GRB, etc.
-            strip_type_map = {
-                "RGB": ws.WS2811_STRIP_RGB,
-                "GRB": ws.WS2811_STRIP_GRB,
-                "RGBW": ws.WS2811_STRIP_RGBW,
-                "GRBW": ws.WS2811_STRIP_GRBW,
-            }
-            strip_type = strip_type_map.get(self.color_order.upper(), ws.WS2811_STRIP_GRB)
+            # Determine which port to use
+            port = self.serial_port
+            if not port or port == "":
+                print("DEBUG: Auto-detecting NeoPixel serial port...")
+                port = self._find_serial_port()
+                if port is None:
+                    raise RuntimeError(
+                        "Could not auto-detect NeoPixel microcontroller.\n"
+                        "Make sure:\n"
+                        "  - Microcontroller is connected via USB\n"
+                        "  - Microcontroller sends 'HELLO NEOPIXEL' on boot\n"
+                        "  - Or specify neopixel_serial_port in config.yaml"
+                    )
+                print(f"DEBUG: Auto-detected NeoPixel port: {port}")
+            else:
+                print(f"DEBUG: Using specified NeoPixel port: {port}")
             
-            # Create PixelStrip instance
-            self._strip = PixelStrip(
-                num=self.num_pixels,
-                pin=self.data_pin,
-                freq_hz=self.frequency,
-                dma=self.dma_channel,
-                invert=self.invert,
-                brightness=int(255 * self.brightness),
-                channel=0,
-                strip_type=strip_type
+            # Open serial connection
+            self._serial = serial.Serial(
+                port=port,
+                baudrate=self.serial_baud,
+                timeout=1.0,
+                write_timeout=1.0
             )
             
-            # Initialize the library
-            self._strip.begin()
+            # Wait a bit for connection to stabilize
+            time.sleep(0.5)
+            
+            # Clear any pending data
+            if self._serial.in_waiting > 0:
+                self._serial.reset_input_buffer()
+            
+            # Send initialization command with brightness
+            brightness_int = int(255 * self.brightness)
+            self._send_command(f"INIT:{self.num_pixels}:{brightness_int}")
             
             # Turn off all pixels initially
             self.all_off()
             
             self._initialized = True
-            print(f"NeoPixel controller initialized")
-            print(f"DEBUG: Data pin: GP{self.data_pin}")
+            print(f"NeoPixel controller initialized on {port}")
+            print(f"DEBUG: Baud rate: {self.serial_baud}")
             print(f"DEBUG: Pixel count: {self.num_pixels}")
             print(f"DEBUG: Brightness: {self.brightness * 100:.0f}%")
-            print(f"DEBUG: Pixel type: {self.pixel_type}")
-            print(f"DEBUG: Color order: {self.color_order}")
             print(f"DEBUG: Test LEDs with keys: T (all), Q/W/E/U (individual)")
             return True
             
-        except Exception as e:
+        except serial.SerialException as e:
             error_msg = (
                 f"NeoPixel controller failed to initialize: {e}\n"
                 f"Possible causes:\n"
-                f"  - Insufficient permissions (may need root/sudo or udev rules)\n"
-                f"  - GPIO pin {self.data_pin} unavailable or in use\n"
-                f"  - Hardware not connected properly\n"
-                f"  - DMA channel {self.dma_channel} conflict\n"
-                f"Install rpi-ws281x with: pip install rpi-ws281x"
+                f"  - Serial port {port if 'port' in locals() else 'unknown'} not available\n"
+                f"  - Port already in use by another application\n"
+                f"  - Microcontroller not connected or not powered\n"
+                f"  - Wrong baud rate (current: {self.serial_baud})\n"
+                f"Install pyserial with: pip install pyserial"
+            )
+            raise RuntimeError(error_msg) from e
+        except Exception as e:
+            error_msg = (
+                f"NeoPixel controller failed to initialize: {e}\n"
+                f"Install pyserial with: pip install pyserial"
             )
             raise RuntimeError(error_msg) from e
     
     def stop(self):
         """Cleanup and turn off all NeoPixels"""
         self.all_off()
-        if self._strip is not None:
+        if self._serial is not None:
             try:
-                # PixelStrip doesn't have explicit cleanup, but we ensure all are off
-                self._strip = None
+                with self._lock:
+                    self._serial.close()
             except Exception:
                 pass
+            self._serial = None
         self._initialized = False
         self._current_led = -1
     
@@ -929,56 +969,44 @@ class NeoPixelController:
         if led_index == self._current_led:
             return  # Already in desired state
         
-        try:
-            # Turn off all pixels first
-            for i in range(self.num_pixels):
-                if i == led_index:
-                    # Set the active pixel to the specified color
-                    r, g, b = color
-                    self._strip.setPixelColor(i, Color(r, g, b))
-                else:
-                    # Turn off other pixels
-                    self._strip.setPixelColor(i, Color(0, 0, 0))
-            
-            # Update the strip
-            self._strip.show()
-            
-            self._current_led = led_index
-            if led_index >= 0:
-                r, g, b = color
-                print(f"DEBUG: NeoPixel {led_index} ON (GP{self.data_pin}, RGB=({r},{g},{b}))")
-            
-        except Exception as e:
-            raise RuntimeError(f"Failed to set NeoPixel {led_index}: {e}") from e
+        # Apply brightness to color
+        r, g, b = color
+        r = int(r * self.brightness)
+        g = int(g * self.brightness)
+        b = int(b * self.brightness)
+        
+        # Turn off all pixels first, then set the active one
+        self._send_command("ALL:OFF")
+        time.sleep(0.01)  # Small delay
+        self._send_command(f"PIXEL:{led_index}:{r}:{g}:{b}")
+        
+        self._current_led = led_index
+        if led_index >= 0:
+            print(f"DEBUG: NeoPixel {led_index} ON (RGB=({r},{g},{b}))")
     
     def all_off(self):
         """Turn off all NeoPixels"""
         if not self._initialized:
             return
         
-        try:
-            for i in range(self.num_pixels):
-                self._strip.setPixelColor(i, Color(0, 0, 0))
-            self._strip.show()
-            self._current_led = -1
-            print("DEBUG: All NeoPixels OFF")
-        except Exception as e:
-            raise RuntimeError(f"Failed to turn off NeoPixels: {e}") from e
+        self._send_command("ALL:OFF")
+        self._current_led = -1
+        print("DEBUG: All NeoPixels OFF")
     
     def all_on(self, color=(255, 255, 255)):
         """Turn on all NeoPixels with specified color (useful for testing)"""
         if not self._initialized:
             raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
-        try:
-            r, g, b = color
-            for i in range(self.num_pixels):
-                self._strip.setPixelColor(i, Color(r, g, b))
-            self._strip.show()
-            self._current_led = -2  # Special value for "all on"
-            print(f"DEBUG: All NeoPixels ON (RGB=({r},{g},{b}))")
-        except Exception as e:
-            raise RuntimeError(f"Failed to turn on NeoPixels: {e}") from e
+        # Apply brightness to color
+        r, g, b = color
+        r = int(r * self.brightness)
+        g = int(g * self.brightness)
+        b = int(b * self.brightness)
+        
+        self._send_command(f"ALL:ON:{r}:{g}:{b}")
+        self._current_led = -2  # Special value for "all on"
+        print(f"DEBUG: All NeoPixels ON (RGB=({r},{g},{b}))")
     
     def set_color(self, led_index, r, g, b):
         """Set specific RGB color for a NeoPixel"""
@@ -988,11 +1016,12 @@ class NeoPixelController:
         if led_index < 0 or led_index >= self.num_pixels:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
-        try:
-            self._strip.setPixelColor(led_index, Color(r, g, b))
-            self._strip.show()
-        except Exception as e:
-            raise RuntimeError(f"Failed to set NeoPixel {led_index} color: {e}") from e
+        # Apply brightness
+        r = int(r * self.brightness)
+        g = int(g * self.brightness)
+        b = int(b * self.brightness)
+        
+        self._send_command(f"PIXEL:{led_index}:{r}:{g}:{b}")
     
     def set_brightness(self, brightness):
         """Adjust brightness (0.0-1.0)"""
@@ -1002,12 +1031,9 @@ class NeoPixelController:
         if brightness < 0.0 or brightness > 1.0:
             raise ValueError(f"Brightness must be between 0.0 and 1.0, got {brightness}")
         
-        try:
-            self.brightness = brightness
-            self._strip.setBrightness(int(255 * brightness))
-            self._strip.show()
-        except Exception as e:
-            raise RuntimeError(f"Failed to set brightness: {e}") from e
+        self.brightness = brightness
+        brightness_int = int(255 * brightness)
+        self._send_command(f"BRIGHTNESS:{brightness_int}")
     
     def test_led(self, led_index, duration=2.0, color=(255, 255, 255)):
         """Test a specific NeoPixel by turning it on for a duration"""
@@ -1017,15 +1043,11 @@ class NeoPixelController:
         if led_index < 0 or led_index >= self.num_pixels:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
-        try:
-            r, g, b = color
-            print(f"DEBUG: Testing NeoPixel {led_index} (GP{self.data_pin}) for {duration}s...")
-            self.set_led(led_index, color)
-            time.sleep(duration)
-            self.all_off()
-            print(f"DEBUG: NeoPixel {led_index} test complete")
-        except Exception as e:
-            raise RuntimeError(f"Failed to test NeoPixel {led_index}: {e}") from e
+        print(f"DEBUG: Testing NeoPixel {led_index} for {duration}s...")
+        self.set_led(led_index, color)
+        time.sleep(duration)
+        self.all_off()
+        print(f"DEBUG: NeoPixel {led_index} test complete")
 
 
 def time_strings(t0):
@@ -1097,16 +1119,13 @@ def main():
     led_controller = None
     if GPIO_LED_CALIBRATION_ENABLE:
         print(f"DEBUG: Initializing NeoPixel controller")
-        print(f"DEBUG: Data pin: GP{NEOPIXEL_DATA_PIN}, Count: {NEOPIXEL_COUNT}, Brightness: {NEOPIXEL_BRIGHTNESS}")
+        print(f"DEBUG: Serial port: {NEOPIXEL_SERIAL_PORT or 'auto-detect'}, Baud: {NEOPIXEL_SERIAL_BAUD}")
+        print(f"DEBUG: Count: {NEOPIXEL_COUNT}, Brightness: {NEOPIXEL_BRIGHTNESS}")
         led_controller = NeoPixelController(
-            data_pin=NEOPIXEL_DATA_PIN,
+            serial_port=NEOPIXEL_SERIAL_PORT,
+            serial_baud=NEOPIXEL_SERIAL_BAUD,
             num_pixels=NEOPIXEL_COUNT,
-            brightness=NEOPIXEL_BRIGHTNESS,
-            pixel_type=NEOPIXEL_PIXEL_TYPE,
-            color_order=NEOPIXEL_COLOR_ORDER,
-            frequency=NEOPIXEL_FREQUENCY,
-            dma_channel=NEOPIXEL_DMA_CHANNEL,
-            invert=NEOPIXEL_INVERT
+            brightness=NEOPIXEL_BRIGHTNESS
         )
         # start() will raise error if library unavailable or initialization fails
         led_controller.start()
