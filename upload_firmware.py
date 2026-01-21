@@ -247,16 +247,26 @@ def compile_firmware(cli_path, firmware_path):
     """Compile the firmware"""
     print_step("Compiling Firmware")
     
-    if not os.path.exists(firmware_path):
+    # Ensure firmware_path is a Path object and absolute
+    firmware_path = Path(firmware_path).resolve()
+    
+    if not firmware_path.exists():
         print_error(f"Firmware file not found: {firmware_path}")
         return False
     
-    print_info(f"Compiling {firmware_path}...")
+    # Arduino CLI accepts the .ino file directly
+    # This avoids issues where it might look for a .ino file matching the directory name
+    firmware_name = firmware_path.name
+    
+    print_info(f"Compiling {firmware_name}...")
+    print_info(f"  Full path: {firmware_path}")
+    
+    # Pass the .ino file directly to arduino-cli
     success, stdout, stderr = run_arduino_cli(cli_path, [
         "compile",
         "--fqbn", BOARD_FQBN,
         "--verbose",
-        firmware_path
+        str(firmware_path)
     ])
     
     if not success:
@@ -299,12 +309,17 @@ def upload_via_uf2(firmware_path):
         print_error("Arduino CLI not found")
         return False
     
-    # Compile with output directory
+    # Ensure firmware_path is absolute
+    firmware_path = Path(firmware_path).resolve()
+    
+    print_info(f"Compiling {firmware_path.name} for UF2 generation...")
+    
+    # Pass the .ino file directly to arduino-cli
     success, stdout, stderr = run_arduino_cli(cli_path, [
         "compile",
         "--fqbn", BOARD_FQBN,
         "--output-dir", str(build_dir),
-        firmware_path
+        str(firmware_path)
     ])
     
     if not success:
@@ -388,12 +403,16 @@ def upload_firmware(cli_path, firmware_path, port=None):
     
     print_info(f"Uploading to {port}...")
     
+    # Ensure firmware_path is absolute
+    firmware_path = Path(firmware_path).resolve()
+    
+    # Pass the .ino file directly to arduino-cli
     cmd = [
         "upload",
         "--fqbn", BOARD_FQBN,
         "--port", port,
         "--verbose",
-        firmware_path
+        str(firmware_path)
     ]
     
     success, stdout, stderr = run_arduino_cli(cli_path, cmd, check=False)
@@ -500,6 +519,9 @@ Examples:
             else:
                 print_info(f"Using default firmware path: {firmware_path}")
     
+    # Resolve to absolute path and validate
+    firmware_path = firmware_path.resolve()
+    
     # Check if firmware file exists
     if not firmware_path.exists():
         print_error(f"Firmware file not found: {firmware_path}")
@@ -508,10 +530,26 @@ Examples:
         else:
             print_info(f"Make sure firmware file exists at the configured path")
             print_info(f"  - Check config.yaml 'firmware_path' setting")
+            print_info(f"  - Current config value: {config_firmware_path if 'config_firmware_path' in locals() else 'N/A'}")
             print_info(f"  - Or specify a path with: python upload_firmware.py --firmware <path>")
         return 1
     
+    # Validate it's actually a .ino file
+    if firmware_path.suffix.lower() != '.ino':
+        print_error(f"File does not have .ino extension: {firmware_path}")
+        print_info("Firmware file must be a .ino file")
+        return 1
+    
     print_info(f"Using firmware file: {firmware_path}")
+    print_info(f"  File name: {firmware_path.name}")
+    print_info(f"  Directory: {firmware_path.parent}")
+    print_info(f"  Absolute path: {firmware_path}")
+    
+    # Verify the file name matches what we expect from config
+    if not args.firmware:
+        expected_name = DEFAULT_FIRMWARE_FILE
+        if firmware_path.name != expected_name:
+            print_info(f"  Note: File name is '{firmware_path.name}', expected '{expected_name}' from config")
     
     # Check/install Arduino CLI
     cli_path = check_arduino_cli()
@@ -529,12 +567,15 @@ Examples:
         print_error("Failed to setup Arduino CLI")
         return 1
     
+    # Ensure firmware_path is absolute before passing to functions
+    firmware_path = firmware_path.resolve()
+    
     # Compile firmware
-    if not compile_firmware(cli_path, str(firmware_path)):
+    if not compile_firmware(cli_path, firmware_path):
         return 1
     
     # Upload firmware
-    if not upload_firmware(cli_path, str(firmware_path)):
+    if not upload_firmware(cli_path, firmware_path):
         return 1
     
     print_step("All Done!")
