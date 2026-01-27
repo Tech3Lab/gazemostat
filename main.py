@@ -652,29 +652,29 @@ class GazeClient:
                 # Lissajous-like motion in [0,1]
                 gx = 0.5 + 0.4 * math.sin(ang)
                 gy = 0.5 + 0.3 * math.sin(ang * 1.7)
-                                # occasional blink invalidation
-                                valid = (int(dt * 3) % 20) != 0
-                                pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
-                                
-                                # Simulate eye tracking data
-                                # LEYEZ and REYEZ: simulate distance in normalized units (0.0-1.0)
-                                # Convert to actual distance: 0.5 = 60cm (optimal), range roughly 0.3-0.9 = 40-90cm
-                                leyez = 0.5 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal
-                                reyez = 0.5 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
-                                
-                                # LVALID and RVALID: simulate validity (occasional invalid)
-                                lvalid = (int(dt * 3) % 25) != 0
-                                rvalid = (int(dt * 3) % 23) != 0  # Slightly different pattern
-                                
-                                # LCHRX, LCHRY, RCHRX, RCHRY: simulate corneal reflection positions
-                                lchrx = 0.5 + 0.1 * math.sin(ang * 0.8)
-                                lchry = 0.5 + 0.1 * math.cos(ang * 0.8)
-                                rchrx = 0.5 + 0.1 * math.sin(ang * 0.9)
-                                rchry = 0.5 + 0.1 * math.cos(ang * 0.9)
-                                
-                                self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
-                                                 lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
-                                                 rchrx=rchrx, rchry=rchry)
+                # occasional blink invalidation
+                valid = (int(dt * 3) % 20) != 0
+                pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
+                
+                # Simulate eye tracking data
+                # LEYEZ and REYEZ: simulate distance in normalized units (0.0-1.0)
+                # Convert to actual distance: 0.5 = 60cm (optimal), range roughly 0.3-0.9 = 40-90cm
+                leyez = 0.5 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal
+                reyez = 0.5 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
+                
+                # LVALID and RVALID: simulate validity (occasional invalid)
+                lvalid = (int(dt * 3) % 25) != 0
+                rvalid = (int(dt * 3) % 23) != 0  # Slightly different pattern
+                
+                # LCHRX, LCHRY, RCHRX, RCHRY: simulate corneal reflection positions
+                lchrx = 0.5 + 0.1 * math.sin(ang * 0.8)
+                lchry = 0.5 + 0.1 * math.cos(ang * 0.8)
+                rchrx = 0.5 + 0.1 * math.sin(ang * 0.9)
+                rchry = 0.5 + 0.1 * math.cos(ang * 0.9)
+                
+                self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
+                                 lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
+                                 rchrx=rchrx, rchry=rchry)
                 time.sleep(1.0 / 60.0)
             else:
                 self.receiving = False
