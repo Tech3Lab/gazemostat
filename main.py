@@ -1253,35 +1253,37 @@ def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
     right_label = font.render("RIGHT", True, (255, 255, 255))
     screen.blit(right_label, (right_eye_x - right_label.get_width() // 2, eye_y - eye_radius - 30))
     
-    # Draw LEYEZ value under left eye
+    # Draw Distance value under left eye
     leyez_y = eye_y + eye_radius + 20
     if leyez is not None:
         distance_cm = get_distance_cm(leyez)
         distance_color = get_distance_color(leyez)
-        leyez_text = f"LEYEZ: {leyez:.3f}"
         if distance_cm is not None:
-            leyez_text += f" ({distance_cm:.1f} cm)"
-        leyez_surf = small.render(leyez_text, True, distance_color)
-        screen.blit(leyez_surf, (left_eye_x - leyez_surf.get_width() // 2, leyez_y))
+            distance_text = f"Distance: {distance_cm:.1f} cm"
+        else:
+            distance_text = "Distance: N/A"
+        distance_surf = small.render(distance_text, True, distance_color)
+        screen.blit(distance_surf, (left_eye_x - distance_surf.get_width() // 2, leyez_y))
     else:
-        leyez_surf = small.render("LEYEZ: N/A", True, (128, 128, 128))
-        screen.blit(leyez_surf, (left_eye_x - leyez_surf.get_width() // 2, leyez_y))
+        distance_surf = small.render("Distance: N/A", True, (128, 128, 128))
+        screen.blit(distance_surf, (left_eye_x - distance_surf.get_width() // 2, leyez_y))
     
-    # Draw REYEZ value under right eye
+    # Draw Distance value under right eye
     reyez_y = eye_y + eye_radius + 20
     if reyez is not None:
         distance_cm = get_distance_cm(reyez)
         distance_color = get_distance_color(reyez)
-        reyez_text = f"REYEZ: {reyez:.3f}"
         if distance_cm is not None:
-            reyez_text += f" ({distance_cm:.1f} cm)"
-        reyez_surf = small.render(reyez_text, True, distance_color)
-        screen.blit(reyez_surf, (right_eye_x - reyez_surf.get_width() // 2, reyez_y))
+            distance_text = f"Distance: {distance_cm:.1f} cm"
+        else:
+            distance_text = "Distance: N/A"
+        distance_surf = small.render(distance_text, True, distance_color)
+        screen.blit(distance_surf, (right_eye_x - distance_surf.get_width() // 2, reyez_y))
     else:
-        reyez_surf = small.render("REYEZ: N/A", True, (128, 128, 128))
-        screen.blit(reyez_surf, (right_eye_x - reyez_surf.get_width() // 2, reyez_y))
+        distance_surf = small.render("Distance: N/A", True, (128, 128, 128))
+        screen.blit(distance_surf, (right_eye_x - distance_surf.get_width() // 2, reyez_y))
     
-    # Draw pupil diameter values below LEYEZ/REYEZ
+    # Draw pupil diameter values below Distance
     pupil_y = leyez_y + 25
     
     # Left pupil diameter
