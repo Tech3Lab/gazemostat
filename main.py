@@ -48,7 +48,7 @@ GPIO_BTN_EYE_VIEW_ENABLE = False  # Enable hardware button for eye view
 GPIO_BTN_EYE_VIEW_PIN = 1  # GPIO pin for eye view button (GP1)
 GPIO_BTN_EYE_VIEW_DEBOUNCE = 0.2  # Eye view button debounce time in seconds
 GPIO_BTN_EYE_VIEW_KEY = "K_v"  # Keyboard shortcut key for eye view (V key)
-EYE_VIEW_TIMEOUT = 3.0  # Timeout in seconds before clearing eye view data
+EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (reduced for faster response)
 
 # Load config.yaml if it exists
 def load_config():
@@ -556,25 +556,31 @@ class GazeClient:
                                     # Try Best POG first (Section 5.7 - average or best available)
                                     gx = get_attr(line_str, 'BPOGX', None)
                                     gy = get_attr(line_str, 'BPOGY', None)
-                                    valid = get_attr(line_str, 'BPOGV', None)
+                                    bpogv = get_attr(line_str, 'BPOGV', None)
+                                    valid = bpogv
+                                    
+                                    # Extract all gaze validity flags for fix #3 (multiple validity check)
+                                    fpogv = get_attr(line_str, 'FPOGV', None)
+                                    lpogv = get_attr(line_str, 'LPOGV', None)
+                                    rpogv = get_attr(line_str, 'RPOGV', None)
                                     
                                     # Fallback to Fixation POG (Section 5.4)
                                     if gx is None:
                                         gx = get_attr(line_str, 'FPOGX', None)
                                         gy = get_attr(line_str, 'FPOGY', None)
-                                        valid = get_attr(line_str, 'FPOGV', None)
+                                        valid = fpogv
                                     
                                     # Fallback to Left Eye POG (Section 5.5)
                                     if gx is None:
                                         gx = get_attr(line_str, 'LPOGX', None)
                                         gy = get_attr(line_str, 'LPOGY', None)
-                                        valid = get_attr(line_str, 'LPOGV', None)
+                                        valid = lpogv
                                     
                                     # Fallback to Right Eye POG (Section 5.6)
                                     if gx is None:
                                         gx = get_attr(line_str, 'RPOGX', None)
                                         gy = get_attr(line_str, 'RPOGY', None)
-                                        valid = get_attr(line_str, 'RPOGV', None)
+                                        valid = rpogv
                                     
                                     # Default values if still None
                                     if gx is None:
@@ -584,6 +590,10 @@ class GazeClient:
                                     
                                     # Convert validity to boolean
                                     valid = valid > 0.5 if valid is not None else False
+                                    bpogv = bpogv > 0.5 if bpogv is not None else False
+                                    fpogv = fpogv > 0.5 if fpogv is not None else False
+                                    lpogv = lpogv > 0.5 if lpogv is not None else False
+                                    rpogv = rpogv > 0.5 if rpogv is not None else False
                                     
                                     # Extract pupil diameter (Sections 5.8 and 5.9)
                                     # Try left eye pupil diameter
@@ -601,17 +611,61 @@ class GazeClient:
                                     else:
                                         pupil = 2.5  # Default fallback
                                     
-                                    # Extract eye tracking data (LEYEZ, REYEZ, LPV, RPV, LPUPILD, RPUPILD)
+                                    # Extract eye tracking data (LEYEZ, REYEZ, LPV, RPV, LPUPILD, RPUPILD, LPUPILV, RPUPILV)
                                     leyez = get_attr(line_str, 'LEYEZ', None)
                                     reyez = get_attr(line_str, 'REYEZ', None)
                                     lpv = get_attr(line_str, 'LPV', None)  # Left pupil validity (from ENABLE_SEND_PUPIL_LEFT)
                                     rpv = get_attr(line_str, 'RPV', None)  # Right pupil validity (from ENABLE_SEND_PUPIL_RIGHT)
+                                    lpupilv = get_attr(line_str, 'LPUPILV', None)  # Left 3D eye data validity (from ENABLE_SEND_EYE_LEFT)
+                                    rpupilv = get_attr(line_str, 'RPUPILV', None)  # Right 3D eye data validity (from ENABLE_SEND_EYE_RIGHT)
                                     lpupild = get_attr(line_str, 'LPUPILD', None)  # Left pupil diameter in meters (from ENABLE_SEND_EYE_LEFT)
                                     rpupild = get_attr(line_str, 'RPUPILD', None)  # Right pupil diameter in meters (from ENABLE_SEND_EYE_RIGHT)
+                                    
+                                    # Store original validity values before conversion for fix #3
+                                    lpupilv_raw = lpupilv
+                                    rpupilv_raw = rpupilv
                                     
                                     # Convert validity to boolean
                                     lpv = lpv > 0.5 if lpv is not None else False
                                     rpv = rpv > 0.5 if rpv is not None else False
+                                    lpupilv = lpupilv > 0.5 if lpupilv is not None else False
+                                    rpupilv = rpupilv > 0.5 if rpupilv is not None else False
+                                    
+                                    # Fix #1: Filter distance values by validity flags
+                                    # Only use LEYEZ/REYEZ when 3D eye data is valid (LPUPILV/RPUPILV)
+                                    # Fallback to LPV/RPV if LPUPILV/RPUPILV not available
+                                    if lpupilv_raw is not None:
+                                        # Use LPUPILV if available (more accurate for 3D data)
+                                        if not lpupilv:
+                                            leyez = None
+                                    elif not lpv:
+                                        # Fallback to LPV if LPUPILV not available
+                                        leyez = None
+                                    
+                                    if rpupilv_raw is not None:
+                                        # Use RPUPILV if available (more accurate for 3D data)
+                                        if not rpupilv:
+                                            reyez = None
+                                    elif not rpv:
+                                        # Fallback to RPV if RPUPILV not available
+                                        reyez = None
+                                    
+                                    # Fix #3: Check multiple validity flags to detect absence faster
+                                    # If all key validity flags indicate absence, clear distance values immediately
+                                    # This provides faster detection than waiting for any single flag
+                                    gaze_invalid = not bpogv and not fpogv  # No valid gaze (Best or Fixation)
+                                    
+                                    # Check if both eyes have invalid 3D data
+                                    # Use raw values to check if they were available
+                                    left_eye_3d_invalid = (lpupilv_raw is not None and not lpupilv) or (lpupilv_raw is None and not lpv)
+                                    right_eye_3d_invalid = (rpupilv_raw is not None and not rpupilv) or (rpupilv_raw is None and not rpv)
+                                    both_eyes_3d_invalid = left_eye_3d_invalid and right_eye_3d_invalid
+                                    
+                                    # If no valid gaze AND both eyes have invalid 3D data, user is likely absent
+                                    # Clear distance values immediately for faster response
+                                    if gaze_invalid and both_eyes_3d_invalid:
+                                        leyez = None
+                                        reyez = None
                                     
                                     # Normalize gaze coordinates (Gazepoint uses 0-1 range)
                                     gx = max(0.0, min(1.0, float(gx)))
@@ -1992,13 +2046,19 @@ def main():
                 valid_val = s.get("valid", True)
                 last_calib_gaze = (gx_val, gy_val, valid_val)
                 # Store last eye data for eye view display (always update, not just when active)
+                # Fix #4: Clear distance values immediately when validity flags are False
+                lpv_val = s.get("lpv", False)
+                rpv_val = s.get("rpv", False)
+                leyez_val = s.get("leyez") if lpv_val else None  # Clear if invalid
+                reyez_val = s.get("reyez") if rpv_val else None  # Clear if invalid
+                
                 last_eye_data = {
-                    "leyez": s.get("leyez"),
-                    "reyez": s.get("reyez"),
-                    "lpv": s.get("lpv"),
-                    "rpv": s.get("rpv"),
-                    "lpupild": s.get("lpupild"),
-                    "rpupild": s.get("rpupild")
+                    "leyez": leyez_val,
+                    "reyez": reyez_val,
+                    "lpv": lpv_val,
+                    "rpv": rpv_val,
+                    "lpupild": s.get("lpupild") if lpv_val else None,  # Clear if invalid
+                    "rpupild": s.get("rpupild") if rpv_val else None  # Clear if invalid
                 }
                 last_eye_data_time = time.time()  # Update timestamp when new data arrives
         except queue.Empty:
