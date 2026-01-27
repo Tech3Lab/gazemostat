@@ -302,8 +302,10 @@ class GazeClient:
             "ENABLE_SEND_POG_FIX",      # Fixation POG
             "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data
             "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data
-            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LVALID, LCHRX, LCHRY)
-            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RVALID, RCHRX, RCHRY)
+            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LPUPILD, LCHRX, LCHRY)
+            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RPUPILD, RCHRX, RCHRY)
+            "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data (LPV)
+            "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data (RPV)
         ]
         
         for field in fields:
@@ -583,19 +585,21 @@ class GazeClient:
                                     else:
                                         pupil = 2.5  # Default fallback
                                     
-                                    # Extract eye tracking data (LEYEZ, REYEZ, LVALID, RVALID, LCHRX, LCHRY, RCHRX, RCHRY)
+                                    # Extract eye tracking data (LEYEZ, REYEZ, LPV, RPV, LCHRX, LCHRY, RCHRX, RCHRY, LPUPILD, RPUPILD)
                                     leyez = get_attr(line_str, 'LEYEZ', None)
                                     reyez = get_attr(line_str, 'REYEZ', None)
-                                    lvalid = get_attr(line_str, 'LVALID', None)
-                                    rvalid = get_attr(line_str, 'RVALID', None)
+                                    lpv = get_attr(line_str, 'LPV', None)  # Left pupil validity (from ENABLE_SEND_PUPIL_LEFT)
+                                    rpv = get_attr(line_str, 'RPV', None)  # Right pupil validity (from ENABLE_SEND_PUPIL_RIGHT)
                                     lchrx = get_attr(line_str, 'LCHRX', None)
                                     lchry = get_attr(line_str, 'LCHRY', None)
                                     rchrx = get_attr(line_str, 'RCHRX', None)
                                     rchry = get_attr(line_str, 'RCHRY', None)
+                                    lpupild = get_attr(line_str, 'LPUPILD', None)  # Left pupil diameter in meters (from ENABLE_SEND_EYE_LEFT)
+                                    rpupild = get_attr(line_str, 'RPUPILD', None)  # Right pupil diameter in meters (from ENABLE_SEND_EYE_RIGHT)
                                     
                                     # Convert validity to boolean
-                                    lvalid = lvalid > 0.5 if lvalid is not None else False
-                                    rvalid = rvalid > 0.5 if rvalid is not None else False
+                                    lpv = lpv > 0.5 if lpv is not None else False
+                                    rpv = rpv > 0.5 if rpv is not None else False
                                     
                                     # Normalize gaze coordinates (Gazepoint uses 0-1 range)
                                     gx = max(0.0, min(1.0, float(gx)))
@@ -603,14 +607,14 @@ class GazeClient:
                                     
                                     t = time.time()
                                     self._push_sample(t, gx, gy, pupil, valid, leyez=leyez, reyez=reyez, 
-                                                     lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
-                                                     rchrx=rchrx, rchry=rchry)
+                                                     lpv=lpv, rpv=rpv, lchrx=lchrx, lchry=lchry,
+                                                     rchrx=rchrx, rchry=rchry, lpupild=lpupild, rpupild=rpupild)
                                 except Exception as e:
                                     # Fallback on parse error - use center position with invalid flag
                                     t = time.time()
                                     self._push_sample(t, 0.5, 0.5, 2.5, False, leyez=None, reyez=None,
-                                                     lvalid=False, rvalid=False, lchrx=None, lchry=None,
-                                                     rchrx=None, rchry=None)
+                                                     lpv=False, rpv=False, lchrx=None, lchry=None,
+                                                     rchrx=None, rchry=None, lpupild=None, rpupild=None)
                             
                     except socket.timeout:
                         # Timeout is normal - continue reading
@@ -662,9 +666,9 @@ class GazeClient:
                 leyez = 0.5 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal
                 reyez = 0.5 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
                 
-                # LVALID and RVALID: simulate validity (occasional invalid)
-                lvalid = (int(dt * 3) % 25) != 0
-                rvalid = (int(dt * 3) % 23) != 0  # Slightly different pattern
+                # LPV and RPV: simulate pupil validity (occasional invalid)
+                lpv = (int(dt * 3) % 25) != 0
+                rpv = (int(dt * 3) % 23) != 0  # Slightly different pattern
                 
                 # LCHRX, LCHRY, RCHRX, RCHRY: simulate corneal reflection positions
                 lchrx = 0.5 + 0.1 * math.sin(ang * 0.8)
@@ -672,20 +676,25 @@ class GazeClient:
                 rchrx = 0.5 + 0.1 * math.sin(ang * 0.9)
                 rchry = 0.5 + 0.1 * math.cos(ang * 0.9)
                 
+                # LPUPILD and RPUPILD: simulate pupil diameter in meters (typical range: 2-8mm = 0.002-0.008m)
+                lpupild = 0.004 + 0.001 * math.sin(ang * 0.6)  # Vary around 4mm
+                rpupild = 0.004 + 0.001 * math.cos(ang * 0.6)  # Slightly different phase
+                
                 self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
-                                 lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
-                                 rchrx=rchrx, rchry=rchry)
+                                 lpv=lpv, rpv=rpv, lchrx=lchrx, lchry=lchry,
+                                 rchrx=rchrx, rchry=rchry, lpupild=lpupild, rpupild=rpupild)
                 time.sleep(1.0 / 60.0)
             else:
                 self.receiving = False
                 time.sleep(0.05)
 
-    def _push_sample(self, t, gx, gy, pupil, valid, leyez=None, reyez=None, lvalid=None, rvalid=None, 
-                     lchrx=None, lchry=None, rchrx=None, rchry=None):
+    def _push_sample(self, t, gx, gy, pupil, valid, leyez=None, reyez=None, lpv=None, rpv=None, 
+                     lchrx=None, lchry=None, rchrx=None, rchry=None, lpupild=None, rpupild=None):
         sample = {
             "t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid,
-            "leyez": leyez, "reyez": reyez, "lvalid": lvalid, "rvalid": rvalid,
-            "lchrx": lchrx, "lchry": lchry, "rchrx": rchrx, "rchry": rchry
+            "leyez": leyez, "reyez": reyez, "lpv": lpv, "rpv": rpv,
+            "lchrx": lchrx, "lchry": lchry, "rchrx": rchrx, "rchry": rchry,
+            "lpupild": lpupild, "rpupild": rpupild
         }
         try:
             self.q.put_nowait(sample)
@@ -1182,12 +1191,14 @@ def draw_eye_view(screen, eye_data, font, small, big):
     # Extract values
     leyez = eye_data.get("leyez")
     reyez = eye_data.get("reyez")
-    lvalid = eye_data.get("lvalid", False)
-    rvalid = eye_data.get("rvalid", False)
+    lpv = eye_data.get("lpv", False)  # Left pupil validity (LPV)
+    rpv = eye_data.get("rpv", False)  # Right pupil validity (RPV)
     lchrx = eye_data.get("lchrx")
     lchry = eye_data.get("lchry")
     rchrx = eye_data.get("rchrx")
     rchry = eye_data.get("rchry")
+    lpupild = eye_data.get("lpupild")  # Left pupil diameter in meters
+    rpupild = eye_data.get("rpupild")  # Right pupil diameter in meters
     
     # Eye positions (centered horizontally, spaced vertically)
     eye_radius = 40
@@ -1196,14 +1207,14 @@ def draw_eye_view(screen, eye_data, font, small, big):
     eye_y = HEIGHT // 3
     
     # Draw left eye
-    left_eye_color = (0, 200, 0) if lvalid else (220, 50, 47)  # Green if valid, red if invalid
+    left_eye_color = (0, 200, 0) if lpv else (220, 50, 47)  # Green if valid, red if invalid
     pygame.draw.circle(screen, left_eye_color, (left_eye_x, eye_y), eye_radius, 3)
     # Draw LEFT label
     left_label = font.render("LEFT", True, (255, 255, 255))
     screen.blit(left_label, (left_eye_x - left_label.get_width() // 2, eye_y - eye_radius - 30))
     
     # Draw right eye
-    right_eye_color = (0, 200, 0) if rvalid else (220, 50, 47)  # Green if valid, red if invalid
+    right_eye_color = (0, 200, 0) if rpv else (220, 50, 47)  # Green if valid, red if invalid
     pygame.draw.circle(screen, right_eye_color, (right_eye_x, eye_y), eye_radius, 3)
     # Draw RIGHT label
     right_label = font.render("RIGHT", True, (255, 255, 255))
@@ -1237,8 +1248,31 @@ def draw_eye_view(screen, eye_data, font, small, big):
         reyez_surf = small.render("REYEZ: N/A", True, (128, 128, 128))
         screen.blit(reyez_surf, (right_eye_x - reyez_surf.get_width() // 2, reyez_y))
     
-    # Draw corneal reflection values below
-    corneal_y = leyez_y + 30
+    # Draw pupil diameter values below LEYEZ/REYEZ
+    pupil_y = leyez_y + 25
+    
+    # Left pupil diameter
+    if lpupild is not None:
+        lpupild_mm = lpupild * 1000  # Convert from meters to mm
+        lpupild_text = f"Left pupil diameter: {lpupild_mm:.2f} mm"
+        lpupild_surf = small.render(lpupild_text, True, (255, 255, 255))
+        screen.blit(lpupild_surf, (left_eye_x - lpupild_surf.get_width() // 2, pupil_y))
+    else:
+        lpupild_surf = small.render("Left pupil diameter: N/A", True, (128, 128, 128))
+        screen.blit(lpupild_surf, (left_eye_x - lpupild_surf.get_width() // 2, pupil_y))
+    
+    # Right pupil diameter
+    if rpupild is not None:
+        rpupild_mm = rpupild * 1000  # Convert from meters to mm
+        rpupild_text = f"Right pupil diameter: {rpupild_mm:.2f} mm"
+        rpupild_surf = small.render(rpupild_text, True, (255, 255, 255))
+        screen.blit(rpupild_surf, (right_eye_x - rpupild_surf.get_width() // 2, pupil_y))
+    else:
+        rpupild_surf = small.render("Right pupil diameter: N/A", True, (128, 128, 128))
+        screen.blit(rpupild_surf, (right_eye_x - rpupild_surf.get_width() // 2, pupil_y))
+    
+    # Draw corneal reflection values below pupil diameter
+    corneal_y = pupil_y + 25
     
     # Left corneal reflection
     if lchrx is not None and lchry is not None:
@@ -1900,15 +1934,6 @@ def main():
                             set_eye_view(True)
                     except Exception:
                         pass
-            elif ev.type == pygame.KEYUP:
-                if GPIO_BTN_EYE_VIEW_SIM:
-                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
-                    try:
-                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
-                        if key_attr is not None and ev.key == key_attr:
-                            set_eye_view(False)
-                    except Exception:
-                        pass
                 elif ev.key == pygame.K_m:
                     if SHOW_KEYS:
                         log_key("M")
@@ -1938,6 +1963,15 @@ def main():
                 elif ev.key == pygame.K_r:
                     log_key("R")
                     reset_app_state()
+            elif ev.type == pygame.KEYUP:
+                if GPIO_BTN_EYE_VIEW_SIM:
+                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
+                    try:
+                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
+                        if key_attr is not None and ev.key == key_attr:
+                            set_eye_view(False)
+                    except Exception:
+                        pass
 
         # Pull gaze samples
         # Show red when disconnected, green when connected
@@ -1957,12 +1991,14 @@ def main():
                 last_eye_data = {
                     "leyez": s.get("leyez"),
                     "reyez": s.get("reyez"),
-                    "lvalid": s.get("lvalid"),
-                    "rvalid": s.get("rvalid"),
+                    "lpv": s.get("lpv"),
+                    "rpv": s.get("rpv"),
                     "lchrx": s.get("lchrx"),
                     "lchry": s.get("lchry"),
                     "rchrx": s.get("rchrx"),
-                    "rchry": s.get("rchry")
+                    "rchry": s.get("rchry"),
+                    "lpupild": s.get("lpupild"),
+                    "rpupild": s.get("rpupild")
                 }
         except queue.Empty:
             pass
