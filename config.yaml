@@ -74,6 +74,12 @@ gpio_btn_eye_view_debounce: 0.2
 #   Default: "K_v"
 gpio_btn_eye_view_key: "K_v"
 
+# eye_view_timeout: Timeout for clearing eye view data when no updates received
+#   - Duration in seconds before eye view values are cleared if no new data is received
+#   - Value in seconds (e.g., 3.0 = 3 seconds)
+#   - Default: 3.0
+eye_view_timeout: 3.0
+
 # gpio_led_calibration_display: Enable on-screen LED display for calibration
 #   - true:  Show on-screen LED indicators during calibration sequence
 #            Displays visual LED circles at calibration points

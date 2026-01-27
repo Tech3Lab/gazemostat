@@ -48,6 +48,7 @@ GPIO_BTN_EYE_VIEW_ENABLE = False  # Enable hardware button for eye view
 GPIO_BTN_EYE_VIEW_PIN = 1  # GPIO pin for eye view button (GP1)
 GPIO_BTN_EYE_VIEW_DEBOUNCE = 0.2  # Eye view button debounce time in seconds
 GPIO_BTN_EYE_VIEW_KEY = "K_v"  # Keyboard shortcut key for eye view (V key)
+EYE_VIEW_TIMEOUT = 3.0  # Timeout in seconds before clearing eye view data
 
 # Load config.yaml if it exists
 def load_config():
@@ -60,7 +61,7 @@ def load_config():
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
-    global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY
+    global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -110,6 +111,7 @@ def load_config():
                     GPIO_BTN_EYE_VIEW_PIN = config.get('gpio_btn_eye_view_pin', GPIO_BTN_EYE_VIEW_PIN)
                     GPIO_BTN_EYE_VIEW_DEBOUNCE = config.get('gpio_btn_eye_view_debounce', GPIO_BTN_EYE_VIEW_DEBOUNCE)
                     GPIO_BTN_EYE_VIEW_KEY = config.get('gpio_btn_eye_view_key', GPIO_BTN_EYE_VIEW_KEY)
+                    EYE_VIEW_TIMEOUT = config.get('eye_view_timeout', EYE_VIEW_TIMEOUT)
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -302,8 +304,8 @@ class GazeClient:
             "ENABLE_SEND_POG_FIX",      # Fixation POG
             "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data
             "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data
-            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LPUPILD, LCHRX, LCHRY)
-            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RPUPILD, RCHRX, RCHRY)
+            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LPUPILD)
+            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RPUPILD)
             "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data (LPV)
             "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data (RPV)
         ]
@@ -585,15 +587,11 @@ class GazeClient:
                                     else:
                                         pupil = 2.5  # Default fallback
                                     
-                                    # Extract eye tracking data (LEYEZ, REYEZ, LPV, RPV, LCHRX, LCHRY, RCHRX, RCHRY, LPUPILD, RPUPILD)
+                                    # Extract eye tracking data (LEYEZ, REYEZ, LPV, RPV, LPUPILD, RPUPILD)
                                     leyez = get_attr(line_str, 'LEYEZ', None)
                                     reyez = get_attr(line_str, 'REYEZ', None)
                                     lpv = get_attr(line_str, 'LPV', None)  # Left pupil validity (from ENABLE_SEND_PUPIL_LEFT)
                                     rpv = get_attr(line_str, 'RPV', None)  # Right pupil validity (from ENABLE_SEND_PUPIL_RIGHT)
-                                    lchrx = get_attr(line_str, 'LCHRX', None)
-                                    lchry = get_attr(line_str, 'LCHRY', None)
-                                    rchrx = get_attr(line_str, 'RCHRX', None)
-                                    rchry = get_attr(line_str, 'RCHRY', None)
                                     lpupild = get_attr(line_str, 'LPUPILD', None)  # Left pupil diameter in meters (from ENABLE_SEND_EYE_LEFT)
                                     rpupild = get_attr(line_str, 'RPUPILD', None)  # Right pupil diameter in meters (from ENABLE_SEND_EYE_RIGHT)
                                     
@@ -607,14 +605,12 @@ class GazeClient:
                                     
                                     t = time.time()
                                     self._push_sample(t, gx, gy, pupil, valid, leyez=leyez, reyez=reyez, 
-                                                     lpv=lpv, rpv=rpv, lchrx=lchrx, lchry=lchry,
-                                                     rchrx=rchrx, rchry=rchry, lpupild=lpupild, rpupild=rpupild)
-                                except Exception as e:
+                                                     lpv=lpv, rpv=rpv, lpupild=lpupild, rpupild=rpupild)
+                                except Exception:
                                     # Fallback on parse error - use center position with invalid flag
                                     t = time.time()
                                     self._push_sample(t, 0.5, 0.5, 2.5, False, leyez=None, reyez=None,
-                                                     lpv=False, rpv=False, lchrx=None, lchry=None,
-                                                     rchrx=None, rchry=None, lpupild=None, rpupild=None)
+                                                     lpv=False, rpv=False, lpupild=None, rpupild=None)
                             
                     except socket.timeout:
                         # Timeout is normal - continue reading
@@ -670,30 +666,22 @@ class GazeClient:
                 lpv = (int(dt * 3) % 25) != 0
                 rpv = (int(dt * 3) % 23) != 0  # Slightly different pattern
                 
-                # LCHRX, LCHRY, RCHRX, RCHRY: simulate corneal reflection positions
-                lchrx = 0.5 + 0.1 * math.sin(ang * 0.8)
-                lchry = 0.5 + 0.1 * math.cos(ang * 0.8)
-                rchrx = 0.5 + 0.1 * math.sin(ang * 0.9)
-                rchry = 0.5 + 0.1 * math.cos(ang * 0.9)
-                
                 # LPUPILD and RPUPILD: simulate pupil diameter in meters (typical range: 2-8mm = 0.002-0.008m)
                 lpupild = 0.004 + 0.001 * math.sin(ang * 0.6)  # Vary around 4mm
                 rpupild = 0.004 + 0.001 * math.cos(ang * 0.6)  # Slightly different phase
                 
                 self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
-                                 lpv=lpv, rpv=rpv, lchrx=lchrx, lchry=lchry,
-                                 rchrx=rchrx, rchry=rchry, lpupild=lpupild, rpupild=rpupild)
+                                 lpv=lpv, rpv=rpv, lpupild=lpupild, rpupild=rpupild)
                 time.sleep(1.0 / 60.0)
             else:
                 self.receiving = False
                 time.sleep(0.05)
 
     def _push_sample(self, t, gx, gy, pupil, valid, leyez=None, reyez=None, lpv=None, rpv=None, 
-                     lchrx=None, lchry=None, rchrx=None, rchry=None, lpupild=None, rpupild=None):
+                     lpupild=None, rpupild=None):
         sample = {
             "t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid,
             "leyez": leyez, "reyez": reyez, "lpv": lpv, "rpv": rpv,
-            "lchrx": lchrx, "lchry": lchry, "rchrx": rchrx, "rchry": rchry,
             "lpupild": lpupild, "rpupild": rpupild
         }
         try:
@@ -1180,11 +1168,19 @@ def get_distance_cm(eyez_value):
     # Linear approximation: 0.0 = 40cm, 1.0 = 90cm
     return 40 + (eyez_value * 50)
 
-def draw_eye_view(screen, eye_data, font, small, big):
-    """Draw eye view display with two eyes, validity, distance, and corneal reflection"""
-    if eye_data is None:
+def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
+    """Draw eye view display with two eyes, validity, distance, and pupil diameter"""
+    # Check if data is too old (timeout)
+    if eye_data is None or eye_data_time is None:
         # Show "No data" message
         txt = big.render("No Eye Data", True, (128, 128, 128))
+        screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+        return
+    
+    current_time = time.time()
+    if current_time - eye_data_time > EYE_VIEW_TIMEOUT:
+        # Data is too old, clear display
+        txt = big.render("No Recent Data", True, (128, 128, 128))
         screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
         return
     
@@ -1193,10 +1189,6 @@ def draw_eye_view(screen, eye_data, font, small, big):
     reyez = eye_data.get("reyez")
     lpv = eye_data.get("lpv", False)  # Left pupil validity (LPV)
     rpv = eye_data.get("rpv", False)  # Right pupil validity (RPV)
-    lchrx = eye_data.get("lchrx")
-    lchry = eye_data.get("lchry")
-    rchrx = eye_data.get("rchrx")
-    rchry = eye_data.get("rchry")
     lpupild = eye_data.get("lpupild")  # Left pupil diameter in meters
     rpupild = eye_data.get("rpupild")  # Right pupil diameter in meters
     
@@ -1270,39 +1262,6 @@ def draw_eye_view(screen, eye_data, font, small, big):
     else:
         rpupild_surf = small.render("Right pupil diameter: N/A", True, (128, 128, 128))
         screen.blit(rpupild_surf, (right_eye_x - rpupild_surf.get_width() // 2, pupil_y))
-    
-    # Draw corneal reflection values below pupil diameter
-    corneal_y = pupil_y + 25
-    
-    # Left corneal reflection
-    if lchrx is not None and lchry is not None:
-        lchr_text = f"Corneal reflection X: {lchrx:.3f}"
-        lchr_surf = small.render(lchr_text, True, (255, 255, 255))
-        screen.blit(lchr_surf, (left_eye_x - lchr_surf.get_width() // 2, corneal_y))
-        
-        lchr_y_text = f"Corneal reflection Y: {lchry:.3f}"
-        lchr_y_surf = small.render(lchr_y_text, True, (255, 255, 255))
-        screen.blit(lchr_y_surf, (left_eye_x - lchr_y_surf.get_width() // 2, corneal_y + 20))
-    else:
-        lchr_surf = small.render("Corneal reflection X: N/A", True, (128, 128, 128))
-        screen.blit(lchr_surf, (left_eye_x - lchr_surf.get_width() // 2, corneal_y))
-        lchr_y_surf = small.render("Corneal reflection Y: N/A", True, (128, 128, 128))
-        screen.blit(lchr_y_surf, (left_eye_x - lchr_y_surf.get_width() // 2, corneal_y + 20))
-    
-    # Right corneal reflection
-    if rchrx is not None and rchry is not None:
-        rchr_text = f"Corneal reflection X: {rchrx:.3f}"
-        rchr_surf = small.render(rchr_text, True, (255, 255, 255))
-        screen.blit(rchr_surf, (right_eye_x - rchr_surf.get_width() // 2, corneal_y))
-        
-        rchr_y_text = f"Corneal reflection Y: {rchry:.3f}"
-        rchr_y_surf = small.render(rchr_y_text, True, (255, 255, 255))
-        screen.blit(rchr_y_surf, (right_eye_x - rchr_y_surf.get_width() // 2, corneal_y + 20))
-    else:
-        rchr_surf = small.render("Corneal reflection X: N/A", True, (128, 128, 128))
-        screen.blit(rchr_surf, (right_eye_x - rchr_surf.get_width() // 2, corneal_y))
-        rchr_y_surf = small.render("Corneal reflection Y: N/A", True, (128, 128, 128))
-        screen.blit(rchr_y_surf, (right_eye_x - rchr_y_surf.get_width() // 2, corneal_y + 20))
 
 
 def main():
@@ -1419,6 +1378,7 @@ def main():
     # Eye view state
     eye_view_active = False  # Whether eye view is currently displayed
     last_eye_data = None  # Store last eye tracking data for display
+    last_eye_data_time = None  # Timestamp of last eye data update
 
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
@@ -1619,7 +1579,7 @@ def main():
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
-        nonlocal eye_view_active, last_eye_data
+        nonlocal eye_view_active, last_eye_data, last_eye_data_time
         state = "READY"
         calib_status = "red"
         receiving_hint = False
@@ -1648,6 +1608,7 @@ def main():
         last_calib_gaze = None
         eye_view_active = False
         last_eye_data = None
+        last_eye_data_time = None
         set_info_msg("App state reset", dur=2.0)
     
     def gpio_button_callback():
@@ -1993,13 +1954,10 @@ def main():
                     "reyez": s.get("reyez"),
                     "lpv": s.get("lpv"),
                     "rpv": s.get("rpv"),
-                    "lchrx": s.get("lchrx"),
-                    "lchry": s.get("lchry"),
-                    "rchrx": s.get("rchrx"),
-                    "rchry": s.get("rchry"),
                     "lpupild": s.get("lpupild"),
                     "rpupild": s.get("rpupild")
                 }
+                last_eye_data_time = time.time()  # Update timestamp when new data arrives
         except queue.Empty:
             pass
 
@@ -2380,7 +2338,7 @@ def main():
             overlay.fill((0, 0, 0))
             screen.blit(overlay, (0, 0))
             # Draw eye view
-            draw_eye_view(screen, last_eye_data, font, small, big)
+            draw_eye_view(screen, last_eye_data, last_eye_data_time, font, small, big)
         
         # Button feedback and key overlay drawn last
         draw_button_feedback()
