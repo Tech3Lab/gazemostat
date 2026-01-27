@@ -14,7 +14,13 @@ Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 // Global brightness (0-255)
 uint8_t global_brightness = 76;  // Default: 30% (76/255)
 
+// Track if we've sent initial HELLO messages and when to stop
+unsigned long boot_time;
+bool serial_connected = false;
+const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
+
 void setup() {
+  boot_time = millis();
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
   
@@ -44,8 +50,34 @@ void setup() {
 }
 
 void loop() {
+  // Send HELLO messages periodically for first few seconds after boot
+  // This helps with auto-detection even if serial wasn't ready during setup()
+  unsigned long elapsed = millis() - boot_time;
+  if (elapsed < HELLO_PERIOD_MS) {
+    // Send HELLO every 500ms during the first 5 seconds
+    static unsigned long last_hello = 0;
+    if (millis() - last_hello >= 500) {
+      if (Serial) {
+        Serial.println("HELLO NEOPIXEL");
+        serial_connected = true;
+      }
+      last_hello = millis();
+    }
+  } else if (!serial_connected && Serial) {
+    // Send one more HELLO when serial first becomes available after boot period
+    Serial.println("HELLO NEOPIXEL");
+    serial_connected = true;
+  }
+  
   // Check for incoming serial commands
   if (Serial.available() > 0) {
+    // Mark serial as connected when we receive data
+    if (!serial_connected) {
+      serial_connected = true;
+      // Send HELLO when we first detect serial activity
+      Serial.println("HELLO NEOPIXEL");
+    }
+    
     String command = Serial.readStringUntil('\n');
     command.trim();  // Remove whitespace
     
