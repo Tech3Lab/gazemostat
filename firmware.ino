@@ -18,24 +18,28 @@ void setup() {
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
   
-  // Wait for serial port to open (for USB serial on RP2040)
-  // This ensures the port is ready before sending messages
-  while (!Serial) {
-    delay(10);
-  }
-  
-  // Small delay to ensure serial is fully ready
-  delay(100);
-  
-  // Initialize NeoPixel strip
+  // Initialize NeoPixel strip (don't wait for Serial on RP2040)
   strip.begin();
   strip.setBrightness(global_brightness);
   strip.show(); // Initialize all pixels to 'off'
   
+  // Wait a bit for serial to be ready, but don't block forever
+  // On RP2040, Serial might not be available immediately
+  unsigned long start = millis();
+  while (!Serial && (millis() - start < 2000)) {
+    delay(10);
+  }
+  
+  // Additional delay to ensure serial is fully ready
+  delay(200);
+  
   // Send hello message for auto-detection (send multiple times for reliability)
-  for (int i = 0; i < 3; i++) {
-    Serial.println("HELLO NEOPIXEL");
-    delay(50);
+  // Send even if Serial wasn't ready, in case it becomes ready later
+  for (int i = 0; i < 5; i++) {
+    if (Serial) {
+      Serial.println("HELLO NEOPIXEL");
+    }
+    delay(100);
   }
 }
 
@@ -62,12 +66,7 @@ void processCommand(String cmd) {
   // Parse command format: COMMAND:param1:param2:...
   int firstColon = cmd.indexOf(':');
   if (firstColon < 0) {
-    // No parameters
-    if (cmd == "ALL:OFF") {
-      allOff();
-      Serial.println("ACK");
-      return;
-    }
+    // No parameters - no commands without colons currently supported
     Serial.println("ERROR:Invalid command");
     return;
   }
@@ -108,7 +107,10 @@ void processCommand(String cmd) {
     
   } else if (command == "ALL") {
     // ALL:ON:<r>:<g>:<b> or ALL:OFF
-    if (params.startsWith("ON:")) {
+    if (params == "OFF") {
+      allOff();
+      Serial.println("ACK");
+    } else if (params.startsWith("ON:")) {
       String colorParams = params.substring(3);
       int r = getParam(colorParams, 0).toInt();
       int g = getParam(colorParams, 1).toInt();
