@@ -883,7 +883,7 @@ class NeoPixelController:
             ports = serial.tools.list_ports.comports()
             
             for port in ports:
-                port_name = port.device.upper()  # Normalize to uppercase for Windows
+                port_name = port.device.upper() if sys.platform == 'win32' else port.device  # Normalize to uppercase for Windows only
                 try:
                     # Try to open port
                     test_serial = serial.Serial(port_name, self.serial_baud, timeout=2.0)
@@ -895,7 +895,7 @@ class NeoPixelController:
                     time.sleep(0.5)
                     lines_read = []
                     start_time = time.time()
-                    while time.time() - start_time < 1.5:  # Read for up to 1.5 seconds
+                    while time.time() - start_time < 2.0:  # Read for up to 2 seconds
                         if test_serial.in_waiting > 0:
                             try:
                                 line = test_serial.readline().decode('utf-8', errors='ignore').strip()
@@ -912,7 +912,7 @@ class NeoPixelController:
                     test_serial.reset_input_buffer()
                     test_serial.write(b"PING\n")
                     test_serial.flush()
-                    time.sleep(0.3)
+                    time.sleep(0.5)
                     
                     if test_serial.in_waiting > 0:
                         response = test_serial.readline().decode('utf-8', errors='ignore').strip()
@@ -921,11 +921,24 @@ class NeoPixelController:
                             test_serial.close()
                             return port_name
                     
-                    # Try a harmless command as fallback
+                    # Try a harmless command as fallback (ALL:OFF should work even without HELLO)
                     test_serial.reset_input_buffer()
                     test_serial.write(b"ALL:OFF\n")
                     test_serial.flush()
-                    time.sleep(0.3)
+                    time.sleep(0.8)  # Give more time for response
+                    
+                    if test_serial.in_waiting > 0:
+                        response = test_serial.readline().decode('utf-8', errors='ignore').strip()
+                        if "ACK" in response.upper() or "ERROR" in response.upper():
+                            # Device responded - likely our NeoPixel controller
+                            test_serial.close()
+                            return port_name
+                    
+                    # Also try INIT command as another fallback
+                    test_serial.reset_input_buffer()
+                    test_serial.write(b"INIT:4:76\n")
+                    test_serial.flush()
+                    time.sleep(0.8)
                     
                     if test_serial.in_waiting > 0:
                         response = test_serial.readline().decode('utf-8', errors='ignore').strip()
@@ -991,11 +1004,12 @@ class NeoPixelController:
                         "Make sure:\n"
                         "  - RP2040 is connected via USB\n"
                         "  - RP2040 firmware is uploaded and running\n"
-                        "  - RP2040 sends 'HELLO NEOPIXEL' on boot (or responds to commands)\n"
+                        "  - RP2040 responds to commands (try: python test_neopixels.py)\n"
                     )
                     if available_ports:
                         error_msg += f"  - Available COM ports: {', '.join(available_ports)}\n"
                         error_msg += f"  - Try specifying one in config.yaml: neopixel_serial_port: \"{available_ports[0]}\"\n"
+                        error_msg += f"  - Or run 'python test_neopixels.py' to test and find the correct port\n"
                     else:
                         error_msg += "  - No COM ports found - check USB connection\n"
                     error_msg += "  - Or specify neopixel_serial_port in config.yaml"
@@ -1418,14 +1432,20 @@ def main():
     # Start NeoPixel controller for calibration LEDs (if enabled)
     led_controller = None
     if GPIO_LED_CALIBRATION_ENABLE:
-        led_controller = NeoPixelController(
-            serial_port=NEOPIXEL_SERIAL_PORT,
-            serial_baud=NEOPIXEL_SERIAL_BAUD,
-            num_pixels=NEOPIXEL_COUNT,
-            brightness=NEOPIXEL_BRIGHTNESS
-        )
-        # start() will raise error if library unavailable or initialization fails
-        led_controller.start()
+        try:
+            led_controller = NeoPixelController(
+                serial_port=NEOPIXEL_SERIAL_PORT,
+                serial_baud=NEOPIXEL_SERIAL_BAUD,
+                num_pixels=NEOPIXEL_COUNT,
+                brightness=NEOPIXEL_BRIGHTNESS
+            )
+            # start() will raise error if library unavailable or initialization fails
+            led_controller.start()
+            print("NeoPixel controller initialized successfully")
+        except Exception as e:
+            print(f"Warning: Failed to initialize NeoPixel controller: {e}", file=sys.stderr)
+            print("NeoPixel LEDs will not be available. Continuing without hardware LEDs...", file=sys.stderr)
+            led_controller = None
     
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
