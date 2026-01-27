@@ -33,7 +33,7 @@ SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
 FULLSCREEN = False    # Run app in fullscreen mode
 
 WIDTH, HEIGHT = 480, 800
-FPS = 30
+FPS = 60  # Increased from 30 to reduce display latency
 GP_HOST, GP_PORT = "127.0.0.1", 4242
 MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
@@ -2035,16 +2035,27 @@ def main():
         # Show red when disconnected, green when connected
         conn_status = "green" if gp.connected else "red"
         receiving_hint = gp.receiving
+        
+        # Process all available samples to prevent queue buildup and reduce latency
+        # For display, we only need the latest sample, but we process all to avoid accumulation
+        samples_processed = 0
+        max_samples_per_frame = 100  # Safety limit to prevent blocking on single frame
+        queue_size_before = gp.q.qsize()  # Monitor queue size for latency diagnosis
         try:
-            for _ in range(2):
+            while samples_processed < max_samples_per_frame:
                 s = gp.q.get_nowait()
+                samples_processed += 1
+                
                 if state == "COLLECTING":
                     gaze_samples.append(s)
-                # Remember last for preview (include validity)
+                
+                # Remember last for preview (include validity) - only keep latest for display
+                # This reduces processing overhead while ensuring we have the most recent data
                 gx_val = max(0.0, min(1.0, s.get("gx", 0.5)))
                 gy_val = max(0.0, min(1.0, s.get("gy", 0.5)))
                 valid_val = s.get("valid", True)
                 last_calib_gaze = (gx_val, gy_val, valid_val)
+                
                 # Store last eye data for eye view display (always update, not just when active)
                 # Fix #4: Clear distance values immediately when validity flags are False
                 lpv_val = s.get("lpv", False)
@@ -2063,6 +2074,13 @@ def main():
                 last_eye_data_time = time.time()  # Update timestamp when new data arrives
         except queue.Empty:
             pass
+        
+        # Optional: Warn if queue is building up (indicates processing can't keep up)
+        # This helps diagnose latency issues
+        queue_size_after = gp.q.qsize()
+        if queue_size_before > 50:  # Threshold for warning
+            print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
+                  f"Processed {samples_processed} samples this frame.", file=sys.stderr)
 
         # Calibration sequencing
         if state == "CALIBRATING":
