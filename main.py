@@ -265,14 +265,30 @@ class GazeClient:
         return self._send_command('<SET ID="CALIBRATE_RESET" />')
 
     def calibrate_timeout(self, timeout_ms=1000):
-        """Set the duration of each calibration point in milliseconds"""
-        # Convert milliseconds to seconds as per OpenGaze API specification
+        """Set the duration of each calibration point (not including animation time)
+        
+        Args:
+            timeout_ms: Duration in milliseconds. Will be converted to seconds for API.
+                        The API expects VALUE in seconds (float > 0) as per Section 3.5.
+        
+        Returns:
+            True if command sent successfully, False otherwise
+        """
+        # Convert milliseconds to seconds as per OpenGaze API specification (Section 3.5)
         timeout_sec = timeout_ms / 1000.0
         return self._send_command(f'<SET ID="CALIBRATE_TIMEOUT" VALUE="{timeout_sec}" />')
 
     def calibrate_delay(self, delay_ms=200):
-        """Set the duration of the animation before calibration at each point begins (milliseconds)"""
-        # Convert milliseconds to seconds as per OpenGaze API specification
+        """Set the duration of the calibration animation before calibration at each point begins
+        
+        Args:
+            delay_ms: Duration in milliseconds. Will be converted to seconds for API.
+                      The API expects VALUE in seconds (float >= 0) as per Section 3.6.
+        
+        Returns:
+            True if command sent successfully, False otherwise
+        """
+        # Convert milliseconds to seconds as per OpenGaze API specification (Section 3.6)
         delay_sec = delay_ms / 1000.0
         return self._send_command(f'<SET ID="CALIBRATE_DELAY" VALUE="{delay_sec}" />')
 
@@ -296,18 +312,16 @@ class GazeClient:
         
         # List of data fields to enable (Section 3.2-3.14)
         fields = [
-            "ENABLE_SEND_COUNTER",      # Frame counter
-            "ENABLE_SEND_TIME",         # Timestamp
-            "ENABLE_SEND_POG_BEST",     # Best POG (preferred)
-            "ENABLE_SEND_POG_LEFT",     # Left eye POG
-            "ENABLE_SEND_POG_RIGHT",    # Right eye POG
-            "ENABLE_SEND_POG_FIX",      # Fixation POG
-            "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data
-            "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data
-            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LPUPILD)
-            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RPUPILD)
-            "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data (LPV)
-            "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data (RPV)
+            "ENABLE_SEND_COUNTER",      # Frame counter (CNT)
+            "ENABLE_SEND_TIME",         # Timestamp (TIME)
+            "ENABLE_SEND_POG_BEST",     # Best POG (BPOGX, BPOGY, BPOGV) - preferred
+            "ENABLE_SEND_POG_LEFT",     # Left eye POG (LPOGX, LPOGY, LPOGV)
+            "ENABLE_SEND_POG_RIGHT",    # Right eye POG (RPOGX, RPOGY, RPOGV)
+            "ENABLE_SEND_POG_FIX",      # Fixation POG (FPOGX, FPOGY, FPOGV)
+            "ENABLE_SEND_PUPIL_LEFT",   # Left pupil 2D data (LPD in pixels, LPV validity)
+            "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil 2D data (RPD in pixels, RPV validity)
+            "ENABLE_SEND_EYE_LEFT",     # Left eye 3D data (LEYEZ, LPUPILD in meters)
+            "ENABLE_SEND_EYE_RIGHT",    # Right eye 3D data (REYEZ, RPUPILD in meters)
         ]
         
         for field in fields:
@@ -657,10 +671,10 @@ class GazeClient:
                 pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
                 
                 # Simulate eye tracking data
-                # LEYEZ and REYEZ: simulate distance in normalized units (0.0-1.0)
-                # Convert to actual distance: 0.5 = 60cm (optimal), range roughly 0.3-0.9 = 40-90cm
-                leyez = 0.5 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal
-                reyez = 0.5 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
+                # LEYEZ and REYEZ: simulate distance in meters (as per OpenGaze API Section 5.11)
+                # Typical range: 0.4-0.9 meters (40-90cm), optimal around 0.6m (60cm)
+                leyez = 0.6 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal (60cm)
+                reyez = 0.6 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
                 
                 # LPV and RPV: simulate pupil validity (occasional invalid)
                 lpv = (int(dt * 3) % 25) != 0
@@ -1143,30 +1157,57 @@ def draw_circle(screen, color, pos, r=12):
     pygame.draw.circle(screen, colors.get(color, (128, 128, 128)), pos, r)
 
 def get_distance_color(eyez_value):
-    """Get color for distance value based on ranges"""
+    """Get color for distance value based on ranges
+    
+    Args:
+        eyez_value: Distance in meters (as per OpenGaze API Section 5.11)
+                    LEYEZ/REYEZ are in meters, not normalized values
+    
+    Returns:
+        Color tuple (R, G, B) based on distance zones:
+        - Green: 55-65 cm (optimal range)
+        - Yellow: 45-55 cm or 65-75 cm (acceptable)
+        - Red: < 45 cm (too close) or > 75 cm (too far)
+    """
     if eyez_value is None:
         return (128, 128, 128)  # Gray for no data
     
-    # Convert normalized value to approximate distance in cm
-    # Assuming 0.0 = ~40cm, 1.0 = ~90cm (linear approximation)
-    # Optimal range is 0.60-0.70 which corresponds to 60-70cm
-    if eyez_value < 0.50:
-        return (220, 50, 47)  # Red - Too Close (< 50 cm)
-    elif eyez_value < 0.60:
-        return (255, 200, 0)  # Yellow - Acceptable (50-60 cm)
-    elif eyez_value < 0.70:
-        return (0, 200, 0)  # Green - Optimal (60-70 cm)
-    elif eyez_value < 0.80:
-        return (255, 200, 0)  # Yellow - Acceptable (70-80 cm)
+    # Convert meters to cm for comparison
+    # LEYEZ/REYEZ are in meters according to API Section 5.11
+    distance_cm = eyez_value * 100.0
+    
+    # Distance zones:
+    # - < 45 cm: Red (too close)
+    # - 45-55 cm: Yellow (acceptable)
+    # - 55-65 cm: Green (optimal/good)
+    # - 65-75 cm: Yellow (acceptable)
+    # - > 75 cm: Red (too far)
+    if distance_cm < 45.0:
+        return (220, 50, 47)  # Red - Too Close (< 45 cm)
+    elif distance_cm < 55.0:
+        return (255, 200, 0)  # Yellow - Acceptable (45-55 cm)
+    elif distance_cm < 65.0:
+        return (0, 200, 0)  # Green - Good (55-65 cm)
+    elif distance_cm < 75.0:
+        return (255, 200, 0)  # Yellow - Acceptable (65-75 cm)
     else:
-        return (220, 50, 47)  # Red - Too Far (> 80 cm)
+        return (220, 50, 47)  # Red - Too Far (> 75 cm)
 
 def get_distance_cm(eyez_value):
-    """Convert normalized eyez value to approximate distance in cm"""
+    """Convert LEYEZ/REYEZ value from meters to centimeters
+    
+    Args:
+        eyez_value: Distance in meters (as per OpenGaze API Section 5.11)
+                    LEYEZ/REYEZ are in meters, not normalized values
+    
+    Returns:
+        Distance in centimeters, or None if eyez_value is None
+    """
     if eyez_value is None:
         return None
-    # Linear approximation: 0.0 = 40cm, 1.0 = 90cm
-    return 40 + (eyez_value * 50)
+    # LEYEZ/REYEZ are in meters according to API Section 5.11
+    # Convert meters to centimeters
+    return eyez_value * 100.0
 
 def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
     """Draw eye view display with two eyes, validity, distance, and pupil diameter"""
