@@ -43,6 +43,11 @@ CALIB_DELAY = 0.3  # Delay after LED turns on before collecting samples (seconds
 CALIB_DWELL = 0.9  # Duration to collect samples (seconds)
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
+GPIO_BTN_EYE_VIEW_SIM = True  # Enable keyboard shortcut for eye view
+GPIO_BTN_EYE_VIEW_ENABLE = False  # Enable hardware button for eye view
+GPIO_BTN_EYE_VIEW_PIN = 1  # GPIO pin for eye view button (GP1)
+GPIO_BTN_EYE_VIEW_DEBOUNCE = 0.2  # Eye view button debounce time in seconds
+GPIO_BTN_EYE_VIEW_KEY = "K_v"  # Keyboard shortcut key for eye view (V key)
 
 # Load config.yaml if it exists
 def load_config():
@@ -54,6 +59,8 @@ def load_config():
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
+    global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
+    global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -97,6 +104,12 @@ def load_config():
                     CALIB_DWELL = config.get('calib_dwell', CALIB_DWELL)
                     GPIO_CHIP = config.get('gpio_chip', GPIO_CHIP)
                     GPIO_BTN_MARKER_DEBOUNCE = config.get('gpio_btn_marker_debounce', GPIO_BTN_MARKER_DEBOUNCE)
+                    # Eye view button configuration
+                    GPIO_BTN_EYE_VIEW_SIM = config.get('gpio_btn_eye_view_sim', GPIO_BTN_EYE_VIEW_SIM)
+                    GPIO_BTN_EYE_VIEW_ENABLE = config.get('gpio_btn_eye_view_enable', GPIO_BTN_EYE_VIEW_ENABLE)
+                    GPIO_BTN_EYE_VIEW_PIN = config.get('gpio_btn_eye_view_pin', GPIO_BTN_EYE_VIEW_PIN)
+                    GPIO_BTN_EYE_VIEW_DEBOUNCE = config.get('gpio_btn_eye_view_debounce', GPIO_BTN_EYE_VIEW_DEBOUNCE)
+                    GPIO_BTN_EYE_VIEW_KEY = config.get('gpio_btn_eye_view_key', GPIO_BTN_EYE_VIEW_KEY)
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -221,7 +234,6 @@ class GazeClient:
                 if wait_for_ack:
                     with self._ack_lock:
                         self._ack_events.pop(wait_for_ack, None)
-                print(f"DEBUG: Exception sending command: {e}")
                 return False
         
         # Wait for ACK outside of socket lock to avoid blocking receive thread
@@ -233,7 +245,6 @@ class GazeClient:
             else:
                 with self._ack_lock:
                     self._ack_events.pop(wait_for_ack, None)
-                print(f"DEBUG: Timeout waiting for ACK {wait_for_ack}")
                 return False
         
         return send_success
@@ -281,8 +292,6 @@ class GazeClient:
         if self.simulate:
             return
         
-        print("DEBUG: Enabling gaze data fields...")
-        
         # List of data fields to enable (Section 3.2-3.14)
         fields = [
             "ENABLE_SEND_COUNTER",      # Frame counter
@@ -293,14 +302,13 @@ class GazeClient:
             "ENABLE_SEND_POG_FIX",      # Fixation POG
             "ENABLE_SEND_PUPIL_LEFT",   # Left pupil data
             "ENABLE_SEND_PUPIL_RIGHT",  # Right pupil data
+            "ENABLE_SEND_EYE_LEFT",     # Left eye data (LEYEZ, LVALID, LCHRX, LCHRY)
+            "ENABLE_SEND_EYE_RIGHT",    # Right eye data (REYEZ, RVALID, RCHRX, RCHRY)
         ]
         
         for field in fields:
             cmd = f'<SET ID="{field}" STATE="1" />'
-            if self._send_command(cmd, wait_for_ack=field, timeout=1.0):
-                print(f"DEBUG: Enabled {field}")
-            else:
-                print(f"DEBUG: Failed to enable {field}")
+            self._send_command(cmd, wait_for_ack=field, timeout=1.0)
             time.sleep(0.05)  # Small delay between commands
 
     # Real client with XML protocol parsing
@@ -358,60 +366,9 @@ class GazeClient:
                             
                             line_str = line.decode('utf-8', errors='ignore')
                             
-                            # Debug: log all CAL and ACK messages
-                            if b'<CAL' in line or b'<ACK' in line:
-                                print(f"DEBUG: Raw message: {line_str}")
-                            
-                            # Log REC messages to see if gaze data is flowing
+                            # Count REC messages
                             if b'<REC' in line:
                                 self._rec_count += 1
-                                # Log first 10 REC messages with full raw content to see format
-                                if self._rec_count <= 10:
-                                    if line_str.strip() == "<REC />":
-                                        print(f"DEBUG: REC message #{self._rec_count}: EMPTY (no data fields)")
-                                    else:
-                                        print(f"DEBUG: REC message #{self._rec_count}: {line_str[:500]}")  # First 500 chars
-                                # Log every 60th message with parsed details
-                                elif self._rec_count % 60 == 0:
-                                    # Extract validity and coordinates to see which fields are available
-                                    try:
-                                        # Try different POG field names in order of preference
-                                        gx = get_attr(line_str, 'BPOGX', None)
-                                        gy = get_attr(line_str, 'BPOGY', None)
-                                        valid_val = get_attr(line_str, 'BPOGV', None)
-                                        field_type = "BPOG"
-                                        
-                                        if gx is None:
-                                            gx = get_attr(line_str, 'FPOGX', None)
-                                            gy = get_attr(line_str, 'FPOGY', None)
-                                            valid_val = get_attr(line_str, 'FPOGV', None)
-                                            field_type = "FPOG"
-                                        
-                                        if gx is None:
-                                            gx = get_attr(line_str, 'LPOGX', None)
-                                            gy = get_attr(line_str, 'LPOGY', None)
-                                            valid_val = get_attr(line_str, 'LPOGV', None)
-                                            field_type = "LPOG"
-                                        
-                                        if gx is None:
-                                            gx = get_attr(line_str, 'RPOGX', None)
-                                            gy = get_attr(line_str, 'RPOGY', None)
-                                            valid_val = get_attr(line_str, 'RPOGV', None)
-                                            field_type = "RPOG"
-                                        
-                                        if gx is not None and valid_val is not None:
-                                            valid_str = "VALID" if valid_val > 0.5 else "INVALID"
-                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {field_type}, {valid_str}, gx={gx:.3f}, gy={gy:.3f})")
-                                        elif gx is not None:
-                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, {field_type}, gx={gx:.3f}, gy={gy:.3f}, no validity)")
-                                        else:
-                                            print(f"DEBUG: Receiving gaze data (REC #{self._rec_count}, no POG fields found)")
-                                    except Exception as e:
-                                        print(f"DEBUG: Receiving gaze data (REC message #{self._rec_count}, parse error: {e})")
-                            
-                            # Log any other XML messages we might be missing
-                            if line_str.strip().startswith('<') and b'<CAL' not in line and b'<ACK' not in line and b'<REC' not in line:
-                                print(f"DEBUG: Other XML message: {line_str[:200]}")  # Limit length to avoid spam
                             
                             # Helper function to extract XML attributes
                             def get_attr(msg, attr, default):
@@ -468,7 +425,6 @@ class GazeClient:
                                                 avg_error = get_attr(line_str, 'AVE_ERROR', None)
                                                 num_points = get_attr(line_str, 'VALID_POINTS', None)
                                                 
-                                                print(f"DEBUG: CALIBRATE_RESULT_SUMMARY - avg_error={avg_error}, valid_points={num_points}")
                                                 
                                                 # Store calibration result if we have data
                                                 if avg_error is not None or num_points is not None:
@@ -483,21 +439,18 @@ class GazeClient:
                                                                 'num_points': num_points if num_points is not None else 0,
                                                                 'success': success
                                                             }
-                                                            print(f"DEBUG: Stored calibration result from CALIBRATE_RESULT_SUMMARY")
                                             
                                             # Signal waiting thread if any
                                             with self._ack_lock:
                                                 if ack_id in self._ack_events:
                                                     self._ack_events[ack_id].set()
-                                            print(f"DEBUG: Received ACK for {ack_id}")
                                 except Exception as e:
-                                    print(f"DEBUG: Error parsing ACK: {e}")
+                                    pass
                             
                             # Parse CAL messages: <CAL ID="CALIB_START_PT" ... />, <CAL ID="CALIB_RESULT_PT" ... />, <CAL ID="CALIB_RESULT" ... />
                             elif b'<CAL' in line:
                                 try:
                                     self._cal_count += 1
-                                    print(f"DEBUG: CAL message #{self._cal_count}: {line_str}")
                                     # Extract CAL ID (handle possible leading/trailing spaces)
                                     cal_id_start = line_str.find('ID="')
                                     if cal_id_start != -1:
@@ -508,7 +461,6 @@ class GazeClient:
                                             
                                             if cal_id == "CALIB_RESULT":
                                                 # Parse final calibration result
-                                                print(f"DEBUG: Received CALIB_RESULT: {line_str}")
                                                 
                                                 # Extract calibration data for all points
                                                 # Format: CALX1, CALY1, LX1, LY1, LV1, RX1, RY1, RV1, CALX2, CALY2, ...
@@ -564,8 +516,6 @@ class GazeClient:
                                                 avg_error = total_error / error_count if error_count > 0 else 0.0
                                                 success = 1 if valid_points >= 4 else 0
                                                 
-                                                print(f"DEBUG: Parsed CALIB_RESULT - valid_points={valid_points}, avg_error={avg_error:.4f}, success={success}")
-                                                
                                                 # Store calibration result
                                                 with self.calib_result_lock:
                                                     self.calib_result = {
@@ -575,21 +525,10 @@ class GazeClient:
                                                         'calib_data': calib_data
                                                     }
                                             elif cal_id in ("CALIB_START_PT", "CALIB_RESULT_PT"):
-                                                # Log calibration point progress
-                                                pt = get_attr(line_str, 'PT', None)
-                                                calx = get_attr(line_str, 'CALX', None)
-                                                caly = get_attr(line_str, 'CALY', None)
-                                                if pt is not None:
-                                                    print(f"DEBUG: {cal_id} - Point {pt} at ({calx}, {caly})")
-                                                else:
-                                                    print(f"DEBUG: {cal_id} - Could not parse PT from: {line_str}")
-                                            else:
-                                                print(f"DEBUG: Unknown CAL ID: {cal_id} in message: {line_str}")
+                                                # Calibration point progress
+                                                pass
                                 except Exception as e:
-                                    import traceback
-                                    print(f"DEBUG: Error parsing CAL message: {e}")
-                                    print(f"DEBUG: Traceback: {traceback.format_exc()}")
-                                    print(f"DEBUG: Full message: {line_str}")
+                                    pass
                             
                             # Parse REC message: <REC ... BPOGX="..." BPOGY="..." ... />
                             # Try multiple POG fields in order of preference (Section 5)
@@ -644,16 +583,34 @@ class GazeClient:
                                     else:
                                         pupil = 2.5  # Default fallback
                                     
+                                    # Extract eye tracking data (LEYEZ, REYEZ, LVALID, RVALID, LCHRX, LCHRY, RCHRX, RCHRY)
+                                    leyez = get_attr(line_str, 'LEYEZ', None)
+                                    reyez = get_attr(line_str, 'REYEZ', None)
+                                    lvalid = get_attr(line_str, 'LVALID', None)
+                                    rvalid = get_attr(line_str, 'RVALID', None)
+                                    lchrx = get_attr(line_str, 'LCHRX', None)
+                                    lchry = get_attr(line_str, 'LCHRY', None)
+                                    rchrx = get_attr(line_str, 'RCHRX', None)
+                                    rchry = get_attr(line_str, 'RCHRY', None)
+                                    
+                                    # Convert validity to boolean
+                                    lvalid = lvalid > 0.5 if lvalid is not None else False
+                                    rvalid = rvalid > 0.5 if rvalid is not None else False
+                                    
                                     # Normalize gaze coordinates (Gazepoint uses 0-1 range)
                                     gx = max(0.0, min(1.0, float(gx)))
                                     gy = max(0.0, min(1.0, float(gy)))
                                     
                                     t = time.time()
-                                    self._push_sample(t, gx, gy, pupil, valid)
+                                    self._push_sample(t, gx, gy, pupil, valid, leyez=leyez, reyez=reyez, 
+                                                     lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
+                                                     rchrx=rchrx, rchry=rchry)
                                 except Exception as e:
                                     # Fallback on parse error - use center position with invalid flag
                                     t = time.time()
-                                    self._push_sample(t, 0.5, 0.5, 2.5, False)
+                                    self._push_sample(t, 0.5, 0.5, 2.5, False, leyez=None, reyez=None,
+                                                     lvalid=False, rvalid=False, lchrx=None, lchry=None,
+                                                     rchrx=None, rchry=None)
                             
                     except socket.timeout:
                         # Timeout is normal - continue reading
@@ -695,18 +652,43 @@ class GazeClient:
                 # Lissajous-like motion in [0,1]
                 gx = 0.5 + 0.4 * math.sin(ang)
                 gy = 0.5 + 0.3 * math.sin(ang * 1.7)
-                # occasional blink invalidation
-                valid = (int(dt * 3) % 20) != 0
-                pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
-                self._push_sample(now, gx, gy, pupil, valid)
+                                # occasional blink invalidation
+                                valid = (int(dt * 3) % 20) != 0
+                                pupil = 2.5 + 0.1 * math.sin(ang * 0.7)
+                                
+                                # Simulate eye tracking data
+                                # LEYEZ and REYEZ: simulate distance in normalized units (0.0-1.0)
+                                # Convert to actual distance: 0.5 = 60cm (optimal), range roughly 0.3-0.9 = 40-90cm
+                                leyez = 0.5 + 0.15 * math.sin(ang * 0.5)  # Vary around optimal
+                                reyez = 0.5 + 0.15 * math.cos(ang * 0.5)  # Slightly different phase
+                                
+                                # LVALID and RVALID: simulate validity (occasional invalid)
+                                lvalid = (int(dt * 3) % 25) != 0
+                                rvalid = (int(dt * 3) % 23) != 0  # Slightly different pattern
+                                
+                                # LCHRX, LCHRY, RCHRX, RCHRY: simulate corneal reflection positions
+                                lchrx = 0.5 + 0.1 * math.sin(ang * 0.8)
+                                lchry = 0.5 + 0.1 * math.cos(ang * 0.8)
+                                rchrx = 0.5 + 0.1 * math.sin(ang * 0.9)
+                                rchry = 0.5 + 0.1 * math.cos(ang * 0.9)
+                                
+                                self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
+                                                 lvalid=lvalid, rvalid=rvalid, lchrx=lchrx, lchry=lchry,
+                                                 rchrx=rchrx, rchry=rchry)
                 time.sleep(1.0 / 60.0)
             else:
                 self.receiving = False
                 time.sleep(0.05)
 
-    def _push_sample(self, t, gx, gy, pupil, valid):
+    def _push_sample(self, t, gx, gy, pupil, valid, leyez=None, reyez=None, lvalid=None, rvalid=None, 
+                     lchrx=None, lchry=None, rchrx=None, rchry=None):
+        sample = {
+            "t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid,
+            "leyez": leyez, "reyez": reyez, "lvalid": lvalid, "rvalid": rvalid,
+            "lchrx": lchrx, "lchry": lchry, "rchrx": rchrx, "rchry": rchry
+        }
         try:
-            self.q.put_nowait({"t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid})
+            self.q.put_nowait(sample)
         except queue.Full:
             try:
                 self.q.get_nowait()
@@ -742,10 +724,12 @@ class Affine2D:
 
 class GPIOButtonMonitor:
     """Monitor GPIO button on LattePanda Iota (GP0 + GND)"""
-    def __init__(self, gpio_chip="/dev/gpiochip0", gpio_line=0, callback=None):
+    def __init__(self, gpio_chip="/dev/gpiochip0", gpio_line=0, callback=None, press_callback=None, release_callback=None):
         self.gpio_chip = gpio_chip
         self.gpio_line = gpio_line
-        self.callback = callback
+        self.callback = callback  # Legacy: called on press only
+        self.press_callback = press_callback  # Called when button is pressed
+        self.release_callback = release_callback  # Called when button is released
         self._thr = None
         self._stop = threading.Event()
         self._last_press_time = 0
@@ -781,31 +765,28 @@ class GPIOButtonMonitor:
             line.request(consumer="marker_button", type=gpiod.LINE_REQ_DIR_IN, flags=gpiod.LINE_REQ_FLAG_BIAS_PULL_UP)
             
             print(f"GPIO button monitoring started on {self.gpio_chip} line {self.gpio_line}")
-            print(f"DEBUG: Button wiring - connect between GP{self.gpio_line} and GND")
-            print(f"DEBUG: Pull-up enabled - button pressed = 0, released = 1")
-            
             last_state = 1  # Released (pull-up)
             
             while not self._stop.is_set():
                 # Read button state (0 = pressed, 1 = released)
                 current_state = line.get_value()
                 
-                # Debug: Log state changes
-                if current_state != last_state:
-                    print(f"DEBUG: GPIO line {self.gpio_line} changed: {last_state} -> {current_state}")
-                
                 # Detect falling edge (button press)
                 if last_state == 1 and current_state == 0:
                     # Button pressed
                     now = time.time()
-                    print(f"DEBUG: Button press detected at {now:.3f}")
                     if now - self._last_press_time > self.debounce_time:
                         self._last_press_time = now
-                        print(f"DEBUG: Calling button callback (debounce passed)")
                         if self.callback:
                             self.callback()
-                    else:
-                        print(f"DEBUG: Button press ignored (debounce: {now - self._last_press_time:.3f}s < {self.debounce_time}s)")
+                        if self.press_callback:
+                            self.press_callback()
+                
+                # Detect rising edge (button release)
+                if last_state == 0 and current_state == 1:
+                    # Button released
+                    if self.release_callback:
+                        self.release_callback()
                 
                 last_state = current_state
                 time.sleep(0.01)  # Poll at 100Hz
@@ -835,13 +816,12 @@ class NeoPixelController:
         
         try:
             ports = serial.tools.list_ports.comports()
-            print(f"DEBUG: Scanning {len(ports)} serial ports for NeoPixel controller...")
             
             for port in ports:
-                print(f"DEBUG: Checking port {port.device} ({port.description})...")
+                port_name = port.device.upper()  # Normalize to uppercase for Windows
                 try:
                     # Try to open port
-                    test_serial = serial.Serial(port.device, self.serial_baud, timeout=2.0)
+                    test_serial = serial.Serial(port_name, self.serial_baud, timeout=2.0)
                     
                     # Clear any existing data
                     test_serial.reset_input_buffer()
@@ -856,11 +836,9 @@ class NeoPixelController:
                                 line = test_serial.readline().decode('utf-8', errors='ignore').strip()
                                 if line:
                                     lines_read.append(line)
-                                    print(f"DEBUG: Port {port.device} received: {line}")
                                     if "HELLO" in line.upper() and "NEOPIXEL" in line.upper():
                                         test_serial.close()
-                                        print(f"DEBUG: Found NeoPixel controller on {port.device}")
-                                        return port.device
+                                        return port_name
                             except UnicodeDecodeError:
                                 continue
                         time.sleep(0.1)
@@ -873,12 +851,10 @@ class NeoPixelController:
                     
                     if test_serial.in_waiting > 0:
                         response = test_serial.readline().decode('utf-8', errors='ignore').strip()
-                        print(f"DEBUG: Port {port.device} responded to PING: {response}")
                         if "HELLO" in response.upper() and "NEOPIXEL" in response.upper():
                             # Device responded with HELLO NEOPIXEL - confirmed!
                             test_serial.close()
-                            print(f"DEBUG: Found NeoPixel controller on {port.device} (responded to PING)")
-                            return port.device
+                            return port_name
                     
                     # Try a harmless command as fallback
                     test_serial.reset_input_buffer()
@@ -888,27 +864,20 @@ class NeoPixelController:
                     
                     if test_serial.in_waiting > 0:
                         response = test_serial.readline().decode('utf-8', errors='ignore').strip()
-                        print(f"DEBUG: Port {port.device} responded to ALL:OFF: {response}")
                         if "ACK" in response.upper() or "ERROR" in response.upper():
                             # Device responded - likely our NeoPixel controller
                             test_serial.close()
-                            print(f"DEBUG: Found responsive device on {port.device} (assuming NeoPixel controller)")
-                            return port.device
+                            return port_name
                     
                     test_serial.close()
-                except serial.SerialException as e:
-                    print(f"DEBUG: Port {port.device} not available: {e}")
+                except serial.SerialException:
                     continue
-                except Exception as e:
-                    print(f"DEBUG: Error testing port {port.device}: {e}")
+                except Exception:
                     continue
                     
-        except Exception as e:
-            print(f"DEBUG: Error scanning serial ports: {e}")
-            import traceback
-            traceback.print_exc()
+        except Exception:
+            pass
         
-        print("DEBUG: No NeoPixel controller found on any port")
         return None
     
     def _send_command(self, command):
@@ -941,7 +910,6 @@ class NeoPixelController:
             # Determine which port to use
             port = self.serial_port
             if not port or port == "":
-                print("DEBUG: Auto-detecting NeoPixel serial port...")
                 port = self._find_serial_port()
                 if port is None:
                     # List available ports for user reference
@@ -968,17 +936,59 @@ class NeoPixelController:
                     error_msg += "  - Or specify neopixel_serial_port in config.yaml"
                     
                     raise RuntimeError(error_msg)
-                print(f"DEBUG: Auto-detected NeoPixel port: {port}")
             else:
-                print(f"DEBUG: Using specified NeoPixel port: {port}")
+                # Normalize port name to uppercase (Windows COM ports are case-sensitive)
+                port = port.upper()
             
-            # Open serial connection
-            self._serial = serial.Serial(
-                port=port,
-                baudrate=self.serial_baud,
-                timeout=1.0,
-                write_timeout=1.0
-            )
+            # Check if port exists before trying to open
+            try:
+                available_ports = [p.device for p in serial.tools.list_ports.comports()]
+                if port not in available_ports:
+                    # Try case-insensitive match
+                    port_upper = port.upper()
+                    matching_ports = [p for p in available_ports if p.upper() == port_upper]
+                    if matching_ports:
+                        port = matching_ports[0]
+                    else:
+                        raise RuntimeError(
+                            f"Serial port {port} not found.\n"
+                            f"Available ports: {', '.join(available_ports) if available_ports else 'None'}\n"
+                            f"Make sure:\n"
+                            f"  - RP2040 is connected via USB\n"
+                            f"  - Check Device Manager for the correct COM port\n"
+                            f"  - Try unplugging and replugging USB cable"
+                        )
+            except Exception:
+                pass
+            
+            # Open serial connection with better error handling
+            try:
+                self._serial = serial.Serial(
+                    port=port,
+                    baudrate=self.serial_baud,
+                    timeout=1.0,
+                    write_timeout=1.0
+                )
+            except serial.SerialException as e:
+                error_msg = str(e)
+                if "PermissionError" in error_msg or "Access is denied" in error_msg or "could not open port" in error_msg.lower():
+                    raise RuntimeError(
+                        f"Permission denied opening serial port {port}.\n"
+                        f"Possible causes:\n"
+                        f"  - Port is already in use by another program (close Serial Monitor, Arduino IDE, etc.)\n"
+                        f"  - Insufficient permissions (try running as administrator)\n"
+                        f"  - Port is locked by another process\n"
+                        f"Solutions:\n"
+                        f"  1. Close any programs using the serial port (Arduino IDE Serial Monitor, etc.)\n"
+                        f"  2. Unplug and replug the USB cable\n"
+                        f"  3. Restart the application\n"
+                        f"  4. Check Device Manager to see if port is available"
+                    ) from e
+                else:
+                    raise RuntimeError(
+                        f"Failed to open serial port {port}: {e}\n"
+                        f"Check that the port exists and is not in use by another program"
+                    ) from e
             
             # Wait a bit for connection to stabilize
             time.sleep(0.5)
@@ -996,10 +1006,6 @@ class NeoPixelController:
             
             self._initialized = True
             print(f"NeoPixel controller initialized on {port}")
-            print(f"DEBUG: Baud rate: {self.serial_baud}")
-            print(f"DEBUG: Pixel count: {self.num_pixels}")
-            print(f"DEBUG: Brightness: {self.brightness * 100:.0f}%")
-            print(f"DEBUG: Test LEDs with keys: T (all), Q/W/E/U (individual)")
             return True
             
         except serial.SerialException as e:
@@ -1057,7 +1063,7 @@ class NeoPixelController:
         
         self._current_led = led_index
         if led_index >= 0:
-            print(f"DEBUG: NeoPixel {led_index} ON (RGB=({r},{g},{b}))")
+            pass
     
     def all_off(self):
         """Turn off all NeoPixels"""
@@ -1066,7 +1072,6 @@ class NeoPixelController:
         
         self._send_command("ALL:OFF")
         self._current_led = -1
-        print("DEBUG: All NeoPixels OFF")
     
     def all_on(self, color=(255, 255, 255)):
         """Turn on all NeoPixels with specified color (useful for testing)"""
@@ -1081,7 +1086,6 @@ class NeoPixelController:
         
         self._send_command(f"ALL:ON:{r}:{g}:{b}")
         self._current_led = -2  # Special value for "all on"
-        print(f"DEBUG: All NeoPixels ON (RGB=({r},{g},{b}))")
     
     def set_color(self, led_index, r, g, b):
         """Set specific RGB color for a NeoPixel"""
@@ -1118,11 +1122,9 @@ class NeoPixelController:
         if led_index < 0 or led_index >= self.num_pixels:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
-        print(f"DEBUG: Testing NeoPixel {led_index} for {duration}s...")
         self.set_led(led_index, color)
         time.sleep(duration)
         self.all_off()
-        print(f"DEBUG: NeoPixel {led_index} test complete")
 
 
 def time_strings(t0):
@@ -1142,6 +1144,131 @@ def draw_circle(screen, color, pos, r=12):
     # Use a vivid orange to clearly distinguish from red
     colors = {"red": (220, 50, 47), "orange": (255, 165, 0), "green": (0, 200, 0)}
     pygame.draw.circle(screen, colors.get(color, (128, 128, 128)), pos, r)
+
+def get_distance_color(eyez_value):
+    """Get color for distance value based on ranges"""
+    if eyez_value is None:
+        return (128, 128, 128)  # Gray for no data
+    
+    # Convert normalized value to approximate distance in cm
+    # Assuming 0.0 = ~40cm, 1.0 = ~90cm (linear approximation)
+    # Optimal range is 0.60-0.70 which corresponds to 60-70cm
+    if eyez_value < 0.50:
+        return (220, 50, 47)  # Red - Too Close (< 50 cm)
+    elif eyez_value < 0.60:
+        return (255, 200, 0)  # Yellow - Acceptable (50-60 cm)
+    elif eyez_value < 0.70:
+        return (0, 200, 0)  # Green - Optimal (60-70 cm)
+    elif eyez_value < 0.80:
+        return (255, 200, 0)  # Yellow - Acceptable (70-80 cm)
+    else:
+        return (220, 50, 47)  # Red - Too Far (> 80 cm)
+
+def get_distance_cm(eyez_value):
+    """Convert normalized eyez value to approximate distance in cm"""
+    if eyez_value is None:
+        return None
+    # Linear approximation: 0.0 = 40cm, 1.0 = 90cm
+    return 40 + (eyez_value * 50)
+
+def draw_eye_view(screen, eye_data, font, small, big):
+    """Draw eye view display with two eyes, validity, distance, and corneal reflection"""
+    if eye_data is None:
+        # Show "No data" message
+        txt = big.render("No Eye Data", True, (128, 128, 128))
+        screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+        return
+    
+    # Extract values
+    leyez = eye_data.get("leyez")
+    reyez = eye_data.get("reyez")
+    lvalid = eye_data.get("lvalid", False)
+    rvalid = eye_data.get("rvalid", False)
+    lchrx = eye_data.get("lchrx")
+    lchry = eye_data.get("lchry")
+    rchrx = eye_data.get("rchrx")
+    rchry = eye_data.get("rchry")
+    
+    # Eye positions (centered horizontally, spaced vertically)
+    eye_radius = 40
+    left_eye_x = WIDTH // 4
+    right_eye_x = 3 * WIDTH // 4
+    eye_y = HEIGHT // 3
+    
+    # Draw left eye
+    left_eye_color = (0, 200, 0) if lvalid else (220, 50, 47)  # Green if valid, red if invalid
+    pygame.draw.circle(screen, left_eye_color, (left_eye_x, eye_y), eye_radius, 3)
+    # Draw LEFT label
+    left_label = font.render("LEFT", True, (255, 255, 255))
+    screen.blit(left_label, (left_eye_x - left_label.get_width() // 2, eye_y - eye_radius - 30))
+    
+    # Draw right eye
+    right_eye_color = (0, 200, 0) if rvalid else (220, 50, 47)  # Green if valid, red if invalid
+    pygame.draw.circle(screen, right_eye_color, (right_eye_x, eye_y), eye_radius, 3)
+    # Draw RIGHT label
+    right_label = font.render("RIGHT", True, (255, 255, 255))
+    screen.blit(right_label, (right_eye_x - right_label.get_width() // 2, eye_y - eye_radius - 30))
+    
+    # Draw LEYEZ value under left eye
+    leyez_y = eye_y + eye_radius + 20
+    if leyez is not None:
+        distance_cm = get_distance_cm(leyez)
+        distance_color = get_distance_color(leyez)
+        leyez_text = f"LEYEZ: {leyez:.3f}"
+        if distance_cm is not None:
+            leyez_text += f" ({distance_cm:.1f} cm)"
+        leyez_surf = small.render(leyez_text, True, distance_color)
+        screen.blit(leyez_surf, (left_eye_x - leyez_surf.get_width() // 2, leyez_y))
+    else:
+        leyez_surf = small.render("LEYEZ: N/A", True, (128, 128, 128))
+        screen.blit(leyez_surf, (left_eye_x - leyez_surf.get_width() // 2, leyez_y))
+    
+    # Draw REYEZ value under right eye
+    reyez_y = eye_y + eye_radius + 20
+    if reyez is not None:
+        distance_cm = get_distance_cm(reyez)
+        distance_color = get_distance_color(reyez)
+        reyez_text = f"REYEZ: {reyez:.3f}"
+        if distance_cm is not None:
+            reyez_text += f" ({distance_cm:.1f} cm)"
+        reyez_surf = small.render(reyez_text, True, distance_color)
+        screen.blit(reyez_surf, (right_eye_x - reyez_surf.get_width() // 2, reyez_y))
+    else:
+        reyez_surf = small.render("REYEZ: N/A", True, (128, 128, 128))
+        screen.blit(reyez_surf, (right_eye_x - reyez_surf.get_width() // 2, reyez_y))
+    
+    # Draw corneal reflection values below
+    corneal_y = leyez_y + 30
+    
+    # Left corneal reflection
+    if lchrx is not None and lchry is not None:
+        lchr_text = f"Corneal reflection X: {lchrx:.3f}"
+        lchr_surf = small.render(lchr_text, True, (255, 255, 255))
+        screen.blit(lchr_surf, (left_eye_x - lchr_surf.get_width() // 2, corneal_y))
+        
+        lchr_y_text = f"Corneal reflection Y: {lchry:.3f}"
+        lchr_y_surf = small.render(lchr_y_text, True, (255, 255, 255))
+        screen.blit(lchr_y_surf, (left_eye_x - lchr_y_surf.get_width() // 2, corneal_y + 20))
+    else:
+        lchr_surf = small.render("Corneal reflection X: N/A", True, (128, 128, 128))
+        screen.blit(lchr_surf, (left_eye_x - lchr_surf.get_width() // 2, corneal_y))
+        lchr_y_surf = small.render("Corneal reflection Y: N/A", True, (128, 128, 128))
+        screen.blit(lchr_y_surf, (left_eye_x - lchr_y_surf.get_width() // 2, corneal_y + 20))
+    
+    # Right corneal reflection
+    if rchrx is not None and rchry is not None:
+        rchr_text = f"Corneal reflection X: {rchrx:.3f}"
+        rchr_surf = small.render(rchr_text, True, (255, 255, 255))
+        screen.blit(rchr_surf, (right_eye_x - rchr_surf.get_width() // 2, corneal_y))
+        
+        rchr_y_text = f"Corneal reflection Y: {rchry:.3f}"
+        rchr_y_surf = small.render(rchr_y_text, True, (255, 255, 255))
+        screen.blit(rchr_y_surf, (right_eye_x - rchr_y_surf.get_width() // 2, corneal_y + 20))
+    else:
+        rchr_surf = small.render("Corneal reflection X: N/A", True, (128, 128, 128))
+        screen.blit(rchr_surf, (right_eye_x - rchr_surf.get_width() // 2, corneal_y))
+        rchr_y_surf = small.render("Corneal reflection Y: N/A", True, (128, 128, 128))
+        screen.blit(rchr_y_surf, (right_eye_x - rchr_y_surf.get_width() // 2, corneal_y + 20))
 
 
 def main():
@@ -1181,21 +1308,26 @@ def main():
     # Start GPIO button monitor for LattePanda Iota (if enabled)
     gpio_monitor = None
     if GPIO_BTN_MARKER_ENABLE and gpiod is not None:
-        print(f"DEBUG: Starting GPIO button monitor on {GPIO_CHIP} line {GPIO_BTN_MARKER_PIN}")
         gpio_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BTN_MARKER_PIN, callback=gpio_button_callback)
         gpio_monitor.debounce_time = GPIO_BTN_MARKER_DEBOUNCE
         gpio_monitor.start()
     elif GPIO_BTN_MARKER_ENABLE and gpiod is None:
         print("WARNING: GPIO button enabled but gpiod library not available!")
-    else:
-        print("DEBUG: GPIO button disabled in config")
+    
+    # Start GPIO button monitor for eye view (if enabled)
+    gpio_eye_view_monitor = None
+    if GPIO_BTN_EYE_VIEW_ENABLE and gpiod is not None:
+        gpio_eye_view_monitor = GPIOButtonMonitor(gpio_chip=GPIO_CHIP, gpio_line=GPIO_BTN_EYE_VIEW_PIN, 
+                                                   press_callback=gpio_eye_view_button_press,
+                                                   release_callback=gpio_eye_view_button_release)
+        gpio_eye_view_monitor.debounce_time = GPIO_BTN_EYE_VIEW_DEBOUNCE
+        gpio_eye_view_monitor.start()
+    elif GPIO_BTN_EYE_VIEW_ENABLE and gpiod is None:
+        print("WARNING: Eye view GPIO button enabled but gpiod library not available!")
     
     # Start NeoPixel controller for calibration LEDs (if enabled)
     led_controller = None
     if GPIO_LED_CALIBRATION_ENABLE:
-        print(f"DEBUG: Initializing NeoPixel controller")
-        print(f"DEBUG: Serial port: {NEOPIXEL_SERIAL_PORT or 'auto-detect'}, Baud: {NEOPIXEL_SERIAL_BAUD}")
-        print(f"DEBUG: Count: {NEOPIXEL_COUNT}, Brightness: {NEOPIXEL_BRIGHTNESS}")
         led_controller = NeoPixelController(
             serial_port=NEOPIXEL_SERIAL_PORT,
             serial_baud=NEOPIXEL_SERIAL_BAUD,
@@ -1204,8 +1336,6 @@ def main():
         )
         # start() will raise error if library unavailable or initialization fails
         led_controller.start()
-    else:
-        print("DEBUG: NeoPixel calibration disabled in config")
     
     # Load XGBoost models at startup (if not in simulation mode)
     if not SIM_XGB:
@@ -1251,6 +1381,10 @@ def main():
     
     # Button press visual feedback
     button_pressed_until = 0.0
+    
+    # Eye view state
+    eye_view_active = False  # Whether eye view is currently displayed
+    last_eye_data = None  # Store last eye tracking data for display
 
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
@@ -1271,45 +1405,35 @@ def main():
         
         # Ensure gaze data streaming is enabled (required for both calibration methods)
         if not SIM_GAZE:
-            print("DEBUG: Ensuring data streaming is enabled...")
             gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
             time.sleep(0.1)
         
         # Initialize LED-based calibration if enabled (use Gazepoint server-side calibration with overlay hidden)
         if using_led_calib:
-            print("DEBUG: Starting LED-based calibration with Gazepoint server...")
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
             
             # Clear previous calibration points
-            print("DEBUG: Clearing calibration points...")
             gp.calibrate_clear()
             time.sleep(0.1)
             
             # Reset calibration points to default (5 points)
-            print("DEBUG: Resetting calibration points to default...")
             gp.calibrate_reset()
             time.sleep(0.1)
             
             # Set calibration timeout based on dwell time (convert seconds to milliseconds)
             timeout_ms = int(CALIB_DWELL * 1000)
-            print(f"DEBUG: Setting calibration timeout to {timeout_ms}ms...")
             gp.calibrate_timeout(timeout_ms)
             time.sleep(0.1)
             
             # Set calibration delay (convert seconds to milliseconds)
             delay_ms = int(CALIB_DELAY * 1000)
-            print(f"DEBUG: Setting calibration delay to {delay_ms}ms...")
             gp.calibrate_delay(delay_ms)
             time.sleep(0.1)
             
             # Hide calibration window (use LEDs instead of overlay)
-            print("DEBUG: Hiding calibration window (using LEDs)...")
-            if gp.calibrate_show(False):
-                print("DEBUG: Calibration window hidden successfully")
-            else:
-                print("DEBUG: Failed to hide calibration window")
+            if not gp.calibrate_show(False):
                 set_info_msg("Failed to configure calibration", dur=2.0)
                 using_led_calib = False
                 # If overlay calibration is also disabled, abort
@@ -1319,13 +1443,9 @@ def main():
             
             # Start the calibration sequence and wait for ACK
             if using_led_calib:
-                print("DEBUG: Starting Gazepoint calibration (LED-based)...")
                 if gp.calibrate_start():
-                    print("DEBUG: LED-based calibration started successfully")
                     calib_step_start = time.time()  # Record when calibration started
-                    print("DEBUG: Waiting for calibration to complete...")
                 else:
-                    print("DEBUG: Failed to start LED-based calibration")
                     set_info_msg("Failed to start calibration", dur=2.0)
                     gp.calibrate_show(False)  # Ensure calibration window is hidden
                     using_led_calib = False
@@ -1336,37 +1456,28 @@ def main():
         
         # Start overlay calibration if enabled (only works with real hardware)
         if using_overlay_calib:
-            print("DEBUG: Starting overlay calibration...")
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
             
             # Clear previous calibration points
-            print("DEBUG: Clearing calibration points...")
             gp.calibrate_clear()
             time.sleep(0.1)
             
             # Reset calibration points to default (5 points)
-            print("DEBUG: Resetting calibration points to default...")
             gp.calibrate_reset()
             time.sleep(0.1)
             
             # Set calibration timeout (1 second per point)
-            print("DEBUG: Setting calibration timeout...")
             gp.calibrate_timeout(1000)
             time.sleep(0.1)
             
             # Set calibration delay (200ms animation delay)
-            print("DEBUG: Setting calibration delay...")
             gp.calibrate_delay(200)
             time.sleep(0.1)
             
             # Show calibration window and wait for ACK
-            print("DEBUG: Showing calibration window...")
-            if gp.calibrate_show(True):
-                print("DEBUG: Calibration window shown successfully")
-            else:
-                print("DEBUG: Failed to show calibration window")
+            if not gp.calibrate_show(True):
                 set_info_msg("Failed to show calibration window", dur=2.0)
                 using_overlay_calib = False
                 # If LED calibration is also disabled, abort
@@ -1376,12 +1487,7 @@ def main():
             
             # Start the calibration sequence and wait for ACK
             if using_overlay_calib:
-                print("DEBUG: Starting overlay calibration...")
-                if gp.calibrate_start():
-                    print("DEBUG: Overlay calibration started successfully")
-                    print("DEBUG: Waiting for calibration to complete...")
-                else:
-                    print("DEBUG: Failed to start overlay calibration")
+                if not gp.calibrate_start():
                     set_info_msg("Failed to start overlay calibration", dur=2.0)
                     gp.calibrate_show(False)  # Hide calibration window
                     using_overlay_calib = False
@@ -1479,6 +1585,7 @@ def main():
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
+        nonlocal eye_view_active, last_eye_data
         state = "READY"
         calib_status = "red"
         receiving_hint = False
@@ -1505,17 +1612,30 @@ def main():
         info_msg = None
         info_msg_until = 0.0
         last_calib_gaze = None
+        eye_view_active = False
+        last_eye_data = None
         set_info_msg("App state reset", dur=2.0)
     
     def gpio_button_callback():
-        """Called when GPIO button is pressed"""
+        """Called when GPIO marker button is pressed"""
         nonlocal button_pressed_until
-        print(f"DEBUG: GPIO button pressed! Current state: {state}")
         if state == "COLLECTING":
             marker_toggle()
-            print("DEBUG: Marker toggled")
-        else:
-            print(f"DEBUG: Button ignored - not in COLLECTING state (current: {state})")
+    
+    def gpio_eye_view_button_press():
+        """Called when GPIO eye view button is pressed (hold down)"""
+        nonlocal eye_view_active
+        eye_view_active = True
+    
+    def gpio_eye_view_button_release():
+        """Called when GPIO eye view button is released"""
+        nonlocal eye_view_active
+        eye_view_active = False
+    
+    def set_eye_view(active):
+        """Set eye view display state"""
+        nonlocal eye_view_active
+        eye_view_active = active
 
     def draw_status_header():
         conn_x = 50  # moved 20px to the right
@@ -1666,6 +1786,11 @@ def main():
             cheat += [
                 "N — Marker (toggle start/end)",
             ]
+        if GPIO_BTN_EYE_VIEW_SIM:
+            key_name = GPIO_BTN_EYE_VIEW_KEY.replace("K_", "").upper()
+            cheat += [
+                f"{key_name} — Eye view (hold)",
+            ]
         if led_controller is not None:
             cheat += [
                 "T — Test all LEDs",
@@ -1766,6 +1891,24 @@ def main():
                 elif GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_b and state == "COLLECTING":
                     log_key("B")
                     stop_collection_begin_analysis()
+                elif GPIO_BTN_EYE_VIEW_SIM:
+                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
+                    try:
+                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
+                        if key_attr is not None and ev.key == key_attr:
+                            log_key(GPIO_BTN_EYE_VIEW_KEY.replace("K_", "").upper())
+                            set_eye_view(True)
+                    except Exception:
+                        pass
+            elif ev.type == pygame.KEYUP:
+                if GPIO_BTN_EYE_VIEW_SIM:
+                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
+                    try:
+                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
+                        if key_attr is not None and ev.key == key_attr:
+                            set_eye_view(False)
+                    except Exception:
+                        pass
                 elif ev.key == pygame.K_m:
                     if SHOW_KEYS:
                         log_key("M")
@@ -1774,7 +1917,6 @@ def main():
                 elif ev.key == pygame.K_t and led_controller is not None:
                     # T key: Test all LEDs
                     log_key("T")
-                    print("DEBUG: Testing all LEDs...")
                     led_controller.all_on()
                     threading.Thread(target=lambda: (time.sleep(2), led_controller.all_off()), daemon=True).start()
                 elif ev.key == pygame.K_q and led_controller is not None:
@@ -1811,6 +1953,17 @@ def main():
                 gy_val = max(0.0, min(1.0, s.get("gy", 0.5)))
                 valid_val = s.get("valid", True)
                 last_calib_gaze = (gx_val, gy_val, valid_val)
+                # Store last eye data for eye view display (always update, not just when active)
+                last_eye_data = {
+                    "leyez": s.get("leyez"),
+                    "reyez": s.get("reyez"),
+                    "lvalid": s.get("lvalid"),
+                    "rvalid": s.get("rvalid"),
+                    "lchrx": s.get("lchrx"),
+                    "lchry": s.get("lchry"),
+                    "rchrx": s.get("rchrx"),
+                    "rchry": s.get("rchry")
+                }
         except queue.Empty:
             pass
 
@@ -1881,7 +2034,6 @@ def main():
                     # Run in background thread to avoid blocking UI
                     def _reenable_fields():
                         time.sleep(0.2)  # Small delay before re-enabling
-                        print("DEBUG: Re-enabling gaze data fields after calibration...")
                         gp._enable_gaze_data_fields()
                     threading.Thread(target=_reenable_fields, daemon=True).start()
                     # Reset override for next time
@@ -1902,13 +2054,11 @@ def main():
                     if elapsed > 15.0:
                         last_check = getattr(start_calibration, '_last_result_check', 0)
                         if elapsed - last_check >= 3.0:  # Check every 3 seconds
-                            print(f"DEBUG: Overlay calibration running for {elapsed:.1f}s, requesting result summary...")
                             gp.calibrate_result_summary()
                             start_calibration._last_result_check = elapsed
                     
                     # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
-                        print(f"DEBUG: Overlay calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
                         set_info_msg("Overlay calibration timeout - please try again", dur=3.0)
                         gp.calibrate_show(False)
                         using_overlay_calib = False
@@ -2011,7 +2161,6 @@ def main():
                     # Run in background thread to avoid blocking UI
                     def _reenable_fields():
                         time.sleep(0.2)  # Small delay before re-enabling
-                        print("DEBUG: Re-enabling gaze data fields after calibration...")
                         gp._enable_gaze_data_fields()
                     threading.Thread(target=_reenable_fields, daemon=True).start()
                     # Reset override for next time
@@ -2027,13 +2176,11 @@ def main():
                     if elapsed > 15.0:
                         last_check = getattr(start_calibration, '_last_result_check', 0)
                         if elapsed - last_check >= 3.0:  # Check every 3 seconds
-                            print(f"DEBUG: LED calibration running for {elapsed:.1f}s, requesting result summary...")
                             gp.calibrate_result_summary()
                             start_calibration._last_result_check = elapsed
                     
                     # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
-                        print(f"DEBUG: LED calibration timeout after {elapsed:.1f}s - no CALIB_RESULT received")
                         set_info_msg("Calibration timeout - please try again", dur=3.0)
                         gp.calibrate_show(False)
                         if led_controller is not None:
@@ -2189,6 +2336,16 @@ def main():
                     surf = font.render(line, True, (230, 230, 230))
                     screen.blit(surf, (WIDTH // 2 - 120, y0 + i * line_h))
 
+        # Draw eye view if active (overlay on top of everything)
+        if eye_view_active:
+            # Draw semi-transparent overlay
+            overlay = pygame.Surface((WIDTH, HEIGHT))
+            overlay.set_alpha(200)
+            overlay.fill((0, 0, 0))
+            screen.blit(overlay, (0, 0))
+            # Draw eye view
+            draw_eye_view(screen, last_eye_data, font, small, big)
+        
         # Button feedback and key overlay drawn last
         draw_button_feedback()
         draw_key_overlay()
@@ -2198,6 +2355,8 @@ def main():
     gp.stop()
     if gpio_monitor:
         gpio_monitor.stop()
+    if gpio_eye_view_monitor:
+        gpio_eye_view_monitor.stop()
     if led_controller:
         led_controller.stop()
     pygame.quit()

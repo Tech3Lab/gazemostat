@@ -40,6 +40,40 @@ gpio_btn_marker_pin: 0
 #   Default: 0.2
 gpio_btn_marker_debounce: 0.2
 
+# gpio_btn_eye_view_sim: Enable keyboard shortcut for eye view button
+#   - true:  Enable keyboard shortcut to toggle eye view display
+#   - false: Disable keyboard shortcut for eye view
+#   Default: true
+gpio_btn_eye_view_sim: true
+
+# gpio_btn_eye_view_enable: Enable hardware button for eye view
+#   - true:  Enable physical GPIO button for toggling eye view
+#            Works independently from gpio_btn_eye_view_sim
+#   - false: Disable hardware button for eye view
+#   Default: false
+gpio_btn_eye_view_enable: false
+
+# gpio_btn_eye_view_pin: GPIO pin for eye view button
+#   - GPIO line number for the eye view toggle button
+#   - LattePanda Iota: GP1 = line 1 (or another available pin)
+#   - Connect button between this pin and GND (internal pull-up enabled)
+#   - Only used when gpio_btn_eye_view_enable is true
+#   Default: 1 (GP1)
+gpio_btn_eye_view_pin: 6
+
+# gpio_btn_eye_view_debounce: Eye view button debounce time
+#   - Minimum time between button presses to prevent accidental double-presses
+#   - Value in seconds (e.g., 0.2 = 200ms)
+#   - Only used when gpio_btn_eye_view_enable is true
+#   Default: 0.2
+gpio_btn_eye_view_debounce: 0.2
+
+# gpio_btn_eye_view_key: Keyboard shortcut key for eye view
+#   - Pygame key constant name (e.g., "K_v" for V key, "K_SPACE" for spacebar)
+#   - Default: "K_v" (V key)
+#   Default: "K_v"
+gpio_btn_eye_view_key: "K_v"
+
 # gpio_led_calibration_display: Enable on-screen LED display for calibration
 #   - true:  Show on-screen LED indicators during calibration sequence
 #            Displays visual LED circles at calibration points
