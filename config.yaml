@@ -237,22 +237,24 @@ led_oscillation_enabled: true
 # led_oscillation_damping: Damping coefficient for LED oscillation animation
 #   - Controls how quickly the oscillation settles to full brightness
 #   - Higher values = faster settling (less oscillation)
-#   - Lower values = slower settling (more oscillation)
+#   - Lower values = slower settling (more oscillation, stays dark longer at start)
 #   - Typical range: 0.5 to 5.0
 #   - Animation duration is automatically set to calib_delay + calib_dwell
 #   - Only used when led_oscillation_enabled is true
-#   Default: 2.0
-led_oscillation_damping: 2.0
+#   - Lower values keep LEDs dark more frequently at the beginning
+#   Default: 1.0 (reduced from 2.0 to keep LEDs dark longer at start)
+led_oscillation_damping: 1.0
 
 # led_oscillation_frequency: Angular frequency for LED oscillation animation (radians per second)
 #   - Controls the speed of oscillation
-#   - Higher values = faster oscillation
-#   - Lower values = slower oscillation
+#   - Higher values = faster oscillation (more frequent bright/dark cycles)
+#   - Lower values = slower oscillation (longer periods in dark state)
 #   - Typical range: 1.0 to 10.0
 #   - Animation duration is automatically set to calib_delay + calib_dwell
 #   - Only used when led_oscillation_enabled is true
-#   Default: 4.0
-led_oscillation_frequency: 4.0
+#   - Lower values keep LEDs dark more frequently at the beginning
+#   Default: 2.5 (reduced from 4.0 to keep LEDs dark longer at start)
+led_oscillation_frequency: 2.5
 
 # Note: NeoPixel hardware settings (frequency, color order, pixel type) are configured
 # on the microcontroller side. The PC only sends RGB color values via serial.

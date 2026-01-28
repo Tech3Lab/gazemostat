@@ -54,8 +54,8 @@ LED_ORDER = [0, 1, 2, 3]  # LED order mapping: [low_right, low_left, high_left, 
 LED_RANDOM_ORDER = False  # Randomize LED order during calibration
 LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
 LED_OSCILLATION_ENABLED = True  # Enable damped oscillation animation for LEDs
-LED_OSCILLATION_DAMPING = 2.0  # Damping coefficient for oscillation
-LED_OSCILLATION_FREQUENCY = 4.0  # Angular frequency for oscillation (rad/s)
+LED_OSCILLATION_DAMPING = 1.0  # Damping coefficient for oscillation (lower = stays dark longer)
+LED_OSCILLATION_FREQUENCY = 2.5  # Angular frequency for oscillation (rad/s, lower = stays dark longer)
 
 # Load config.yaml if it exists
 def load_config():
@@ -1201,8 +1201,9 @@ class NeoPixelController:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
         # Calculate damped oscillation brightness
-        # Formula: brightness(t) = 1 - e^(-γt) * (1 - cos(ωt)) / 2
-        # This starts at 0, oscillates, and settles to 1
+        # Formula: brightness(t) = (1 - e^(-γt^2))^2 * (1 - cos(ωt)) / 2
+        # This starts at 0, stays dark longer at the beginning, oscillates, and settles to 1
+        # Using t^2 in exponential and squaring the result keeps LEDs dark more frequently at start
         t = min(elapsed_time, animation_duration)  # Clamp to animation duration
         if t <= 0:
             animation_brightness = 0.0
@@ -1210,12 +1211,16 @@ class NeoPixelController:
             # Normalize time to animation duration for consistent behavior
             normalized_t = t / animation_duration if animation_duration > 0 else 0
             # Scale damping and frequency to animation duration
-            scaled_damping = damping * normalized_t
+            # Use t^2 to make the exponential term grow slower, keeping LEDs dark longer
+            scaled_damping = damping * normalized_t * normalized_t  # t^2 for slower start
             scaled_frequency = frequency * normalized_t
-            # Damped oscillation: 1 - e^(-γt) * (1 - cos(ωt)) / 2
+            # Damped oscillation with slower start: (1 - e^(-γt^2))^2 * (1 - cos(ωt)) / 2
             exp_term = math.exp(-scaled_damping)
             cos_term = math.cos(scaled_frequency)
-            animation_brightness = 1.0 - exp_term * (1.0 - cos_term) / 2.0
+            # Square the exponential term to keep it darker longer at the beginning
+            envelope = (1.0 - exp_term) * (1.0 - exp_term)  # Squared for slower start
+            oscillation = (1.0 - cos_term) / 2.0
+            animation_brightness = envelope * oscillation
             # Clamp to [0, 1]
             animation_brightness = max(0.0, min(1.0, animation_brightness))
         
@@ -1269,16 +1274,23 @@ class NeoPixelController:
             raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
         # Calculate damped oscillation brightness (same as set_led_with_animation)
+        # Formula: brightness(t) = (1 - e^(-γt^2))^2 * (1 - cos(ωt)) / 2
+        # This starts at 0, stays dark longer at the beginning, oscillates, and settles to 1
         t = min(elapsed_time, animation_duration)  # Clamp to animation duration
         if t <= 0:
             animation_brightness = 0.0
         else:
             normalized_t = t / animation_duration if animation_duration > 0 else 0
-            scaled_damping = damping * normalized_t
+            # Use t^2 to make the exponential term grow slower, keeping LEDs dark longer
+            scaled_damping = damping * normalized_t * normalized_t  # t^2 for slower start
             scaled_frequency = frequency * normalized_t
+            # Damped oscillation with slower start: (1 - e^(-γt^2))^2 * (1 - cos(ωt)) / 2
             exp_term = math.exp(-scaled_damping)
             cos_term = math.cos(scaled_frequency)
-            animation_brightness = 1.0 - exp_term * (1.0 - cos_term) / 2.0
+            # Square the exponential term to keep it darker longer at the beginning
+            envelope = (1.0 - exp_term) * (1.0 - exp_term)  # Squared for slower start
+            oscillation = (1.0 - cos_term) / 2.0
+            animation_brightness = envelope * oscillation
             animation_brightness = max(0.0, min(1.0, animation_brightness))
         
         # Set all LEDs with calculated brightness
