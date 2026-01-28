@@ -127,7 +127,7 @@ gpio_led_calibration_enable: true
 #   - Value in seconds (e.g., 0.3 = 300ms)
 #   - Only used when gp_calibration_method is "LED" or "BOTH"
 #   Default: 0.3
-calib_delay: 0.3
+calib_delay: 5.9
 
 # calib_dwell: Duration to collect gaze samples at each calibration point
 #   - Time in seconds to collect gaze samples after the delay period
