@@ -132,10 +132,10 @@ calib_delay: 0.3
 # calib_dwell: Duration to collect gaze samples at each calibration point
 #   - Time in seconds to collect gaze samples after the delay period
 #   - Longer durations provide more samples but take more time
-#   - Value in seconds (e.g., 3.0 = 3000ms)
+#   - Value in seconds (e.g., 6.0 = 6000ms)
 #   - Only used when gp_calibration_method is "LED" or "BOTH"
-#   Default: 3.0
-calib_dwell: 3.0
+#   Default: 6.0
+calib_dwell: 6.0
 
 # neopixel_serial_port: Serial port for NeoPixel controller
 #   - COM port name on Windows (e.g., "COM3") or device path on Linux (e.g., "/dev/ttyUSB0")
