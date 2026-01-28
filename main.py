@@ -1730,6 +1730,7 @@ def main():
     calib_sequence = []  # Sequence of LED indices for calibration
     calib_led_animation_start = {}  # Track animation start time for each LED index
     led_calib_last_point_key = None  # (pt, started_at) to detect Gazepoint point transitions
+    led_calib_corner_count = 0  # Count of corner points seen (0-3) to map to sequence
     using_led_calib = False  # Flag for LED-based calibration active
     using_overlay_calib = False  # Flag for overlay calibration active
     # CALIB_DELAY and CALIB_DWELL are loaded from config.yaml in load_config()
@@ -1786,7 +1787,7 @@ def main():
 
     def start_calibration(override=None):
         nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error
-        nonlocal using_led_calib, using_overlay_calib, calib_sequence, calib_led_animation_start, led_calib_last_point_key
+        nonlocal using_led_calib, using_overlay_calib, calib_sequence, calib_led_animation_start, led_calib_last_point_key, led_calib_corner_count
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
@@ -1802,6 +1803,7 @@ def main():
         # Reset animation + point tracking
         calib_led_animation_start.clear()
         led_calib_last_point_key = None
+        led_calib_corner_count = 0
         if not SIM_GAZE:
             gp.reset_calibration_point_progress()
         
@@ -2000,7 +2002,7 @@ def main():
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
         nonlocal eye_view_active, last_eye_data, last_eye_data_time, calib_sequence, calib_led_animation_start
-        nonlocal led_calib_last_point_key
+        nonlocal led_calib_last_point_key, led_calib_corner_count
         state = "READY"
         calib_status = "red"
         receiving_hint = False
@@ -2012,6 +2014,7 @@ def main():
         calib_sequence = []
         calib_led_animation_start.clear()
         led_calib_last_point_key = None
+        led_calib_corner_count = 0
         calib_collect_start = 0.0
         calib_quality = "none"
         calib_avg_error = None
@@ -2520,7 +2523,7 @@ def main():
 
                 # Use real point progression from CAL messages (avoids drift/glitches).
                 progress = gp.get_calibration_point_progress() if not SIM_GAZE else None
-                pt = progress.get("pt") if progress else None  # 1..5
+                pt = progress.get("pt") if progress else None  # 1..5 from Gazepoint
                 pt_started_at = progress.get("started_at") if progress else None
                 calx = progress.get("calx") if progress else None
                 caly = progress.get("caly") if progress else None
@@ -2533,50 +2536,28 @@ def main():
                 else:
                     # Detect new point start and reset animation tracking
                     point_key = (pt, pt_started_at)
-                    if point_key != led_calib_last_point_key:
+                    is_new_point = point_key != led_calib_last_point_key
+                    if is_new_point:
                         led_calib_last_point_key = point_key
                         calib_led_animation_start.clear()
                         if led_controller is not None:
                             led_controller.all_off()
+                        # Reset step counter when starting a new calibration sequence
+                        if pt == 1:
+                            led_calib_corner_count = 0
 
-                    # Determine which logical target this point corresponds to.
-                    # Gazepoint uses normalized coords: x=0 left..1 right, y=0 top..1 bottom.
-                    # LED_ORDER maps logical positions:
-                    #   0: low_right, 1: low_left, 2: high_left, 3: high_right
-                    logical_step = -1
-
-                    # Prefer coordinates when available
-                    if calx is not None and caly is not None:
-                        # Center (typically PT=1 at 0.5,0.5)
-                        if abs(float(calx) - 0.5) <= 0.2 and abs(float(caly) - 0.5) <= 0.2:
-                            logical_step = 4
-                        else:
-                            right = float(calx) >= 0.5
-                            bottom = float(caly) >= 0.5
-                            if right and bottom:
-                                logical_step = 0  # low_right
-                            elif (not right) and bottom:
-                                logical_step = 1  # low_left
-                            elif (not right) and (not bottom):
-                                logical_step = 2  # high_left
-                            else:
-                                logical_step = 3  # high_right
-                    else:
-                        # Fallback mapping from PT to a reasonable default ordering (matches API example)
-                        # PT1: center, PT2: high_right, PT3: low_right, PT4: low_left, PT5: high_left
-                        pt_map = {1: 4, 2: 3, 3: 0, 4: 1, 5: 2}
-                        logical_step = pt_map.get(pt, -1)
-
-                    calib_step = logical_step
-                    calib_sequence = list(LED_ORDER)  # keep on-screen hint stable / ordered
+                    # Map Gazepoint PT (1..5) to the configured sequence order:
+                    # - PT 1..4 follow calib_sequence[0..3] (order from config)
+                    # - PT 5 is the "center" step (all LEDs at once)
+                    pt_idx = int(pt) - 1  # 0..4
 
                     phase_elapsed = max(0.0, now - pt_started_at)
                     in_delay_phase = phase_elapsed < GP_CALIBRATE_DELAY
 
-                    # In delay phase: blink/animate to attract gaze.
-                    # In timeout (data collection) phase: keep the target SOLID ON for stability.
-                    if led_controller is not None:
-                        if logical_step == 4:
+                    if pt_idx == 4:
+                        # Center step (5th): all LEDs behave like other points (blink during delay, solid during timeout)
+                        calib_step = 4
+                        if led_controller is not None:
                             if LED_OSCILLATION_ENABLED and in_delay_phase:
                                 led_controller.all_on_with_animation(
                                     color=(255, 255, 255),
@@ -2587,21 +2568,34 @@ def main():
                                 )
                             else:
                                 led_controller.all_on()
-                        elif 0 <= logical_step < 4 and logical_step < len(LED_ORDER):
-                            physical_led = LED_ORDER[logical_step]
-                            if LED_OSCILLATION_ENABLED and in_delay_phase:
-                                led_controller.set_led_with_animation(
-                                    physical_led,
-                                    color=(255, 255, 255),
-                                    elapsed_time=phase_elapsed,
-                                    animation_duration=max(0.001, GP_CALIBRATE_DELAY),
-                                    start_frequency=LED_BLINK_START_FREQUENCY,
-                                    end_frequency=LED_BLINK_END_FREQUENCY,
-                                )
-                            else:
-                                led_controller.set_led(physical_led)
+                    else:
+                        # Corner steps (0..3): follow calib_sequence in order
+                        if len(calib_sequence) > 0:
+                            sequence_index = pt_idx % len(calib_sequence)
+                            physical_led = calib_sequence[sequence_index]
+                            calib_step = pt_idx
+
+                            # Track animation start time for this LED (for stable blinking phase)
+                            if physical_led not in calib_led_animation_start:
+                                calib_led_animation_start[physical_led] = pt_started_at
+
+                            if led_controller is not None:
+                                if LED_OSCILLATION_ENABLED and in_delay_phase:
+                                    animation_elapsed = now - calib_led_animation_start[physical_led]
+                                    led_controller.set_led_with_animation(
+                                        physical_led,
+                                        color=(255, 255, 255),
+                                        elapsed_time=animation_elapsed,
+                                        animation_duration=max(0.001, GP_CALIBRATE_DELAY),
+                                        start_frequency=LED_BLINK_START_FREQUENCY,
+                                        end_frequency=LED_BLINK_END_FREQUENCY,
+                                    )
+                                else:
+                                    led_controller.set_led(physical_led)
                         else:
-                            led_controller.all_off()
+                            calib_step = -1
+                            if led_controller is not None:
+                                led_controller.all_off()
                 
                 # Wait for Gazepoint calibration result (same as overlay calibration)
                 calib_result = gp.get_calibration_result()
