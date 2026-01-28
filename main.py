@@ -2594,6 +2594,10 @@ def main():
                     using_overlay_calib = False
                     # If LED calibration is also active, don't change state yet
                     if not using_led_calib:
+                        if calib_debug_saved_for_t0 != calib_debug_t0:
+                            log_calibration_event("calibration_end", method="OVERLAY", note="overlay result -> READY")
+                            save_calibration_logs(calib_debug_events, calib_debug_t0)
+                            calib_debug_saved_for_t0 = calib_debug_t0
                         state = "READY"
                 else:
                     # Still calibrating overlay, wait for CALIB_RESULT message
@@ -2849,6 +2853,15 @@ def main():
                     current_calib_override = None
                     # If overlay calibration is also active, don't change state yet
                     if not using_overlay_calib:
+                        if calib_debug_saved_for_t0 != calib_debug_t0:
+                            log_calibration_event(
+                                "calibration_end",
+                                method="LED",
+                                note="led result -> READY",
+                                calib_result_source=src,
+                            )
+                            save_calibration_logs(calib_debug_events, calib_debug_t0)
+                            calib_debug_saved_for_t0 = calib_debug_t0
                         state = "READY"
                 else:
                     # Still calibrating, wait for CALIB_RESULT message from Gazepoint
