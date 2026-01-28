@@ -343,6 +343,10 @@ class GazeClient:
         """Request calibration result summary"""
         return self._send_command('<GET ID="CALIBRATE_RESULT_SUMMARY" />', wait_for_ack="CALIBRATE_RESULT_SUMMARY")
     
+    def calibrate_stop(self):
+        """Stop any ongoing calibration sequence"""
+        return self._send_command('<SET ID="CALIBRATE_START" STATE="0" />', wait_for_ack="CALIBRATE_START")
+    
     def calibrate_start(self):
         """Start the calibration sequence"""
         return self._send_command('<SET ID="CALIBRATE_START" STATE="1" />', wait_for_ack="CALIBRATE_START")
@@ -1724,6 +1728,10 @@ def main():
         
         # Initialize LED-based calibration if enabled (use Gazepoint server-side calibration with overlay hidden)
         if using_led_calib:
+            # Stop any ongoing calibration first (as per Gazepoint API documentation)
+            gp.calibrate_stop()
+            time.sleep(0.1)
+            
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
@@ -1770,6 +1778,10 @@ def main():
         
         # Start overlay calibration if enabled (only works with real hardware)
         if using_overlay_calib:
+            # Stop any ongoing calibration first (as per Gazepoint API documentation)
+            gp.calibrate_stop()
+            time.sleep(0.1)
+            
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
