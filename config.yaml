@@ -252,7 +252,7 @@ led_repetitions: 1
 #   - false: LEDs turn on immediately at full brightness
 #   - Only used when gpio_led_calibration_enable is true
 #   Default: true
-led_oscillation_enabled: true
+led_oscillation_enabled: false
 
 # led_blink_start_frequency: Starting blink frequency for LED animation (blinks per second)
 #   - Controls how slowly LEDs blink at the beginning of the animation
