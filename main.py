@@ -52,7 +52,7 @@ GPIO_BTN_EYE_VIEW_PIN = 1  # GPIO pin for eye view button (GP1)
 GPIO_BTN_EYE_VIEW_DEBOUNCE = 0.2  # Eye view button debounce time in seconds
 GPIO_BTN_EYE_VIEW_KEY = "K_v"  # Keyboard shortcut key for eye view (V key)
 EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (reduced for faster response)
-LED_ORDER = [0, 1, 2, 3]  # LED order mapping: [low_right, low_left, high_left, high_right] -> physical LED indices
+LED_ORDER = [0, 1, 2, 3]  # Physical LED layout mapping (corners only): [low_right, low_left, high_left, high_right] -> physical LED indices
 LED_RANDOM_ORDER = False  # Randomize LED order during calibration
 LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
 LED_OSCILLATION_ENABLED = True  # Enable blinking animation for LEDs
@@ -133,27 +133,17 @@ def load_config():
                     GPIO_BTN_EYE_VIEW_DEBOUNCE = config.get('gpio_btn_eye_view_debounce', GPIO_BTN_EYE_VIEW_DEBOUNCE)
                     GPIO_BTN_EYE_VIEW_KEY = config.get('gpio_btn_eye_view_key', GPIO_BTN_EYE_VIEW_KEY)
                     EYE_VIEW_TIMEOUT = config.get('eye_view_timeout', EYE_VIEW_TIMEOUT)
-                    # LED calibration order configuration
+                    # LED calibration physical layout configuration (corners only)
                     LED_ORDER = config.get('led_order', LED_ORDER)
                     LED_RANDOM_ORDER = config.get('led_random_order', LED_RANDOM_ORDER)
                     LED_REPETITIONS = config.get('led_repetitions', LED_REPETITIONS)
                     LED_OSCILLATION_ENABLED = config.get('led_oscillation_enabled', LED_OSCILLATION_ENABLED)
                     LED_BLINK_START_FREQUENCY = config.get('led_blink_start_frequency', LED_BLINK_START_FREQUENCY)
                     LED_BLINK_END_FREQUENCY = config.get('led_blink_end_frequency', LED_BLINK_END_FREQUENCY)
-                    # Validate LED_ORDER (4 corners + optional 5th "CENTER")
-                    if not isinstance(LED_ORDER, list) or (len(LED_ORDER) not in (4, 5)):
-                        print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3, \"CENTER\"]", file=sys.stderr)
-                        LED_ORDER = [0, 1, 2, 3, "CENTER"]
-                    if len(LED_ORDER) == 5:
-                        if not (isinstance(LED_ORDER[4], str) and LED_ORDER[4].upper() == "CENTER"):
-                            print(f"Warning: Invalid led_order center entry '{LED_ORDER[4]}', expected \"CENTER\"; using default [0, 1, 2, 3, \"CENTER\"]", file=sys.stderr)
-                            LED_ORDER = [0, 1, 2, 3, "CENTER"]
-                        else:
-                            # Keep internal LED_ORDER as the 4 physical corner indices
-                            LED_ORDER = LED_ORDER[:4]
-                    # At this point LED_ORDER should be the 4 corner LED indices
-                    if len(LED_ORDER) != 4 or any((not isinstance(x, int)) for x in LED_ORDER):
-                        print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3]", file=sys.stderr)
+                    # Validate LED_ORDER: must be exactly 4 integers (corners only).
+                    # Center is NOT configured here; it is detected from Gazepoint CALX/CALY and lights all LEDs.
+                    if not isinstance(LED_ORDER, list) or len(LED_ORDER) != 4 or any((not isinstance(x, int)) for x in LED_ORDER):
+                        print(f"Warning: Invalid led_order '{LED_ORDER}', expected 4 integers; using default [0, 1, 2, 3]", file=sys.stderr)
                         LED_ORDER = [0, 1, 2, 3]
                     # Validate LED_REPETITIONS
                     if not isinstance(LED_REPETITIONS, int) or LED_REPETITIONS < 1:

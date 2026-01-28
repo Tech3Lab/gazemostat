@@ -223,15 +223,17 @@ neopixel_brightness: 0.3
 #   Default: "GRB"
 neopixel_color_order: GRB
 
-# led_order: Physical LED order mapping for calibration
-#   - List of 4 corner positions mapping logical positions to physical LED indices (0-3),
-#     plus an optional 5th entry "CENTER" to include the center step last in the *configured order*.
-#   - Positions: "low_right", "low_left", "high_left", "high_right"
+# led_order: Physical LED layout mapping (corners only)
+#   - List of 4 integers mapping logical screen corners → physical LED indices (0-based).
+#   - This variable describes ONLY the physical LED disposition/order on the screen.
+#   - Center is NOT configured here: the center calibration point is detected from Gazepoint's CALX/CALY
+#     (near 0.5, 0.5) and will light all LEDs automatically.
+#   - Positions (list indices): [low_right, low_left, high_left, high_right]
 #   - Physical LED indices are 0-indexed (LED 1 = index 0, LED 2 = index 1, etc.)
-#   - Example: [0, 1, 2, 3] means LED 1=low_right, LED 2=low_left, LED 3=high_left, LED 4=high_right
+#   - Example: [0, 1, 2, 3] means LED1=low_right, LED2=low_left, LED3=high_left, LED4=high_right
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: [0, 1, 2, 3] (LED 1=low_right, LED 2=low_left, LED 3=high_left, LED 4=high_right)
-led_order: [0, 1, 2, 3, "CENTER"]
+#   Default: [0, 1, 2, 3]
+led_order: [0, 1, 2, 3]
 
 # led_random_order: Randomize LED order during calibration
 #   - true:  Randomize the order of LEDs during calibration sequence
