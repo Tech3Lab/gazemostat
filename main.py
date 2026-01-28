@@ -40,8 +40,10 @@ MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
 CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
 CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
-CALIB_DELAY = 0.3  # Delay after LED turns on before collecting samples (seconds)
+CALIB_DELAY = 0.0  # Internal delay for LED timing (set to 0, use gp_calibrate_delay for Gazepoint API)
 CALIB_DWELL = 6.0  # Duration to collect samples (seconds)
+GP_CALIBRATE_DELAY = 4.5  # Gazepoint CALIBRATE_DELAY: animation/preparation time before data collection (seconds)
+GP_CALIBRATE_TIMEOUT = 1.5  # Gazepoint CALIBRATE_TIMEOUT: duration of data collection per point (seconds)
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 GPIO_BTN_EYE_VIEW_SIM = True  # Enable keyboard shortcut for eye view
@@ -66,6 +68,7 @@ def load_config():
     global NEOPIXEL_SERIAL_PORT, NEOPIXEL_SERIAL_BAUD, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
+    global GP_CALIBRATE_DELAY, GP_CALIBRATE_TIMEOUT
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
@@ -112,6 +115,15 @@ def load_config():
                     CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
                     CALIB_DELAY = config.get('calib_delay', CALIB_DELAY)
                     CALIB_DWELL = config.get('calib_dwell', CALIB_DWELL)
+                    GP_CALIBRATE_DELAY = config.get('gp_calibrate_delay', GP_CALIBRATE_DELAY)
+                    GP_CALIBRATE_TIMEOUT = config.get('gp_calibrate_timeout', GP_CALIBRATE_TIMEOUT)
+                    # Validate Gazepoint calibration parameters
+                    if not isinstance(GP_CALIBRATE_DELAY, (int, float)) or GP_CALIBRATE_DELAY < 0:
+                        print(f"Warning: Invalid gp_calibrate_delay '{GP_CALIBRATE_DELAY}', using default 4.5", file=sys.stderr)
+                        GP_CALIBRATE_DELAY = 4.5
+                    if not isinstance(GP_CALIBRATE_TIMEOUT, (int, float)) or GP_CALIBRATE_TIMEOUT <= 0:
+                        print(f"Warning: Invalid gp_calibrate_timeout '{GP_CALIBRATE_TIMEOUT}', using default 1.5", file=sys.stderr)
+                        GP_CALIBRATE_TIMEOUT = 1.5
                     GPIO_CHIP = config.get('gpio_chip', GPIO_CHIP)
                     GPIO_BTN_MARKER_DEBOUNCE = config.get('gpio_btn_marker_debounce', GPIO_BTN_MARKER_DEBOUNCE)
                     # Eye view button configuration
@@ -1724,13 +1736,13 @@ def main():
             gp.calibrate_reset()
             time.sleep(0.1)
             
-            # Set calibration timeout based on dwell time (convert seconds to milliseconds)
-            timeout_ms = int(CALIB_DWELL * 1000)
+            # Set Gazepoint calibration timeout (data collection duration per point)
+            timeout_ms = int(GP_CALIBRATE_TIMEOUT * 1000)
             gp.calibrate_timeout(timeout_ms)
             time.sleep(0.1)
             
-            # Set calibration delay (convert seconds to milliseconds)
-            delay_ms = int(CALIB_DELAY * 1000)
+            # Set Gazepoint calibration delay (animation/preparation time before data collection)
+            delay_ms = int(GP_CALIBRATE_DELAY * 1000)
             gp.calibrate_delay(delay_ms)
             time.sleep(0.1)
             

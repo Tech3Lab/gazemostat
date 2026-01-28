@@ -121,21 +121,40 @@ gp_calibration_method: LED
 #   Default: true
 gpio_led_calibration_enable: true
 
-# calib_delay: Delay after LED turns on before collecting gaze samples
-#   - Time in seconds to wait after LED turns on before starting data collection
-#   - Gives user time to move their eyes to look at the LED
-#   - Value in seconds (e.g., 0.3 = 300ms)
+# calib_delay: Internal delay for LED timing calculations
+#   - Set to 0.0 - LED timing now uses calib_dwell only
+#   - Gazepoint API parameters are controlled separately via gp_calibrate_delay and gp_calibrate_timeout
 #   - Only used when gp_calibration_method is "LED" or "BOTH"
-#   Default: 0.3
-calib_delay: 5.9
+#   Default: 0.0
+calib_delay: 0.0
 
-# calib_dwell: Duration to collect gaze samples at each calibration point
-#   - Time in seconds to collect gaze samples after the delay period
-#   - Longer durations provide more samples but take more time
+# calib_dwell: Total duration per calibration point (for LED timing)
+#   - Time in seconds for each calibration point (used for LED switching timing)
+#   - Should match gp_calibrate_delay + gp_calibrate_timeout
 #   - Value in seconds (e.g., 6.0 = 6000ms)
 #   - Only used when gp_calibration_method is "LED" or "BOTH"
 #   Default: 6.0
 calib_dwell: 6.0
+
+# gp_calibrate_delay: Gazepoint CALIBRATE_DELAY parameter (animation/preparation time)
+#   - Time in seconds for animation/preparation before data collection starts
+#   - Gives user time to see the blinking LED and move their eyes to look at it
+#   - This is sent directly to Gazepoint API as CALIBRATE_DELAY
+#   - Value in seconds (e.g., 4.5 = 4500ms)
+#   - Only used when gp_calibration_method is "LED" or "BOTH"
+#   - Should be: gp_calibrate_delay + gp_calibrate_timeout = calib_dwell
+#   Default: 4.5
+gp_calibrate_delay: 4.5
+
+# gp_calibrate_timeout: Gazepoint CALIBRATE_TIMEOUT parameter (data collection duration)
+#   - Time in seconds for actual data collection per calibration point
+#   - Gazepoint collects multiple samples during this period and averages them
+#   - This is sent directly to Gazepoint API as CALIBRATE_TIMEOUT
+#   - Value in seconds (e.g., 1.5 = 1500ms)
+#   - Only used when gp_calibration_method is "LED" or "BOTH"
+#   - Should be: gp_calibrate_delay + gp_calibrate_timeout = calib_dwell
+#   Default: 1.5
+gp_calibrate_timeout: 1.5
 
 # neopixel_serial_port: Serial port for NeoPixel controller
 #   - COM port name on Windows (e.g., "COM3") or device path on Linux (e.g., "/dev/ttyUSB0")
