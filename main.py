@@ -140,8 +140,19 @@ def load_config():
                     LED_OSCILLATION_ENABLED = config.get('led_oscillation_enabled', LED_OSCILLATION_ENABLED)
                     LED_BLINK_START_FREQUENCY = config.get('led_blink_start_frequency', LED_BLINK_START_FREQUENCY)
                     LED_BLINK_END_FREQUENCY = config.get('led_blink_end_frequency', LED_BLINK_END_FREQUENCY)
-                    # Validate LED_ORDER
-                    if not isinstance(LED_ORDER, list) or len(LED_ORDER) != 4:
+                    # Validate LED_ORDER (4 corners + optional 5th "CENTER")
+                    if not isinstance(LED_ORDER, list) or (len(LED_ORDER) not in (4, 5)):
+                        print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3, \"CENTER\"]", file=sys.stderr)
+                        LED_ORDER = [0, 1, 2, 3, "CENTER"]
+                    if len(LED_ORDER) == 5:
+                        if not (isinstance(LED_ORDER[4], str) and LED_ORDER[4].upper() == "CENTER"):
+                            print(f"Warning: Invalid led_order center entry '{LED_ORDER[4]}', expected \"CENTER\"; using default [0, 1, 2, 3, \"CENTER\"]", file=sys.stderr)
+                            LED_ORDER = [0, 1, 2, 3, "CENTER"]
+                        else:
+                            # Keep internal LED_ORDER as the 4 physical corner indices
+                            LED_ORDER = LED_ORDER[:4]
+                    # At this point LED_ORDER should be the 4 corner LED indices
+                    if len(LED_ORDER) != 4 or any((not isinstance(x, int)) for x in LED_ORDER):
                         print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3]", file=sys.stderr)
                         LED_ORDER = [0, 1, 2, 3]
                     # Validate LED_REPETITIONS
@@ -320,6 +331,7 @@ class GazeClient:
     def calibrate_reset(self):
         """Reset the internal list of calibration points to default values"""
         return self._send_command('<SET ID="CALIBRATE_RESET" />')
+
 
     def calibrate_timeout(self, timeout_ms=1000):
         """Set the duration of each calibration point (not including animation time)
