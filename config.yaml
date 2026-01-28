@@ -132,10 +132,10 @@ calib_delay: 0.3
 # calib_dwell: Duration to collect gaze samples at each calibration point
 #   - Time in seconds to collect gaze samples after the delay period
 #   - Longer durations provide more samples but take more time
-#   - Value in seconds (e.g., 0.9 = 900ms)
+#   - Value in seconds (e.g., 3.0 = 3000ms)
 #   - Only used when gp_calibration_method is "LED" or "BOTH"
-#   Default: 0.9
-calib_dwell: 0.9
+#   Default: 3.0
+calib_dwell: 3.0
 
 # neopixel_serial_port: Serial port for NeoPixel controller
 #   - COM port name on Windows (e.g., "COM3") or device path on Linux (e.g., "/dev/ttyUSB0")
@@ -204,8 +204,60 @@ neopixel_brightness: 0.3
 #   Default: "GRB"
 neopixel_color_order: GRB
 
+# led_order: Physical LED order mapping for calibration
+#   - List of 4 positions mapping logical positions to physical LED indices (0-3)
+#   - Positions: "low_right", "low_left", "high_left", "high_right"
+#   - Physical LED indices are 0-indexed (LED 1 = index 0, LED 2 = index 1, etc.)
+#   - Example: [0, 1, 2, 3] means LED 1=low_right, LED 2=low_left, LED 3=high_left, LED 4=high_right
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: [0, 1, 2, 3] (LED 1=low_right, LED 2=low_left, LED 3=high_left, LED 4=high_right)
+led_order: [0, 1, 2, 3]
+
+# led_random_order: Randomize LED order during calibration
+#   - true:  Randomize the order of LEDs during calibration sequence
+#   - false: Use the order specified in led_order
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: false
+led_random_order: false
+
+# led_repetitions: Number of times each LED is displayed during calibration
+#   - Each LED in the sequence will be shown this many times
+#   - Value must be >= 1
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: 1
+led_repetitions: 1
+
+# led_oscillation_enabled: Enable damped oscillation animation for LEDs during calibration
+#   - true:  LEDs gradually light up following a damped oscillation pattern
+#   - false: LEDs turn on immediately at full brightness
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: true
+led_oscillation_enabled: true
+
+# led_oscillation_damping: Damping coefficient for LED oscillation animation
+#   - Controls how quickly the oscillation settles to full brightness
+#   - Higher values = faster settling (less oscillation)
+#   - Lower values = slower settling (more oscillation)
+#   - Typical range: 0.5 to 5.0
+#   - Animation duration is automatically set to calib_delay + calib_dwell
+#   - Only used when led_oscillation_enabled is true
+#   Default: 2.0
+led_oscillation_damping: 2.0
+
+# led_oscillation_frequency: Angular frequency for LED oscillation animation (radians per second)
+#   - Controls the speed of oscillation
+#   - Higher values = faster oscillation
+#   - Lower values = slower oscillation
+#   - Typical range: 1.0 to 10.0
+#   - Animation duration is automatically set to calib_delay + calib_dwell
+#   - Only used when led_oscillation_enabled is true
+#   Default: 4.0
+led_oscillation_frequency: 4.0
+
 # Note: NeoPixel hardware settings (frequency, color order, pixel type) are configured
 # on the microcontroller side. The PC only sends RGB color values via serial.
+# Note: LED oscillation animation duration is automatically set to calib_delay + calib_dwell
+# (currently 0.3 + 3.0 = 3.3 seconds). The animation completes when the LED reaches full brightness.
 
 # ----------------------------------------------------------------------------
 # Simulation Modes

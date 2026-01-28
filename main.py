@@ -6,6 +6,7 @@ import threading
 import queue
 import socket
 import csv
+import random
 from datetime import datetime
 from pathlib import Path
 
@@ -40,7 +41,7 @@ FEATURE_WINDOW_MS = 1500
 CALIB_OK_THRESHOLD = 1.0  # Maximum average error for OK calibration
 CALIB_LOW_THRESHOLD = 2.0  # Maximum average error for low quality calibration
 CALIB_DELAY = 0.3  # Delay after LED turns on before collecting samples (seconds)
-CALIB_DWELL = 0.9  # Duration to collect samples (seconds)
+CALIB_DWELL = 3.0  # Duration to collect samples (seconds)
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 GPIO_BTN_EYE_VIEW_SIM = True  # Enable keyboard shortcut for eye view
@@ -49,6 +50,12 @@ GPIO_BTN_EYE_VIEW_PIN = 1  # GPIO pin for eye view button (GP1)
 GPIO_BTN_EYE_VIEW_DEBOUNCE = 0.2  # Eye view button debounce time in seconds
 GPIO_BTN_EYE_VIEW_KEY = "K_v"  # Keyboard shortcut key for eye view (V key)
 EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (reduced for faster response)
+LED_ORDER = [0, 1, 2, 3]  # LED order mapping: [low_right, low_left, high_left, high_right] -> physical LED indices
+LED_RANDOM_ORDER = False  # Randomize LED order during calibration
+LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
+LED_OSCILLATION_ENABLED = True  # Enable damped oscillation animation for LEDs
+LED_OSCILLATION_DAMPING = 2.0  # Damping coefficient for oscillation
+LED_OSCILLATION_FREQUENCY = 4.0  # Angular frequency for oscillation (rad/s)
 
 # Load config.yaml if it exists
 def load_config():
@@ -62,6 +69,8 @@ def load_config():
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
+    global LED_ORDER, LED_RANDOM_ORDER, LED_REPETITIONS
+    global LED_OSCILLATION_ENABLED, LED_OSCILLATION_DAMPING, LED_OSCILLATION_FREQUENCY
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -112,6 +121,28 @@ def load_config():
                     GPIO_BTN_EYE_VIEW_DEBOUNCE = config.get('gpio_btn_eye_view_debounce', GPIO_BTN_EYE_VIEW_DEBOUNCE)
                     GPIO_BTN_EYE_VIEW_KEY = config.get('gpio_btn_eye_view_key', GPIO_BTN_EYE_VIEW_KEY)
                     EYE_VIEW_TIMEOUT = config.get('eye_view_timeout', EYE_VIEW_TIMEOUT)
+                    # LED calibration order configuration
+                    LED_ORDER = config.get('led_order', LED_ORDER)
+                    LED_RANDOM_ORDER = config.get('led_random_order', LED_RANDOM_ORDER)
+                    LED_REPETITIONS = config.get('led_repetitions', LED_REPETITIONS)
+                    LED_OSCILLATION_ENABLED = config.get('led_oscillation_enabled', LED_OSCILLATION_ENABLED)
+                    LED_OSCILLATION_DAMPING = config.get('led_oscillation_damping', LED_OSCILLATION_DAMPING)
+                    LED_OSCILLATION_FREQUENCY = config.get('led_oscillation_frequency', LED_OSCILLATION_FREQUENCY)
+                    # Validate LED_ORDER
+                    if not isinstance(LED_ORDER, list) or len(LED_ORDER) != 4:
+                        print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3]", file=sys.stderr)
+                        LED_ORDER = [0, 1, 2, 3]
+                    # Validate LED_REPETITIONS
+                    if not isinstance(LED_REPETITIONS, int) or LED_REPETITIONS < 1:
+                        print(f"Warning: Invalid led_repetitions '{LED_REPETITIONS}', using default 1", file=sys.stderr)
+                        LED_REPETITIONS = 1
+                    # Validate oscillation parameters
+                    if not isinstance(LED_OSCILLATION_DAMPING, (int, float)) or LED_OSCILLATION_DAMPING <= 0:
+                        print(f"Warning: Invalid led_oscillation_damping '{LED_OSCILLATION_DAMPING}', using default 2.0", file=sys.stderr)
+                        LED_OSCILLATION_DAMPING = 2.0
+                    if not isinstance(LED_OSCILLATION_FREQUENCY, (int, float)) or LED_OSCILLATION_FREQUENCY <= 0:
+                        print(f"Warning: Invalid led_oscillation_frequency '{LED_OSCILLATION_FREQUENCY}', using default 4.0", file=sys.stderr)
+                        LED_OSCILLATION_FREQUENCY = 4.0
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -1118,22 +1149,26 @@ class NeoPixelController:
         self._initialized = False
         self._current_led = -1
     
-    def set_led(self, led_index, color=(255, 255, 255)):
-        """Turn on a specific NeoPixel (0-3) with color and turn off all others"""
+    def set_led(self, led_index, color=(255, 255, 255), animation_brightness=1.0):
+        """Turn on a specific NeoPixel (0-3) with color and turn off all others
+        
+        Args:
+            led_index: Index of the LED (0-3)
+            color: RGB color tuple (default: white)
+            animation_brightness: Brightness multiplier for animation (0.0-1.0, default: 1.0)
+        """
         if not self._initialized:
             raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
         if led_index < 0 or led_index >= self.num_pixels:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
-        if led_index == self._current_led:
-            return  # Already in desired state
-        
-        # Apply brightness to color
+        # Apply brightness to color (both global brightness and animation brightness)
         r, g, b = color
-        r = int(r * self.brightness)
-        g = int(g * self.brightness)
-        b = int(b * self.brightness)
+        total_brightness = self.brightness * animation_brightness
+        r = int(r * total_brightness)
+        g = int(g * total_brightness)
+        b = int(b * total_brightness)
         
         # Turn off all pixels first, then set the active one
         self._send_command("ALL:OFF")
@@ -1144,6 +1179,50 @@ class NeoPixelController:
         if led_index >= 0:
             pass
     
+    def set_led_with_animation(self, led_index, color=(255, 255, 255), elapsed_time=0.0, 
+                                animation_duration=3.3, damping=2.0, frequency=4.0):
+        """Set LED with damped oscillation animation
+        
+        Args:
+            led_index: Index of the LED (0-3)
+            color: RGB color tuple (default: white)
+            elapsed_time: Time since animation started (seconds)
+            animation_duration: Total duration of animation (seconds)
+            damping: Damping coefficient for oscillation
+            frequency: Angular frequency for oscillation (rad/s)
+        
+        Returns:
+            Current animation brightness (0.0-1.0)
+        """
+        if not self._initialized:
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
+        
+        if led_index < 0 or led_index >= self.num_pixels:
+            raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
+        
+        # Calculate damped oscillation brightness
+        # Formula: brightness(t) = 1 - e^(-γt) * (1 - cos(ωt)) / 2
+        # This starts at 0, oscillates, and settles to 1
+        t = min(elapsed_time, animation_duration)  # Clamp to animation duration
+        if t <= 0:
+            animation_brightness = 0.0
+        else:
+            # Normalize time to animation duration for consistent behavior
+            normalized_t = t / animation_duration if animation_duration > 0 else 0
+            # Scale damping and frequency to animation duration
+            scaled_damping = damping * normalized_t
+            scaled_frequency = frequency * normalized_t
+            # Damped oscillation: 1 - e^(-γt) * (1 - cos(ωt)) / 2
+            exp_term = math.exp(-scaled_damping)
+            cos_term = math.cos(scaled_frequency)
+            animation_brightness = 1.0 - exp_term * (1.0 - cos_term) / 2.0
+            # Clamp to [0, 1]
+            animation_brightness = max(0.0, min(1.0, animation_brightness))
+        
+        # Set LED with calculated brightness
+        self.set_led(led_index, color, animation_brightness)
+        return animation_brightness
+    
     def all_off(self):
         """Turn off all NeoPixels"""
         if not self._initialized:
@@ -1152,19 +1231,59 @@ class NeoPixelController:
         self._send_command("ALL:OFF")
         self._current_led = -1
     
-    def all_on(self, color=(255, 255, 255)):
-        """Turn on all NeoPixels with specified color (useful for testing)"""
+    def all_on(self, color=(255, 255, 255), animation_brightness=1.0):
+        """Turn on all NeoPixels with specified color (useful for testing)
+        
+        Args:
+            color: RGB color tuple (default: white)
+            animation_brightness: Brightness multiplier for animation (0.0-1.0, default: 1.0)
+        """
         if not self._initialized:
             raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
-        # Apply brightness to color
+        # Apply brightness to color (both global brightness and animation brightness)
         r, g, b = color
-        r = int(r * self.brightness)
-        g = int(g * self.brightness)
-        b = int(b * self.brightness)
+        total_brightness = self.brightness * animation_brightness
+        r = int(r * total_brightness)
+        g = int(g * total_brightness)
+        b = int(b * total_brightness)
         
         self._send_command(f"ALL:ON:{r}:{g}:{b}")
         self._current_led = -2  # Special value for "all on"
+    
+    def all_on_with_animation(self, color=(255, 255, 255), elapsed_time=0.0,
+                              animation_duration=3.3, damping=2.0, frequency=4.0):
+        """Turn on all LEDs with damped oscillation animation
+        
+        Args:
+            color: RGB color tuple (default: white)
+            elapsed_time: Time since animation started (seconds)
+            animation_duration: Total duration of animation (seconds)
+            damping: Damping coefficient for oscillation
+            frequency: Angular frequency for oscillation (rad/s)
+        
+        Returns:
+            Current animation brightness (0.0-1.0)
+        """
+        if not self._initialized:
+            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
+        
+        # Calculate damped oscillation brightness (same as set_led_with_animation)
+        t = min(elapsed_time, animation_duration)  # Clamp to animation duration
+        if t <= 0:
+            animation_brightness = 0.0
+        else:
+            normalized_t = t / animation_duration if animation_duration > 0 else 0
+            scaled_damping = damping * normalized_t
+            scaled_frequency = frequency * normalized_t
+            exp_term = math.exp(-scaled_damping)
+            cos_term = math.cos(scaled_frequency)
+            animation_brightness = 1.0 - exp_term * (1.0 - cos_term) / 2.0
+            animation_brightness = max(0.0, min(1.0, animation_brightness))
+        
+        # Set all LEDs with calculated brightness
+        self.all_on(color, animation_brightness)
+        return animation_brightness
     
     def set_color(self, led_index, r, g, b):
         """Set specific RGB color for a NeoPixel"""
@@ -1466,6 +1585,8 @@ def main():
     calib_step = -1
     calib_step_start = 0.0
     calib_collect_start = 0.0  # When to start collecting samples (after delay)
+    calib_sequence = []  # Sequence of LED indices for calibration
+    calib_led_animation_start = {}  # Track animation start time for each LED index
     using_led_calib = False  # Flag for LED-based calibration active
     using_overlay_calib = False  # Flag for overlay calibration active
     # CALIB_DELAY and CALIB_DWELL are loaded from config.yaml in load_config()
@@ -1499,8 +1620,29 @@ def main():
 
     # Dev defaults for gaze sim: start disconnected, user can press '1' to connect
 
+    def generate_calibration_sequence():
+        """Generate calibration sequence based on LED_ORDER, LED_RANDOM_ORDER, and LED_REPETITIONS
+        
+        Returns:
+            List of physical LED indices (0-3) in the order they should be displayed
+        """
+        # Start with the configured LED order
+        sequence = list(LED_ORDER)
+        
+        # Randomize if enabled
+        if LED_RANDOM_ORDER:
+            sequence = sequence.copy()
+            random.shuffle(sequence)
+        
+        # Repeat each LED the specified number of times
+        repeated_sequence = []
+        for led_index in sequence:
+            repeated_sequence.extend([led_index] * LED_REPETITIONS)
+        
+        return repeated_sequence
+
     def start_calibration(override=None):
-        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error, using_led_calib, using_overlay_calib
+        nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error, using_led_calib, using_overlay_calib, calib_sequence, calib_led_animation_start
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
@@ -1509,6 +1651,11 @@ def main():
         calib_quality = "none"
         # Record override result for this calibration session (dev simulation)
         current_calib_override = override
+        
+        # Generate calibration sequence for LED-based calibration
+        calib_sequence = generate_calibration_sequence()
+        # Reset animation tracking
+        calib_led_animation_start.clear()
         
         # Initialize flags for which calibration methods are active based on enum
         using_led_calib = GP_CALIBRATION_METHOD in ("LED", "BOTH")
@@ -1696,7 +1843,7 @@ def main():
         nonlocal session_t0, next_task_id, task_open, events, gaze_samples
         nonlocal analyze_t0, per_task_scores, global_score, results_scroll
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
-        nonlocal eye_view_active, last_eye_data, last_eye_data_time
+        nonlocal eye_view_active, last_eye_data, last_eye_data_time, calib_sequence, calib_led_animation_start
         state = "READY"
         calib_status = "red"
         receiving_hint = False
@@ -1705,6 +1852,8 @@ def main():
         target_points = []
         calib_step = -1
         calib_step_start = 0.0
+        calib_sequence = []
+        calib_led_animation_start.clear()
         calib_collect_start = 0.0
         calib_quality = "none"
         calib_avg_error = None
@@ -2211,24 +2360,83 @@ def main():
                 # Note: We can't directly know which point Gazepoint is on, so we cycle through LEDs
                 # This is a simplification - in practice, Gazepoint manages the calibration sequence
                 # We just provide visual targets with LEDs
+                # Gazepoint uses 5 calibration points: 4 corners + 1 center
                 # Calculate estimated calibration point based on elapsed time
                 elapsed = time.time() - calib_step_start
-                total_time_per_point = (CALIB_DELAY + CALIB_DWELL) * 5  # Assume 5 points default
-                estimated_point = int((elapsed % total_time_per_point) / (CALIB_DELAY + CALIB_DWELL))
-                # Update calib_step for on-screen LED display
-                if estimated_point < 4:
-                    calib_step = estimated_point
-                else:
-                    # For 5th point or beyond, set to -1 (no LED highlighted)
-                    calib_step = -1
+                time_per_point = CALIB_DELAY + CALIB_DWELL
+                # Gazepoint has 5 points total (4 corners + 1 center)
+                total_gazepoint_points = 5
+                total_time = time_per_point * total_gazepoint_points
+                estimated_gazepoint_point = int((elapsed % total_time) / time_per_point) if total_time > 0 else 0
                 
-                # Control hardware LEDs
-                if led_controller is not None:
-                    if estimated_point < 4:
-                        led_controller.set_led(estimated_point)
+                # Calculate time within current point
+                time_in_point = elapsed % time_per_point if time_per_point > 0 else 0
+                
+                # Map Gazepoint's 5 points to our LED sequence
+                # Points 0-3: corners (use LED sequence, cycling if needed)
+                # Point 4: center (turn on all LEDs)
+                if estimated_gazepoint_point < 4:
+                    # Corner points: use LED from sequence (cycle if sequence is shorter)
+                    if len(calib_sequence) > 0:
+                        led_index_in_sequence = estimated_gazepoint_point % len(calib_sequence)
+                        estimated_led = calib_sequence[led_index_in_sequence]
+                        calib_step = estimated_gazepoint_point
+                        
+                        # Track animation start time for this LED
+                        if estimated_led not in calib_led_animation_start:
+                            calib_led_animation_start[estimated_led] = time.time() - time_in_point
+                        
+                        # Control hardware LEDs with oscillation animation
+                        if led_controller is not None:
+                            if LED_OSCILLATION_ENABLED:
+                                # Use damped oscillation animation
+                                animation_elapsed = time.time() - calib_led_animation_start[estimated_led]
+                                led_controller.set_led_with_animation(
+                                    estimated_led,
+                                    color=(255, 255, 255),
+                                    elapsed_time=animation_elapsed,
+                                    animation_duration=time_per_point,
+                                    damping=LED_OSCILLATION_DAMPING,
+                                    frequency=LED_OSCILLATION_FREQUENCY
+                                )
+                            else:
+                                # No animation: turn on immediately
+                                led_controller.set_led(estimated_led)
                     else:
-                        # For 5th point or beyond, cycle back or turn off
-                        led_controller.all_off()
+                        estimated_led = -1
+                        calib_step = -1
+                        if led_controller is not None:
+                            led_controller.all_off()
+                else:
+                    # Point 4: center point - use special value to indicate all LEDs
+                    estimated_led = -2  # Special value for "all LEDs on"
+                    calib_step = 4  # 5th point (0-indexed as 4)
+                    
+                    # Track animation start time for center point
+                    center_key = -2
+                    if center_key not in calib_led_animation_start:
+                        calib_led_animation_start[center_key] = time.time() - time_in_point
+                    
+                    # Control hardware LEDs with oscillation animation
+                    if led_controller is not None:
+                        if LED_OSCILLATION_ENABLED:
+                            # Use damped oscillation animation for all LEDs
+                            animation_elapsed = time.time() - calib_led_animation_start[center_key]
+                            led_controller.all_on_with_animation(
+                                color=(255, 255, 255),
+                                elapsed_time=animation_elapsed,
+                                animation_duration=time_per_point,
+                                damping=LED_OSCILLATION_DAMPING,
+                                frequency=LED_OSCILLATION_FREQUENCY
+                            )
+                        else:
+                            # No animation: turn on all LEDs immediately
+                            led_controller.all_on()
+                
+                # Clear animation start times when moving to a new point
+                if estimated_gazepoint_point == 0 and time_in_point < 0.1:
+                    # Reset animation tracking at start of new cycle
+                    calib_led_animation_start.clear()
                 
                 # Wait for Gazepoint calibration result (same as overlay calibration)
                 calib_result = gp.get_calibration_result()
@@ -2341,17 +2549,42 @@ def main():
 
         # On-screen calibration NeoPixel hints (only for LED-based calibration)
         if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY and using_led_calib:
-            led_pos = [
-                (int(WIDTH * 0.1), int(HEIGHT * 0.15)),
-                (int(WIDTH * 0.9), int(HEIGHT * 0.15)),
-                (int(WIDTH * 0.9), int(HEIGHT * 0.85)),
-                (int(WIDTH * 0.1), int(HEIGHT * 0.85)),
+            # Map logical positions to screen coordinates
+            # LED_ORDER maps: [low_right, low_left, high_left, high_right] -> physical LED indices
+            logical_positions = [
+                (int(WIDTH * 0.9), int(HEIGHT * 0.85)),   # low_right (index 0 in LED_ORDER)
+                (int(WIDTH * 0.1), int(HEIGHT * 0.85)),    # low_left (index 1 in LED_ORDER)
+                (int(WIDTH * 0.1), int(HEIGHT * 0.15)),    # high_left (index 2 in LED_ORDER)
+                (int(WIDTH * 0.9), int(HEIGHT * 0.15)),    # high_right (index 3 in LED_ORDER)
             ]
-            for i, p in enumerate(led_pos):
-                # Use white (255, 255, 255) for active NeoPixel to match hardware default
-                # Use dark gray for inactive pixels
-                color = (255, 255, 255) if i == calib_step else (60, 60, 60)
-                pygame.draw.circle(screen, color, p, 8)
+            # Determine if we're on the center point (calib_step == 4)
+            is_center_point = (calib_step == 4)
+            
+            # Draw all LEDs in their configured positions
+            # LED_ORDER[i] gives the physical LED index for logical position i
+            for logical_idx in range(4):
+                if logical_idx < len(LED_ORDER):
+                    physical_led_idx = LED_ORDER[logical_idx]
+                    pos = logical_positions[logical_idx]
+                    # Check if this physical LED is currently active
+                    if is_center_point:
+                        # Center point: all LEDs are active
+                        is_active = True
+                    else:
+                        # Corner points: check if this LED is in the current sequence step
+                        is_active = (calib_step >= 0 and calib_step < 4 and 
+                                    len(calib_sequence) > 0 and
+                                    calib_sequence[calib_step % len(calib_sequence)] == physical_led_idx)
+                    # Use white (255, 255, 255) for active NeoPixel to match hardware default
+                    # Use dark gray for inactive pixels
+                    color = (255, 255, 255) if is_active else (60, 60, 60)
+                    pygame.draw.circle(screen, color, pos, 8)
+            
+            # Draw center indicator when on center point
+            if is_center_point:
+                center_pos = (WIDTH // 2, HEIGHT // 2)
+                pygame.draw.circle(screen, (255, 255, 255), center_pos, 10)
+                pygame.draw.circle(screen, (255, 255, 255), center_pos, 12, 2)
         
         # Hardware LED control during LED-based calibration
         # (LED control during calibration is handled in the calibration loop above)
