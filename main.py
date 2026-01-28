@@ -223,7 +223,11 @@ class GazeClient:
         self._t0 = time.time()
         self._sock = None  # Socket reference for sending commands
         self._sock_lock = threading.Lock()  # Thread-safe socket access
-        self.calib_result = None  # Store calibration result summary
+        # Calibration results
+        # - calib_result: final calibration result from <CAL ID="CALIB_RESULT" .../>
+        # - calib_result_summary: latest <ACK ID="CALIBRATE_RESULT_SUMMARY" .../> (progress/diagnostics only)
+        self.calib_result = None
+        self.calib_result_summary = None
         self.calib_result_lock = threading.Lock()  # Thread-safe calibration result access
         self._ack_events = {}  # Dictionary to store ACK events by ID
         self._ack_lock = threading.Lock()  # Lock for ACK events
@@ -543,20 +547,17 @@ class GazeClient:
                                                 num_points = get_attr(line_str, 'VALID_POINTS', None)
                                                 
                                                 
-                                                # Store calibration result if we have data
+                                                # Store calibration *summary* if we have data.
+                                                # IMPORTANT: This is NOT treated as "calibration finished" because it can be returned mid-calibration.
                                                 if avg_error is not None or num_points is not None:
-                                                    # Only update if we have a meaningful result (not just 0,0)
-                                                    # or if calibration has been running for a while
                                                     with self.calib_result_lock:
-                                                        # If we already have a result, only update if new one has points
-                                                        if self.calib_result is None or (num_points is not None and num_points > 0):
-                                                            success = 1 if (num_points is not None and num_points >= 4) else 0
-                                                            self.calib_result = {
-                                                                'average_error': avg_error if avg_error is not None else 0.0,
-                                                                'num_points': num_points if num_points is not None else 0,
-                                                                'success': success,
-                                                                'source': 'CALIBRATE_RESULT_SUMMARY',
-                                                            }
+                                                        success = 1 if (num_points is not None and num_points >= 4) else 0
+                                                        self.calib_result_summary = {
+                                                            'average_error': avg_error if avg_error is not None else 0.0,
+                                                            'num_points': num_points if num_points is not None else 0,
+                                                            'success': success,
+                                                            'source': 'CALIBRATE_RESULT_SUMMARY',
+                                                        }
                                             
                                             # Signal waiting thread if any
                                             with self._ack_lock:
@@ -1904,6 +1905,7 @@ def main():
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
+                gp.calib_result_summary = None
             
             # Clear previous calibration points
             ok = gp.calibrate_clear()
@@ -1969,6 +1971,7 @@ def main():
             # Clear calibration result before starting
             with gp.calib_result_lock:
                 gp.calib_result = None
+                gp.calib_result_summary = None
             
             # Clear previous calibration points
             ok = gp.calibrate_clear()
