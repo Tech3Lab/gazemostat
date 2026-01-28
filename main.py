@@ -53,9 +53,9 @@ EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (redu
 LED_ORDER = [0, 1, 2, 3]  # LED order mapping: [low_right, low_left, high_left, high_right] -> physical LED indices
 LED_RANDOM_ORDER = False  # Randomize LED order during calibration
 LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
-LED_OSCILLATION_ENABLED = True  # Enable damped oscillation animation for LEDs
-LED_OSCILLATION_DAMPING = 1.0  # Damping coefficient for oscillation (lower = stays dark longer)
-LED_OSCILLATION_FREQUENCY = 2.5  # Angular frequency for oscillation (rad/s, lower = stays dark longer)
+LED_OSCILLATION_ENABLED = True  # Enable blinking animation for LEDs
+LED_BLINK_START_FREQUENCY = 0.5  # Starting blink frequency (blinks per second, slow)
+LED_BLINK_END_FREQUENCY = 15.0  # Ending blink frequency (blinks per second, fast)
 
 # Load config.yaml if it exists
 def load_config():
@@ -70,7 +70,7 @@ def load_config():
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
     global LED_ORDER, LED_RANDOM_ORDER, LED_REPETITIONS
-    global LED_OSCILLATION_ENABLED, LED_OSCILLATION_DAMPING, LED_OSCILLATION_FREQUENCY
+    global LED_OSCILLATION_ENABLED, LED_BLINK_START_FREQUENCY, LED_BLINK_END_FREQUENCY
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -126,8 +126,8 @@ def load_config():
                     LED_RANDOM_ORDER = config.get('led_random_order', LED_RANDOM_ORDER)
                     LED_REPETITIONS = config.get('led_repetitions', LED_REPETITIONS)
                     LED_OSCILLATION_ENABLED = config.get('led_oscillation_enabled', LED_OSCILLATION_ENABLED)
-                    LED_OSCILLATION_DAMPING = config.get('led_oscillation_damping', LED_OSCILLATION_DAMPING)
-                    LED_OSCILLATION_FREQUENCY = config.get('led_oscillation_frequency', LED_OSCILLATION_FREQUENCY)
+                    LED_BLINK_START_FREQUENCY = config.get('led_blink_start_frequency', LED_BLINK_START_FREQUENCY)
+                    LED_BLINK_END_FREQUENCY = config.get('led_blink_end_frequency', LED_BLINK_END_FREQUENCY)
                     # Validate LED_ORDER
                     if not isinstance(LED_ORDER, list) or len(LED_ORDER) != 4:
                         print(f"Warning: Invalid led_order '{LED_ORDER}', using default [0, 1, 2, 3]", file=sys.stderr)
@@ -136,13 +136,17 @@ def load_config():
                     if not isinstance(LED_REPETITIONS, int) or LED_REPETITIONS < 1:
                         print(f"Warning: Invalid led_repetitions '{LED_REPETITIONS}', using default 1", file=sys.stderr)
                         LED_REPETITIONS = 1
-                    # Validate oscillation parameters
-                    if not isinstance(LED_OSCILLATION_DAMPING, (int, float)) or LED_OSCILLATION_DAMPING <= 0:
-                        print(f"Warning: Invalid led_oscillation_damping '{LED_OSCILLATION_DAMPING}', using default 2.0", file=sys.stderr)
-                        LED_OSCILLATION_DAMPING = 2.0
-                    if not isinstance(LED_OSCILLATION_FREQUENCY, (int, float)) or LED_OSCILLATION_FREQUENCY <= 0:
-                        print(f"Warning: Invalid led_oscillation_frequency '{LED_OSCILLATION_FREQUENCY}', using default 4.0", file=sys.stderr)
-                        LED_OSCILLATION_FREQUENCY = 4.0
+                    # Validate blink frequency parameters
+                    if not isinstance(LED_BLINK_START_FREQUENCY, (int, float)) or LED_BLINK_START_FREQUENCY <= 0:
+                        print(f"Warning: Invalid led_blink_start_frequency '{LED_BLINK_START_FREQUENCY}', using default 0.5", file=sys.stderr)
+                        LED_BLINK_START_FREQUENCY = 0.5
+                    if not isinstance(LED_BLINK_END_FREQUENCY, (int, float)) or LED_BLINK_END_FREQUENCY <= 0:
+                        print(f"Warning: Invalid led_blink_end_frequency '{LED_BLINK_END_FREQUENCY}', using default 15.0", file=sys.stderr)
+                        LED_BLINK_END_FREQUENCY = 15.0
+                    if LED_BLINK_START_FREQUENCY >= LED_BLINK_END_FREQUENCY:
+                        print(f"Warning: led_blink_start_frequency ({LED_BLINK_START_FREQUENCY}) should be < led_blink_end_frequency ({LED_BLINK_END_FREQUENCY}), adjusting", file=sys.stderr)
+                        LED_BLINK_START_FREQUENCY = 0.5
+                        LED_BLINK_END_FREQUENCY = 15.0
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -1180,16 +1184,16 @@ class NeoPixelController:
             pass
     
     def set_led_with_animation(self, led_index, color=(255, 255, 255), elapsed_time=0.0, 
-                                animation_duration=3.3, damping=2.0, frequency=4.0):
-        """Set LED with damped oscillation animation
+                                animation_duration=3.3, start_frequency=0.5, end_frequency=15.0):
+        """Set LED with blinking animation (increasing frequency)
         
         Args:
             led_index: Index of the LED (0-3)
             color: RGB color tuple (default: white)
             elapsed_time: Time since animation started (seconds)
             animation_duration: Total duration of animation (seconds)
-            damping: Damping coefficient for oscillation
-            frequency: Angular frequency for oscillation (rad/s)
+            start_frequency: Starting blink frequency (blinks per second)
+            end_frequency: Ending blink frequency (blinks per second)
         
         Returns:
             Current animation brightness (0.0-1.0)
@@ -1200,27 +1204,39 @@ class NeoPixelController:
         if led_index < 0 or led_index >= self.num_pixels:
             raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
         
-        # Calculate damped oscillation brightness
-        # Formula: brightness(t) = (1 - e^(-γt^2)) * (1 - cos(ωt)) / 2
-        # This starts at 0, stays dark longer at the beginning, oscillates, and settles to 1
-        # Using t^2 in exponential keeps LEDs dark more frequently at start without making them too dim
+        # Calculate blink state based on increasing frequency
         t = min(elapsed_time, animation_duration)  # Clamp to animation duration
         if t <= 0:
             animation_brightness = 0.0
         else:
-            # Normalize time to animation duration for consistent behavior
+            # Normalize time to animation duration
             normalized_t = t / animation_duration if animation_duration > 0 else 0
-            # Scale damping and frequency to animation duration
-            # Use t^2 to make the exponential term grow slower, keeping LEDs dark longer
-            scaled_damping = damping * normalized_t * normalized_t  # t^2 for slower start
-            scaled_frequency = frequency * normalized_t
-            # Damped oscillation with slower start: (1 - e^(-γt^2)) * (1 - cos(ωt)) / 2
-            exp_term = math.exp(-scaled_damping)
-            cos_term = math.cos(scaled_frequency)
-            # Envelope grows slower due to t^2, keeping LEDs dark longer at beginning
-            envelope = 1.0 - exp_term
-            oscillation = (1.0 - cos_term) / 2.0
-            animation_brightness = envelope * oscillation
+            
+            # Calculate current blink frequency (linear interpolation from start to end)
+            current_frequency = start_frequency + (end_frequency - start_frequency) * normalized_t
+            
+            # When frequency is very high (near end), transition to fully lit
+            # Use a smooth transition: when normalized_t > 0.8, gradually increase "on" time
+            transition_threshold = 0.8
+            if normalized_t >= transition_threshold:
+                # Smooth transition to fully lit
+                transition_progress = (normalized_t - transition_threshold) / (1.0 - transition_threshold)
+                # Gradually increase the "on" portion of the blink cycle
+                # Start with 50% duty cycle, increase to 100% (always on)
+                duty_cycle = 0.5 + 0.5 * transition_progress  # 0.5 -> 1.0
+                # Calculate blink phase
+                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
+                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
+                # Blink with increasing duty cycle
+                animation_brightness = 1.0 if phase < duty_cycle else 0.0
+            else:
+                # Blink based on current frequency (50% duty cycle)
+                # Calculate blink phase: 0 = off, 1 = on
+                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
+                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
+                # Blink: on for first half of period, off for second half
+                animation_brightness = 1.0 if phase < 0.5 else 0.0
+            
             # Clamp to [0, 1]
             animation_brightness = max(0.0, min(1.0, animation_brightness))
         
@@ -1257,15 +1273,15 @@ class NeoPixelController:
         self._current_led = -2  # Special value for "all on"
     
     def all_on_with_animation(self, color=(255, 255, 255), elapsed_time=0.0,
-                              animation_duration=3.3, damping=2.0, frequency=4.0):
-        """Turn on all LEDs with damped oscillation animation
+                              animation_duration=3.3, start_frequency=0.5, end_frequency=15.0):
+        """Turn on all LEDs with blinking animation (increasing frequency)
         
         Args:
             color: RGB color tuple (default: white)
             elapsed_time: Time since animation started (seconds)
             animation_duration: Total duration of animation (seconds)
-            damping: Damping coefficient for oscillation
-            frequency: Angular frequency for oscillation (rad/s)
+            start_frequency: Starting blink frequency (blinks per second)
+            end_frequency: Ending blink frequency (blinks per second)
         
         Returns:
             Current animation brightness (0.0-1.0)
@@ -1273,25 +1289,40 @@ class NeoPixelController:
         if not self._initialized:
             raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
         
-        # Calculate damped oscillation brightness (same as set_led_with_animation)
-        # Formula: brightness(t) = (1 - e^(-γt^2)) * (1 - cos(ωt)) / 2
-        # This starts at 0, stays dark longer at the beginning, oscillates, and settles to 1
-        # Using t^2 in exponential keeps LEDs dark more frequently at start without making them too dim
+        # Calculate blink state based on increasing frequency (same as set_led_with_animation)
         t = min(elapsed_time, animation_duration)  # Clamp to animation duration
         if t <= 0:
             animation_brightness = 0.0
         else:
+            # Normalize time to animation duration
             normalized_t = t / animation_duration if animation_duration > 0 else 0
-            # Use t^2 to make the exponential term grow slower, keeping LEDs dark longer
-            scaled_damping = damping * normalized_t * normalized_t  # t^2 for slower start
-            scaled_frequency = frequency * normalized_t
-            # Damped oscillation with slower start: (1 - e^(-γt^2)) * (1 - cos(ωt)) / 2
-            exp_term = math.exp(-scaled_damping)
-            cos_term = math.cos(scaled_frequency)
-            # Envelope grows slower due to t^2, keeping LEDs dark longer at beginning
-            envelope = 1.0 - exp_term
-            oscillation = (1.0 - cos_term) / 2.0
-            animation_brightness = envelope * oscillation
+            
+            # Calculate current blink frequency (linear interpolation from start to end)
+            current_frequency = start_frequency + (end_frequency - start_frequency) * normalized_t
+            
+            # When frequency is very high (near end), transition to fully lit
+            # Use a smooth transition: when normalized_t > 0.8, gradually increase "on" time
+            transition_threshold = 0.8
+            if normalized_t >= transition_threshold:
+                # Smooth transition to fully lit
+                transition_progress = (normalized_t - transition_threshold) / (1.0 - transition_threshold)
+                # Gradually increase the "on" portion of the blink cycle
+                # Start with 50% duty cycle, increase to 100% (always on)
+                duty_cycle = 0.5 + 0.5 * transition_progress  # 0.5 -> 1.0
+                # Calculate blink phase
+                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
+                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
+                # Blink with increasing duty cycle
+                animation_brightness = 1.0 if phase < duty_cycle else 0.0
+            else:
+                # Blink based on current frequency (50% duty cycle)
+                # Calculate blink phase: 0 = off, 1 = on
+                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
+                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
+                # Blink: on for first half of period, off for second half
+                animation_brightness = 1.0 if phase < 0.5 else 0.0
+            
+            # Clamp to [0, 1]
             animation_brightness = max(0.0, min(1.0, animation_brightness))
         
         # Set all LEDs with calculated brightness
@@ -2409,8 +2440,8 @@ def main():
                                     color=(255, 255, 255),
                                     elapsed_time=animation_elapsed,
                                     animation_duration=time_per_point,
-                                    damping=LED_OSCILLATION_DAMPING,
-                                    frequency=LED_OSCILLATION_FREQUENCY
+                                    start_frequency=LED_BLINK_START_FREQUENCY,
+                                    end_frequency=LED_BLINK_END_FREQUENCY
                                 )
                             else:
                                 # No animation: turn on immediately
@@ -2439,8 +2470,8 @@ def main():
                                 color=(255, 255, 255),
                                 elapsed_time=animation_elapsed,
                                 animation_duration=time_per_point,
-                                damping=LED_OSCILLATION_DAMPING,
-                                frequency=LED_OSCILLATION_FREQUENCY
+                                start_frequency=LED_BLINK_START_FREQUENCY,
+                                end_frequency=LED_BLINK_END_FREQUENCY
                             )
                         else:
                             # No animation: turn on all LEDs immediately

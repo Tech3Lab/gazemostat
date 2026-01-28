@@ -227,34 +227,33 @@ led_random_order: false
 #   Default: 1
 led_repetitions: 1
 
-# led_oscillation_enabled: Enable damped oscillation animation for LEDs during calibration
-#   - true:  LEDs gradually light up following a damped oscillation pattern
+# led_oscillation_enabled: Enable blinking animation for LEDs during calibration
+#   - true:  LEDs blink with increasing frequency, starting slow and getting faster until fully lit
 #   - false: LEDs turn on immediately at full brightness
 #   - Only used when gpio_led_calibration_enable is true
 #   Default: true
 led_oscillation_enabled: true
 
-# led_oscillation_damping: Damping coefficient for LED oscillation animation
-#   - Controls how quickly the oscillation settles to full brightness
-#   - Higher values = faster settling (less oscillation)
-#   - Lower values = slower settling (more oscillation, stays dark longer at start)
-#   - Typical range: 0.5 to 5.0
+# led_blink_start_frequency: Starting blink frequency for LED animation (blinks per second)
+#   - Controls how slowly LEDs blink at the beginning of the animation
+#   - Higher values = faster initial blinking
+#   - Lower values = slower initial blinking (more time in dark state)
+#   - Typical range: 0.5 to 5.0 blinks per second
 #   - Animation duration is automatically set to calib_delay + calib_dwell
 #   - Only used when led_oscillation_enabled is true
-#   - Lower values keep LEDs dark more frequently at the beginning
-#   Default: 1.0 (reduced from 2.0 to keep LEDs dark longer at start)
-led_oscillation_damping: 1.0
+#   Default: 0.5 (slow initial blinking)
+led_blink_start_frequency: 0.5
 
-# led_oscillation_frequency: Angular frequency for LED oscillation animation (radians per second)
-#   - Controls the speed of oscillation
-#   - Higher values = faster oscillation (more frequent bright/dark cycles)
-#   - Lower values = slower oscillation (longer periods in dark state)
-#   - Typical range: 1.0 to 10.0
+# led_blink_end_frequency: Ending blink frequency for LED animation (blinks per second)
+#   - Controls how fast LEDs blink near the end of the animation
+#   - Higher values = faster blinking before fully lighting up
+#   - Lower values = slower blinking before fully lighting up
+#   - Typical range: 5.0 to 20.0 blinks per second
 #   - Animation duration is automatically set to calib_delay + calib_dwell
 #   - Only used when led_oscillation_enabled is true
-#   - Lower values keep LEDs dark more frequently at the beginning
-#   Default: 2.5 (reduced from 4.0 to keep LEDs dark longer at start)
-led_oscillation_frequency: 2.5
+#   - At the end, LEDs stay fully lit (no more blinking)
+#   Default: 15.0 (fast blinking before fully lighting up)
+led_blink_end_frequency: 15.0
 
 # Note: NeoPixel hardware settings (frequency, color order, pixel type) are configured
 # on the microcontroller side. The PC only sends RGB color values via serial.
