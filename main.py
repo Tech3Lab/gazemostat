@@ -237,6 +237,7 @@ class GazeClient:
         self._calib_progress_lock = threading.Lock()
         self._calib_pt = None  # int 1..5
         self._calib_pt_started_at = None  # time.time() when CALIB_START_PT was received
+        self._calib_pt_ended_at = None  # time.time() when CALIB_RESULT_PT was received
         self._calib_pt_calx = None  # float 0..1
         self._calib_pt_caly = None  # float 0..1
 
@@ -382,12 +383,14 @@ class GazeClient:
         """Get latest calibration point progress from CAL messages.
 
         Returns:
-            dict with keys: pt (1..5 or None), started_at (float or None), calx (float or None), caly (float or None)
+            dict with keys: pt (1..5 or None), started_at (float or None), ended_at (float or None),
+                            calx (float or None), caly (float or None)
         """
         with self._calib_progress_lock:
             return {
                 "pt": self._calib_pt,
                 "started_at": self._calib_pt_started_at,
+                "ended_at": self._calib_pt_ended_at,
                 "calx": self._calib_pt_calx,
                 "caly": self._calib_pt_caly,
             }
@@ -397,6 +400,7 @@ class GazeClient:
         with self._calib_progress_lock:
             self._calib_pt = None
             self._calib_pt_started_at = None
+            self._calib_pt_ended_at = None
             self._calib_pt_calx = None
             self._calib_pt_caly = None
     
@@ -550,7 +554,8 @@ class GazeClient:
                                                             self.calib_result = {
                                                                 'average_error': avg_error if avg_error is not None else 0.0,
                                                                 'num_points': num_points if num_points is not None else 0,
-                                                                'success': success
+                                                                'success': success,
+                                                                'source': 'CALIBRATE_RESULT_SUMMARY',
                                                             }
                                             
                                             # Signal waiting thread if any
@@ -635,7 +640,8 @@ class GazeClient:
                                                         'average_error': avg_error,
                                                         'num_points': valid_points,
                                                         'success': success,
-                                                        'calib_data': calib_data
+                                                        'calib_data': calib_data,
+                                                        'source': 'CALIB_RESULT',
                                                     }
                                             elif cal_id in ("CALIB_START_PT", "CALIB_RESULT_PT"):
                                                 # Calibration point progress
@@ -647,13 +653,19 @@ class GazeClient:
                                                 except Exception:
                                                     pt = None
 
-                                                # Only CALIB_START_PT indicates the beginning of a new point (use it as our clock)
+                                                # CALIB_START_PT indicates the beginning of a new point (use it as our clock)
                                                 if cal_id == "CALIB_START_PT" and pt is not None:
                                                     with self._calib_progress_lock:
                                                         self._calib_pt = pt
                                                         self._calib_pt_started_at = time.time()
+                                                        self._calib_pt_ended_at = None
                                                         self._calib_pt_calx = calx
                                                         self._calib_pt_caly = caly
+                                                # CALIB_RESULT_PT indicates the end of a point; keep timestamp for logging/diagnostics.
+                                                elif cal_id == "CALIB_RESULT_PT" and pt is not None:
+                                                    with self._calib_progress_lock:
+                                                        if self._calib_pt == pt and self._calib_pt_started_at is not None:
+                                                            self._calib_pt_ended_at = time.time()
                                 except Exception as e:
                                     pass
                             
@@ -1749,6 +1761,43 @@ def main():
     calib_avg_error = None  # Average error value for display (when ok or low)
     current_calib_override = None  # None|'failed'|'low'
 
+    # Calibration debug logging (saved to logs/<timestamp>/calibration_debug.csv)
+    calib_debug_events = []
+    calib_debug_t0 = None
+    calib_debug_saved_for_t0 = None
+    calib_debug_last_point_key = None  # (pt, started_at)
+    calib_debug_last_point_end_key = None  # (pt, ended_at)
+    calib_debug_last_result_sig = None  # (source, num_points, avg_error, success)
+
+    def log_calibration_event(event, method=None, note=None, **fields):
+        """Append a structured calibration debug event for later CSV export."""
+        nonlocal calib_debug_events, calib_debug_t0
+        now_ts = time.time()
+        elapsed = (now_ts - calib_debug_t0) if calib_debug_t0 else None
+        ev = {
+            "wall_time": datetime.fromtimestamp(now_ts).strftime("%H:%M:%S:%f")[:-3],
+            "elapsed_s": round(elapsed, 3) if elapsed is not None else None,
+            "event": event,
+            "method": method,
+            "state": state,
+            "pt": None,
+            "calx": None,
+            "caly": None,
+            "pt_started_at": None,
+            "pt_ended_at": None,
+            "phase_elapsed_s": None,
+            "in_delay_phase": None,
+            "gp_calibrate_delay_s": GP_CALIBRATE_DELAY,
+            "gp_calibrate_timeout_s": GP_CALIBRATE_TIMEOUT,
+            "calib_result_source": None,
+            "valid_points": None,
+            "avg_error": None,
+            "success": None,
+            "note": note,
+        }
+        ev.update(fields or {})
+        calib_debug_events.append(ev)
+
     # Collection
     session_t0 = None
     next_task_id = 1
@@ -1799,9 +1848,25 @@ def main():
     def start_calibration(override=None):
         nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error
         nonlocal using_led_calib, using_overlay_calib, calib_sequence, calib_led_animation_start, led_calib_last_point_key
+        nonlocal calib_debug_events, calib_debug_t0, calib_debug_saved_for_t0
+        nonlocal calib_debug_last_point_key, calib_debug_last_point_end_key, calib_debug_last_result_sig
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
+        # Start a new calibration debug log session
+        calib_debug_t0 = time.time()
+        calib_debug_saved_for_t0 = None
+        calib_debug_events.clear()
+        calib_debug_last_point_key = None
+        calib_debug_last_point_end_key = None
+        calib_debug_last_result_sig = None
+        log_calibration_event(
+            "calibration_start",
+            method=GP_CALIBRATION_METHOD,
+            note="start_calibration called",
+            using_led_calib=GP_CALIBRATION_METHOD in ("LED", "BOTH"),
+            using_overlay_calib=(GP_CALIBRATION_METHOD in ("OVERLAY", "BOTH") and not SIM_GAZE),
+        )
         state = "CALIBRATING"
         calib_status = "orange"
         calib_quality = "none"
@@ -1823,13 +1888,15 @@ def main():
         
         # Ensure gaze data streaming is enabled (required for both calibration methods)
         if not SIM_GAZE:
-            gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
+            ok = gp._send_command('<SET ID="ENABLE_SEND_DATA" STATE="1" />')
+            log_calibration_event("enable_send_data", method=GP_CALIBRATION_METHOD, ok=bool(ok))
             time.sleep(0.1)
         
         # Initialize LED-based calibration if enabled (use Gazepoint server-side calibration with overlay hidden)
         if using_led_calib:
             # Stop any ongoing calibration first (as per Gazepoint API documentation)
-            gp.calibrate_stop()
+            ok = gp.calibrate_stop()
+            log_calibration_event("gp_calibrate_stop", method="LED", ok=bool(ok))
             time.sleep(0.1)
             
             # Clear calibration result before starting
@@ -1837,35 +1904,46 @@ def main():
                 gp.calib_result = None
             
             # Clear previous calibration points
-            gp.calibrate_clear()
+            ok = gp.calibrate_clear()
+            log_calibration_event("gp_calibrate_clear", method="LED", ok=bool(ok))
             time.sleep(0.1)
             
             # Reset calibration points to default (5 points)
-            gp.calibrate_reset()
+            ok = gp.calibrate_reset()
+            log_calibration_event("gp_calibrate_reset", method="LED", ok=bool(ok))
             time.sleep(0.1)
             
             # Set Gazepoint calibration timeout (data collection duration per point)
             timeout_ms = int(GP_CALIBRATE_TIMEOUT * 1000)
-            gp.calibrate_timeout(timeout_ms)
+            ok = gp.calibrate_timeout(timeout_ms)
+            log_calibration_event("gp_calibrate_timeout_set", method="LED", ok=bool(ok), timeout_ms=timeout_ms)
             time.sleep(0.1)
             
             # Set Gazepoint calibration delay (animation/preparation time before data collection)
             delay_ms = int(GP_CALIBRATE_DELAY * 1000)
-            gp.calibrate_delay(delay_ms)
+            ok = gp.calibrate_delay(delay_ms)
+            log_calibration_event("gp_calibrate_delay_set", method="LED", ok=bool(ok), delay_ms=delay_ms)
             time.sleep(0.1)
             
             # Hide calibration window (use LEDs instead of overlay)
-            if not gp.calibrate_show(False):
+            show_ok = gp.calibrate_show(False)
+            log_calibration_event("gp_calibrate_show", method="LED", ok=bool(show_ok), show=False)
+            if not show_ok:
                 set_info_msg("Failed to configure calibration", dur=2.0)
                 using_led_calib = False
                 # If overlay calibration is also disabled, abort
                 if not using_overlay_calib:
+                    log_calibration_event("calibration_abort", method="LED", note="Failed to configure calibration (CALIBRATE_SHOW)")
+                    save_calibration_logs(calib_debug_events, calib_debug_t0)
+                    calib_debug_saved_for_t0 = calib_debug_t0
                     state = "READY"
                     return
             
             # Start the calibration sequence and wait for ACK
             if using_led_calib:
-                if gp.calibrate_start():
+                start_ok = gp.calibrate_start()
+                log_calibration_event("gp_calibrate_start", method="LED", ok=bool(start_ok))
+                if start_ok:
                     calib_step_start = time.time()  # Record when calibration started
                 else:
                     set_info_msg("Failed to start calibration", dur=2.0)
@@ -1873,13 +1951,17 @@ def main():
                     using_led_calib = False
                     # If overlay calibration is also disabled, abort
                     if not using_overlay_calib:
+                        log_calibration_event("calibration_abort", method="LED", note="Failed to start calibration (CALIBRATE_START)")
+                        save_calibration_logs(calib_debug_events, calib_debug_t0)
+                        calib_debug_saved_for_t0 = calib_debug_t0
                         state = "READY"
                         return
         
         # Start overlay calibration if enabled (only works with real hardware)
         if using_overlay_calib:
             # Stop any ongoing calibration first (as per Gazepoint API documentation)
-            gp.calibrate_stop()
+            ok = gp.calibrate_stop()
+            log_calibration_event("gp_calibrate_stop", method="OVERLAY", ok=bool(ok))
             time.sleep(0.1)
             
             # Clear calibration result before starting
@@ -1887,38 +1969,52 @@ def main():
                 gp.calib_result = None
             
             # Clear previous calibration points
-            gp.calibrate_clear()
+            ok = gp.calibrate_clear()
+            log_calibration_event("gp_calibrate_clear", method="OVERLAY", ok=bool(ok))
             time.sleep(0.1)
             
             # Reset calibration points to default (5 points)
-            gp.calibrate_reset()
+            ok = gp.calibrate_reset()
+            log_calibration_event("gp_calibrate_reset", method="OVERLAY", ok=bool(ok))
             time.sleep(0.1)
             
             # Set calibration timeout (1 second per point)
-            gp.calibrate_timeout(1000)
+            ok = gp.calibrate_timeout(1000)
+            log_calibration_event("gp_calibrate_timeout_set", method="OVERLAY", ok=bool(ok), timeout_ms=1000)
             time.sleep(0.1)
             
             # Set calibration delay (200ms animation delay)
-            gp.calibrate_delay(200)
+            ok = gp.calibrate_delay(200)
+            log_calibration_event("gp_calibrate_delay_set", method="OVERLAY", ok=bool(ok), delay_ms=200)
             time.sleep(0.1)
             
             # Show calibration window and wait for ACK
-            if not gp.calibrate_show(True):
+            show_ok = gp.calibrate_show(True)
+            log_calibration_event("gp_calibrate_show", method="OVERLAY", ok=bool(show_ok), show=True)
+            if not show_ok:
                 set_info_msg("Failed to show calibration window", dur=2.0)
                 using_overlay_calib = False
                 # If LED calibration is also disabled, abort
                 if not using_led_calib:
+                    log_calibration_event("calibration_abort", method="OVERLAY", note="Failed to show calibration window (CALIBRATE_SHOW)")
+                    save_calibration_logs(calib_debug_events, calib_debug_t0)
+                    calib_debug_saved_for_t0 = calib_debug_t0
                     state = "READY"
                     return
             
             # Start the calibration sequence and wait for ACK
             if using_overlay_calib:
-                if not gp.calibrate_start():
+                start_ok = gp.calibrate_start()
+                log_calibration_event("gp_calibrate_start", method="OVERLAY", ok=bool(start_ok))
+                if not start_ok:
                     set_info_msg("Failed to start overlay calibration", dur=2.0)
                     gp.calibrate_show(False)  # Hide calibration window
                     using_overlay_calib = False
                     # If LED calibration is also disabled, abort
                     if not using_led_calib:
+                        log_calibration_event("calibration_abort", method="OVERLAY", note="Failed to start overlay calibration (CALIBRATE_START)")
+                        save_calibration_logs(calib_debug_events, calib_debug_t0)
+                        calib_debug_saved_for_t0 = calib_debug_t0
                         state = "READY"
                         return
 
@@ -2510,12 +2606,19 @@ def main():
                     if elapsed > 15.0:
                         last_check = getattr(start_calibration, '_last_result_check', 0)
                         if elapsed - last_check >= 3.0:  # Check every 3 seconds
-                            gp.calibrate_result_summary()
+                            ok = gp.calibrate_result_summary()
+                            log_calibration_event(
+                                "poll_result_summary",
+                                method="OVERLAY",
+                                ok=bool(ok),
+                                note=f"elapsed={elapsed:.3f}s",
+                            )
                             start_calibration._last_result_check = elapsed
                     
                     # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
                         set_info_msg("Overlay calibration timeout - please try again", dur=3.0)
+                        log_calibration_event("calibration_timeout", method="OVERLAY", note=f"elapsed={elapsed:.3f}s")
                         gp.calibrate_show(False)
                         using_overlay_calib = False
                         # If LED calibration is also disabled, abort
@@ -2524,6 +2627,10 @@ def main():
                             state = "READY"
                             calib_status = "red"
                             calib_quality = "failed"
+                            if calib_debug_saved_for_t0 != calib_debug_t0:
+                                log_calibration_event("calibration_end", method="OVERLAY", note="timeout abort -> READY")
+                                save_calibration_logs(calib_debug_events, calib_debug_t0)
+                                calib_debug_saved_for_t0 = calib_debug_t0
             
             # Handle LED-based calibration (if enabled) - uses Gazepoint server-side calibration
             led_complete = False
@@ -2534,6 +2641,7 @@ def main():
                 progress = gp.get_calibration_point_progress() if not SIM_GAZE else None
                 pt = progress.get("pt") if progress else None  # 1..5 from Gazepoint
                 pt_started_at = progress.get("started_at") if progress else None
+                pt_ended_at = progress.get("ended_at") if progress else None
                 calx = progress.get("calx") if progress else None
                 caly = progress.get("caly") if progress else None
 
@@ -2551,6 +2659,32 @@ def main():
                         calib_led_animation_start.clear()
                         if led_controller is not None:
                             led_controller.all_off()
+                        # Debug log: new point started (from CALIB_START_PT)
+                        if calib_debug_last_point_key != point_key:
+                            calib_debug_last_point_key = point_key
+                            log_calibration_event(
+                                "calib_point_start",
+                                method="LED",
+                                pt=pt,
+                                calx=calx,
+                                caly=caly,
+                                pt_started_at=pt_started_at,
+                            )
+
+                    # Debug log: point ended (from CALIB_RESULT_PT)
+                    if pt_ended_at is not None:
+                        end_key = (pt, pt_ended_at)
+                        if calib_debug_last_point_end_key != end_key:
+                            calib_debug_last_point_end_key = end_key
+                            log_calibration_event(
+                                "calib_point_end",
+                                method="LED",
+                                pt=pt,
+                                calx=calx,
+                                caly=caly,
+                                pt_started_at=pt_started_at,
+                                pt_ended_at=pt_ended_at,
+                            )
 
                     phase_elapsed = max(0.0, now - pt_started_at)
                     in_delay_phase = phase_elapsed < GP_CALIBRATE_DELAY
@@ -2628,6 +2762,24 @@ def main():
                 # Wait for Gazepoint calibration result (same as overlay calibration)
                 calib_result = gp.get_calibration_result()
                 if calib_result is not None:
+                    # Debug log: calibration result object became available
+                    src = calib_result.get("source") if isinstance(calib_result, dict) else None
+                    sig = (
+                        src,
+                        calib_result.get("num_points") if isinstance(calib_result, dict) else None,
+                        calib_result.get("average_error") if isinstance(calib_result, dict) else None,
+                        calib_result.get("success") if isinstance(calib_result, dict) else None,
+                    )
+                    if calib_debug_last_result_sig != sig:
+                        calib_debug_last_result_sig = sig
+                        log_calibration_event(
+                            "calib_result_seen",
+                            method="LED",
+                            calib_result_source=src,
+                            valid_points=sig[1],
+                            avg_error=sig[2],
+                            success=sig[3],
+                        )
                     # Calibration completed - process result
                     led_complete = True
                     using_led_calib = False
@@ -2706,12 +2858,19 @@ def main():
                     if elapsed > 15.0:
                         last_check = getattr(start_calibration, '_last_result_check', 0)
                         if elapsed - last_check >= 3.0:  # Check every 3 seconds
-                            gp.calibrate_result_summary()
+                            ok = gp.calibrate_result_summary()
+                            log_calibration_event(
+                                "poll_result_summary",
+                                method="LED",
+                                ok=bool(ok),
+                                note=f"elapsed={elapsed:.3f}s",
+                            )
                             start_calibration._last_result_check = elapsed
                     
                     # Check if calibration has been running for too long (timeout after 60 seconds)
                     if elapsed > 60.0:
                         set_info_msg("Calibration timeout - please try again", dur=3.0)
+                        log_calibration_event("calibration_timeout", method="LED", note=f"elapsed={elapsed:.3f}s")
                         gp.calibrate_show(False)
                         if led_controller is not None:
                             led_controller.all_off()
@@ -2722,6 +2881,10 @@ def main():
                             state = "READY"
                             calib_status = "red"
                             calib_quality = "failed"
+                            if calib_debug_saved_for_t0 != calib_debug_t0:
+                                log_calibration_event("calibration_end", method="LED", note="timeout abort -> READY")
+                                save_calibration_logs(calib_debug_events, calib_debug_t0)
+                                calib_debug_saved_for_t0 = calib_debug_t0
             
             # If both calibrations are complete, finalize
             if (overlay_complete or not using_overlay_calib) and (led_complete or not using_led_calib):
@@ -2729,6 +2892,10 @@ def main():
                     # Both are done, finalize
                     current_calib_override = None
                     state = "READY"
+                    if calib_debug_saved_for_t0 != calib_debug_t0:
+                        log_calibration_event("calibration_end", method=GP_CALIBRATION_METHOD, note="finalize -> READY")
+                        save_calibration_logs(calib_debug_events, calib_debug_t0)
+                        calib_debug_saved_for_t0 = calib_debug_t0
 
         # Draw
         screen.fill((0, 0, 0))
@@ -3003,6 +3170,74 @@ def save_results_logs(per_task_scores, global_score, session_t0):
                 writer.writerow([task_key, f"{per_task_scores[task_key]:.6f}"])
     except Exception as e:
         print(f"Warning: Failed to save results logs: {e}", file=sys.stderr)
+
+
+def save_calibration_logs(calib_events, calib_t0):
+    """Save calibration debug logs to logs/<timestamp>/calibration_debug.csv.
+
+    This is intentionally verbose so calibration failures (e.g., early stop after 1-2 points)
+    can be diagnosed purely from logs.
+
+    Args:
+        calib_events: List[dict] of debug events.
+        calib_t0: float UNIX timestamp (time.time()) for the calibration run (or None).
+    """
+    try:
+        # Create logs directory
+        logs_dir = Path("logs")
+        logs_dir.mkdir(exist_ok=True)
+
+        # Find or create session directory
+        if calib_t0:
+            session_timestamp = datetime.fromtimestamp(calib_t0).strftime("%Y%m%d_%H%M%S")
+        else:
+            session_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+
+        session_dir = logs_dir / session_timestamp
+        session_dir.mkdir(exist_ok=True)
+
+        calib_path = session_dir / "calibration_debug.csv"
+
+        # Stable base columns; dynamically add extras from events
+        base_fields = [
+            "wall_time",
+            "elapsed_s",
+            "event",
+            "method",
+            "state",
+            "pt",
+            "calx",
+            "caly",
+            "pt_started_at",
+            "pt_ended_at",
+            "phase_elapsed_s",
+            "in_delay_phase",
+            "gp_calibrate_delay_s",
+            "gp_calibrate_timeout_s",
+            "calib_result_source",
+            "valid_points",
+            "avg_error",
+            "success",
+            "note",
+        ]
+
+        extra_fields = []
+        for ev in calib_events or []:
+            for k in ev.keys():
+                if k not in base_fields and k not in extra_fields:
+                    extra_fields.append(k)
+
+        fieldnames = base_fields + extra_fields
+
+        with open(calib_path, "w", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=fieldnames)
+            writer.writeheader()
+            for ev in calib_events or []:
+                writer.writerow(ev)
+
+        print(f"Saved calibration debug logs to {calib_path}")
+    except Exception as e:
+        print(f"Warning: Failed to save calibration debug logs: {e}", file=sys.stderr)
 
 
 # Global model storage
