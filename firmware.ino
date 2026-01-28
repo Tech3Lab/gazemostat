@@ -40,11 +40,10 @@ void setup() {
   delay(200);
   
   // Send hello message for auto-detection (send multiple times for reliability)
-  // Send even if Serial wasn't ready, in case it becomes ready later
+  // IMPORTANT: don't guard on `if (Serial)` here; on some hosts the Serial "connected"
+  // flag/DTR may stay false even though RX/TX works (you'll still get ACKs).
   for (int i = 0; i < 5; i++) {
-    if (Serial) {
-      Serial.println("HELLO NEOPIXEL");
-    }
+    Serial.println("HELLO NEOPIXEL");
     delay(100);
   }
 }
@@ -57,13 +56,11 @@ void loop() {
     // Send HELLO every 500ms during the first 5 seconds
     static unsigned long last_hello = 0;
     if (millis() - last_hello >= 500) {
-      if (Serial) {
-        Serial.println("HELLO NEOPIXEL");
-        serial_connected = true;
-      }
+      Serial.println("HELLO NEOPIXEL");
+      serial_connected = true;
       last_hello = millis();
     }
-  } else if (!serial_connected && Serial) {
+  } else if (!serial_connected) {
     // Send one more HELLO when serial first becomes available after boot period
     Serial.println("HELLO NEOPIXEL");
     serial_connected = true;

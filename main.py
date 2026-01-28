@@ -1142,7 +1142,9 @@ class NeoPixelController:
                     raise RuntimeError(error_msg)
             else:
                 # Normalize port name to uppercase (Windows COM ports are case-sensitive)
-                port = port.upper()
+                # IMPORTANT: don't uppercase on Linux/macOS (e.g. /dev/ttyACM0 is case-sensitive)
+                if sys.platform == "win32":
+                    port = port.upper()
             
             # Check if port exists before trying to open
             try:
