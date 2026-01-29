@@ -46,14 +46,13 @@ GP_CALIBRATE_DELAY = 4.5  # Gazepoint CALIBRATE_DELAY: animation/preparation tim
 GP_CALIBRATE_TIMEOUT = 1.5  # Gazepoint CALIBRATE_TIMEOUT: duration of data collection per point (seconds)
 # Gazepoint calibration point order (used with CALIBRATE_CLEAR + CALIBRATE_ADDPOINT to impose sequencing).
 # Coordinate system per Gazepoint API: X/Y are fractions of screen width/height in [0..1].
-# Requested order: bottom right, bottom left, top left, top right, center.
+# Requested order: bottom right, bottom left, top left, top right.
 # "Bottom and Top LEDs are at complete extremities" -> use full edges (0.0 / 1.0).
 GP_CALIBRATION_POINTS = [
     (1.0, 1.0),  # bottom right
     (0.0, 1.0),  # bottom left
     (0.0, 0.0),  # top left
     (1.0, 0.0),  # top right
-    (0.5, 0.5),  # center
 ]
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
@@ -66,6 +65,10 @@ EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (redu
 LED_ORDER = [0, 1, 2, 3]  # Physical LED layout mapping (corners only): [low_right, low_left, high_left, high_right] -> physical LED indices
 LED_RANDOM_ORDER = False  # Randomize LED order during calibration
 LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
+# Blink behavior during Gazepoint delay phase (CALIBRATE_DELAY)
+LED_BLINK_DURING_DELAY = True  # If True, blink the active calibration LED during gp_calibrate_delay phase
+LED_BLINK_PERIOD_S = 0.6       # Blink period in seconds (higher = fewer serial commands)
+LED_BLINK_DUTY = 0.5           # Duty cycle (0..1): fraction of period LEDs are ON
 # Oscillation/blinking animation has been removed for reliability.
 
 # Load config.yaml if it exists
@@ -82,6 +85,7 @@ def load_config():
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
     global LED_ORDER, LED_RANDOM_ORDER, LED_REPETITIONS
+    global LED_BLINK_DURING_DELAY, LED_BLINK_PERIOD_S, LED_BLINK_DUTY
     # Oscillation/blinking animation has been removed for reliability.
     if yaml is None:
         return
@@ -146,6 +150,9 @@ def load_config():
                     LED_ORDER = config.get('led_order', LED_ORDER)
                     LED_RANDOM_ORDER = config.get('led_random_order', LED_RANDOM_ORDER)
                     LED_REPETITIONS = config.get('led_repetitions', LED_REPETITIONS)
+                    LED_BLINK_DURING_DELAY = config.get('led_blink_during_delay', LED_BLINK_DURING_DELAY)
+                    LED_BLINK_PERIOD_S = config.get('led_blink_period_s', LED_BLINK_PERIOD_S)
+                    LED_BLINK_DUTY = config.get('led_blink_duty', LED_BLINK_DUTY)
                     # Oscillation/blinking animation has been removed for reliability.
                     # Validate LED_ORDER: must be exactly 4 integers (corners only).
                     # Center is NOT configured here; it is detected from Gazepoint CALX/CALY and lights all LEDs.
@@ -156,6 +163,16 @@ def load_config():
                     if not isinstance(LED_REPETITIONS, int) or LED_REPETITIONS < 1:
                         print(f"Warning: Invalid led_repetitions '{LED_REPETITIONS}', using default 1", file=sys.stderr)
                         LED_REPETITIONS = 1
+                    # Validate blink configuration (keep conservative defaults to avoid spamming serial)
+                    if not isinstance(LED_BLINK_DURING_DELAY, bool):
+                        print(f"Warning: Invalid led_blink_during_delay '{LED_BLINK_DURING_DELAY}', using default {LED_BLINK_DURING_DELAY}", file=sys.stderr)
+                        LED_BLINK_DURING_DELAY = True
+                    if not isinstance(LED_BLINK_PERIOD_S, (int, float)) or LED_BLINK_PERIOD_S < 0.2:
+                        print(f"Warning: Invalid led_blink_period_s '{LED_BLINK_PERIOD_S}', using default 0.6", file=sys.stderr)
+                        LED_BLINK_PERIOD_S = 0.6
+                    if not isinstance(LED_BLINK_DUTY, (int, float)) or LED_BLINK_DUTY <= 0.0 or LED_BLINK_DUTY >= 1.0:
+                        print(f"Warning: Invalid led_blink_duty '{LED_BLINK_DUTY}', using default 0.5", file=sys.stderr)
+                        LED_BLINK_DUTY = 0.5
                     # Oscillation/blinking animation has been removed for reliability.
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
@@ -2675,15 +2692,26 @@ def main():
                     else:
                         # Fallback PT ordering (only used if CALX/CALY are missing).
                         # When using CALIBRATE_CLEAR + CALIBRATE_ADDPOINT, PT numbering follows the internal point list order.
-                        # Our imposed order is: PT1=low_right, PT2=low_left, PT3=high_left, PT4=high_right, PT5=center
-                        pt_map = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
+                        # Our imposed order is: PT1=low_right, PT2=low_left, PT3=high_left, PT4=high_right
+                        pt_map = {1: 0, 2: 1, 3: 2, 4: 3}
                         logical_step = pt_map.get(int(pt), -1)
 
                     if logical_step == 4:
-                        # Center step: light all LEDs (no oscillation/blink logic).
+                        # Center step: light all LEDs.
                         calib_step = 4
                         if led_controller is not None:
-                            led_controller.all_on()
+                            # Optional blink during the Gazepoint delay phase (to avoid spamming serial, we rely on idempotent calls)
+                            if LED_BLINK_DURING_DELAY and in_delay_phase:
+                                period = max(0.2, float(LED_BLINK_PERIOD_S))
+                                duty = float(LED_BLINK_DUTY)
+                                duty = max(0.01, min(0.99, duty))
+                                should_on = (phase_elapsed % period) < (period * duty)
+                                if should_on:
+                                    led_controller.all_on()
+                                else:
+                                    led_controller.all_off()
+                            else:
+                                led_controller.all_on()
                     elif 0 <= logical_step < 4 and len(LED_ORDER) >= 4:
                         # Corner step: select the configured physical LED for that corner
                         physical_led = LED_ORDER[logical_step]
@@ -2694,7 +2722,20 @@ def main():
                             calib_led_animation_start[physical_led] = pt_started_at
 
                         if led_controller is not None:
-                            led_controller.set_led(physical_led)
+                            # Blink only during the delay phase (before sampling), then hold steady during timeout/sampling.
+                            # This is implemented to minimize serial traffic: set_led/all_off are idempotent and only send
+                            # commands when the state actually changes (i.e., at blink edges or point transitions).
+                            if LED_BLINK_DURING_DELAY and in_delay_phase:
+                                period = max(0.2, float(LED_BLINK_PERIOD_S))
+                                duty = float(LED_BLINK_DUTY)
+                                duty = max(0.01, min(0.99, duty))
+                                should_on = (phase_elapsed % period) < (period * duty)
+                                if should_on:
+                                    led_controller.set_led(physical_led)
+                                else:
+                                    led_controller.all_off()
+                            else:
+                                led_controller.set_led(physical_led)
                     else:
                         calib_step = -1
                         if led_controller is not None:

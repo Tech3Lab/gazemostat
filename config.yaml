@@ -249,6 +249,26 @@ led_random_order: false
 #   Default: 1
 led_repetitions: 1
 
+# led_blink_during_delay: Blink the calibration LEDs during Gazepoint's delay phase (CALIBRATE_DELAY)
+#   - true:  Blink the active calibration LED(s) only during the gp_calibrate_delay period (before sampling starts)
+#   - false: Keep LEDs steady (current behavior)
+#   - Implemented to avoid spamming serial: commands are only sent when the LED toggles state
+#   - Only used when gpio_led_calibration_enable is true
+#   Default: true
+led_blink_during_delay: true
+
+# led_blink_period_s: Blink period in seconds (higher value = fewer serial commands)
+#   - Example: 0.6 means ~1.67 blinks/sec (≈ 3 serial writes/sec worst-case with our protocol)
+#   - Must be >= 0.2
+#   Default: 0.6
+led_blink_period_s: 0.6
+
+# led_blink_duty: Blink duty cycle (0..1), fraction of each period LEDs are ON
+#   - Example: 0.5 means equal ON/OFF time
+#   - Must be 0 < duty < 1
+#   Default: 0.5
+led_blink_duty: 0.5
+
 # Note: NeoPixel hardware settings (frequency, color order, pixel type) are configured
 # on the microcontroller side. The PC only sends RGB color values via serial.
 
