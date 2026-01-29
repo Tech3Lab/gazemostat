@@ -44,6 +44,17 @@ CALIB_DELAY = 0.0  # Internal delay for LED timing (set to 0, use gp_calibrate_d
 CALIB_DWELL = 6.0  # Duration to collect samples (seconds)
 GP_CALIBRATE_DELAY = 4.5  # Gazepoint CALIBRATE_DELAY: animation/preparation time before data collection (seconds)
 GP_CALIBRATE_TIMEOUT = 1.5  # Gazepoint CALIBRATE_TIMEOUT: duration of data collection per point (seconds)
+# Gazepoint calibration point order (used with CALIBRATE_CLEAR + CALIBRATE_ADDPOINT to impose sequencing).
+# Coordinate system per Gazepoint API: X/Y are fractions of screen width/height in [0..1].
+# Requested order: bottom right, bottom left, top left, top right, center.
+# "Bottom and Top LEDs are at complete extremities" -> use full edges (0.0 / 1.0).
+GP_CALIBRATION_POINTS = [
+    (1.0, 1.0),  # bottom right
+    (0.0, 1.0),  # bottom left
+    (0.0, 0.0),  # top left
+    (1.0, 0.0),  # top right
+    (0.5, 0.5),  # center
+]
 GPIO_CHIP = "/dev/gpiochip0"  # GPIO chip device for LattePanda
 GPIO_BTN_MARKER_DEBOUNCE = 0.2  # Marker button debounce time in seconds
 GPIO_BTN_EYE_VIEW_SIM = True  # Enable keyboard shortcut for eye view
@@ -307,11 +318,31 @@ class GazeClient:
 
     def calibrate_clear(self):
         """Clear the internal list of calibration points"""
-        return self._send_command('<SET ID="CALIBRATE_CLEAR" />')
+        return self._send_command('<SET ID="CALIBRATE_CLEAR" />', wait_for_ack="CALIBRATE_CLEAR")
 
     def calibrate_reset(self):
         """Reset the internal list of calibration points to default values"""
-        return self._send_command('<SET ID="CALIBRATE_RESET" />')
+        return self._send_command('<SET ID="CALIBRATE_RESET" />', wait_for_ack="CALIBRATE_RESET")
+
+    def calibrate_addpoint(self, x, y):
+        """Add a calibration point to the internal point list (OpenGaze API v2, Section 3.10).
+
+        Args:
+            x: X coordinate in normalized screen space [0..1] (percentage of screen width)
+            y: Y coordinate in normalized screen space [0..1] (percentage of screen height)
+
+        Returns:
+            True if ACK received, False otherwise
+        """
+        try:
+            xf = float(x)
+            yf = float(y)
+        except Exception:
+            return False
+        return self._send_command(
+            f'<SET ID="CALIBRATE_ADDPOINT" X="{xf:.5f}" Y="{yf:.5f}" />',
+            wait_for_ack="CALIBRATE_ADDPOINT",
+        )
 
 
     def calibrate_timeout(self, timeout_ms=1000):
@@ -1824,10 +1855,15 @@ def main():
             log_calibration_event("gp_calibrate_clear", method="LED", ok=bool(ok))
             time.sleep(0.1)
             
-            # Reset calibration points to default (5 points)
-            ok = gp.calibrate_reset()
-            log_calibration_event("gp_calibrate_reset", method="LED", ok=bool(ok))
-            time.sleep(0.1)
+            # Add calibration points in the requested order (imposes point sequence)
+            add_ok = True
+            for (x, y) in GP_CALIBRATION_POINTS:
+                ok = gp.calibrate_addpoint(x, y)
+                add_ok = add_ok and bool(ok)
+                log_calibration_event("gp_calibrate_addpoint", method="LED", ok=bool(ok), x=x, y=y)
+                time.sleep(0.05)
+            if not add_ok:
+                log_calibration_event("gp_calibrate_addpoint_failed", method="LED", note="One or more ADDPOINT commands failed")
             
             # Set Gazepoint calibration timeout (data collection duration per point)
             timeout_ms = int(GP_CALIBRATE_TIMEOUT * 1000)
@@ -1890,10 +1926,15 @@ def main():
             log_calibration_event("gp_calibrate_clear", method="OVERLAY", ok=bool(ok))
             time.sleep(0.1)
             
-            # Reset calibration points to default (5 points)
-            ok = gp.calibrate_reset()
-            log_calibration_event("gp_calibrate_reset", method="OVERLAY", ok=bool(ok))
-            time.sleep(0.1)
+            # Add calibration points in the requested order (imposes point sequence)
+            add_ok = True
+            for (x, y) in GP_CALIBRATION_POINTS:
+                ok = gp.calibrate_addpoint(x, y)
+                add_ok = add_ok and bool(ok)
+                log_calibration_event("gp_calibrate_addpoint", method="OVERLAY", ok=bool(ok), x=x, y=y)
+                time.sleep(0.05)
+            if not add_ok:
+                log_calibration_event("gp_calibrate_addpoint_failed", method="OVERLAY", note="One or more ADDPOINT commands failed")
             
             # Set calibration timeout (1 second per point)
             ok = gp.calibrate_timeout(1000)
@@ -2632,9 +2673,10 @@ def main():
                         except Exception:
                             logical_step = -1
                     else:
-                        # Gazepoint API example ordering:
-                        # PT1=center, PT2=high_right, PT3=low_right, PT4=low_left, PT5=high_left
-                        pt_map = {1: 4, 2: 3, 3: 0, 4: 1, 5: 2}
+                        # Fallback PT ordering (only used if CALX/CALY are missing).
+                        # When using CALIBRATE_CLEAR + CALIBRATE_ADDPOINT, PT numbering follows the internal point list order.
+                        # Our imposed order is: PT1=low_right, PT2=low_left, PT3=high_left, PT4=high_right, PT5=center
+                        pt_map = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
                         logical_step = pt_map.get(int(pt), -1)
 
                     if logical_step == 4:
