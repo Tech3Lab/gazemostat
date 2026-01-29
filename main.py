@@ -55,9 +55,7 @@ EYE_VIEW_TIMEOUT = 0.8  # Timeout in seconds before clearing eye view data (redu
 LED_ORDER = [0, 1, 2, 3]  # Physical LED layout mapping (corners only): [low_right, low_left, high_left, high_right] -> physical LED indices
 LED_RANDOM_ORDER = False  # Randomize LED order during calibration
 LED_REPETITIONS = 1  # Number of times each LED is displayed during calibration
-LED_OSCILLATION_ENABLED = True  # Enable blinking animation for LEDs
-LED_BLINK_START_FREQUENCY = 0.5  # Starting blink frequency (blinks per second, slow)
-LED_BLINK_END_FREQUENCY = 15.0  # Ending blink frequency (blinks per second, fast)
+# Oscillation/blinking animation has been removed for reliability.
 
 # Load config.yaml if it exists
 def load_config():
@@ -73,7 +71,7 @@ def load_config():
     global GPIO_BTN_EYE_VIEW_SIM, GPIO_BTN_EYE_VIEW_ENABLE, GPIO_BTN_EYE_VIEW_PIN
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
     global LED_ORDER, LED_RANDOM_ORDER, LED_REPETITIONS
-    global LED_OSCILLATION_ENABLED, LED_BLINK_START_FREQUENCY, LED_BLINK_END_FREQUENCY
+    # Oscillation/blinking animation has been removed for reliability.
     if yaml is None:
         return
     config_path = "config.yaml"
@@ -137,9 +135,7 @@ def load_config():
                     LED_ORDER = config.get('led_order', LED_ORDER)
                     LED_RANDOM_ORDER = config.get('led_random_order', LED_RANDOM_ORDER)
                     LED_REPETITIONS = config.get('led_repetitions', LED_REPETITIONS)
-                    LED_OSCILLATION_ENABLED = config.get('led_oscillation_enabled', LED_OSCILLATION_ENABLED)
-                    LED_BLINK_START_FREQUENCY = config.get('led_blink_start_frequency', LED_BLINK_START_FREQUENCY)
-                    LED_BLINK_END_FREQUENCY = config.get('led_blink_end_frequency', LED_BLINK_END_FREQUENCY)
+                    # Oscillation/blinking animation has been removed for reliability.
                     # Validate LED_ORDER: must be exactly 4 integers (corners only).
                     # Center is NOT configured here; it is detected from Gazepoint CALX/CALY and lights all LEDs.
                     if not isinstance(LED_ORDER, list) or len(LED_ORDER) != 4 or any((not isinstance(x, int)) for x in LED_ORDER):
@@ -149,17 +145,7 @@ def load_config():
                     if not isinstance(LED_REPETITIONS, int) or LED_REPETITIONS < 1:
                         print(f"Warning: Invalid led_repetitions '{LED_REPETITIONS}', using default 1", file=sys.stderr)
                         LED_REPETITIONS = 1
-                    # Validate blink frequency parameters
-                    if not isinstance(LED_BLINK_START_FREQUENCY, (int, float)) or LED_BLINK_START_FREQUENCY <= 0:
-                        print(f"Warning: Invalid led_blink_start_frequency '{LED_BLINK_START_FREQUENCY}', using default 0.5", file=sys.stderr)
-                        LED_BLINK_START_FREQUENCY = 0.5
-                    if not isinstance(LED_BLINK_END_FREQUENCY, (int, float)) or LED_BLINK_END_FREQUENCY <= 0:
-                        print(f"Warning: Invalid led_blink_end_frequency '{LED_BLINK_END_FREQUENCY}', using default 15.0", file=sys.stderr)
-                        LED_BLINK_END_FREQUENCY = 15.0
-                    if LED_BLINK_START_FREQUENCY >= LED_BLINK_END_FREQUENCY:
-                        print(f"Warning: led_blink_start_frequency ({LED_BLINK_START_FREQUENCY}) should be < led_blink_end_frequency ({LED_BLINK_END_FREQUENCY}), adjusting", file=sys.stderr)
-                        LED_BLINK_START_FREQUENCY = 0.5
-                        LED_BLINK_END_FREQUENCY = 15.0
+                    # Oscillation/blinking animation has been removed for reliability.
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
 
@@ -1074,16 +1060,66 @@ class NeoPixelController:
         
         return None
     
-    def _send_command(self, command):
-        """Send command to microcontroller via serial"""
+    def _drain_input(self, max_lines=50, max_time_s=0.05):
+        """Drain any pending serial input (HELLO/ACK/ERROR), to avoid buffer buildup."""
+        if self._serial is None:
+            return
+        t0 = time.time()
+        lines = 0
+        try:
+            while lines < max_lines and (time.time() - t0) < max_time_s and self._serial.in_waiting > 0:
+                _ = self._serial.readline()
+                lines += 1
+        except Exception:
+            pass
+
+    def _read_response(self, timeout_s=0.25):
+        """Read lines until we see ACK or ERROR (ignoring HELLO), or until timeout."""
+        if self._serial is None:
+            return None
+        deadline = time.time() + timeout_s
+        try:
+            while time.time() < deadline:
+                if self._serial.in_waiting > 0:
+                    line = self._serial.readline().decode('utf-8', errors='ignore').strip()
+                    if not line:
+                        continue
+                    up = line.upper()
+                    # Ignore periodic boot/handshake messages
+                    if "HELLO" in up and "NEOPIXEL" in up:
+                        continue
+                    if up.startswith("ACK") or up.startswith("ERROR"):
+                        return line
+                else:
+                    time.sleep(0.005)
+        except Exception:
+            return None
+        return None
+
+    def _send_command(self, command, expect_ack=True, timeout_s=0.25):
+        """Send command to microcontroller via serial and read responses.
+
+        This prevents the RP2040 from blocking on Serial.println("ACK") when the host never reads,
+        and makes LED behavior reliable during long-running calibration loops.
+        """
         if not self._initialized or self._serial is None:
             return False
-        
+
         try:
             with self._lock:
+                # Drain any backlog (e.g., HELLO spam after reset)
+                self._drain_input()
                 cmd_str = command + "\n"
                 self._serial.write(cmd_str.encode('utf-8'))
                 self._serial.flush()
+                if not expect_ack:
+                    return True
+                resp = self._read_response(timeout_s=timeout_s)
+                # If device is chatty or slow, still consider write successful; but log ERRORs.
+                if resp is None:
+                    return True
+                if resp.upper().startswith("ERROR"):
+                    print(f"Warning: NeoPixel controller error for '{command}': {resp}", file=sys.stderr)
                 return True
         except Exception as e:
             print(f"Warning: Failed to send NeoPixel command '{command}': {e}", file=sys.stderr)
@@ -1193,10 +1229,12 @@ class NeoPixelController:
             # Clear any pending data
             if self._serial.in_waiting > 0:
                 self._serial.reset_input_buffer()
+            # Drain any boot-time HELLO spam (avoids mixing with ACK reads)
+            self._drain_input(max_lines=200, max_time_s=0.5)
             
             # Send initialization command with brightness
             brightness_int = int(255 * self.brightness)
-            self._send_command(f"INIT:{self.num_pixels}:{brightness_int}")
+            self._send_command(f"INIT:{self.num_pixels}:{brightness_int}", expect_ack=True, timeout_s=0.5)
             
             # Turn off all pixels initially
             self.all_off()
@@ -1272,8 +1310,8 @@ class NeoPixelController:
         # Turn off all pixels first, then set the active one
         # Only do ALL:OFF when switching into single-pixel mode or changing the active pixel
         if self._last_mode != "single" or self._last_led != led_index:
-            self._send_command("ALL:OFF")
-        self._send_command(f"PIXEL:{led_index}:{r}:{g}:{b}")
+            self._send_command("ALL:OFF", expect_ack=True)
+        self._send_command(f"PIXEL:{led_index}:{r}:{g}:{b}", expect_ack=True)
         
         self._current_led = led_index
         self._last_mode = "single"
@@ -1282,66 +1320,6 @@ class NeoPixelController:
         if led_index >= 0:
             pass
     
-    def set_led_with_animation(self, led_index, color=(255, 255, 255), elapsed_time=0.0, 
-                                animation_duration=3.3, start_frequency=0.5, end_frequency=15.0):
-        """Set LED with blinking animation (increasing frequency)
-        
-        Args:
-            led_index: Index of the LED (0-3)
-            color: RGB color tuple (default: white)
-            elapsed_time: Time since animation started (seconds)
-            animation_duration: Total duration of animation (seconds)
-            start_frequency: Starting blink frequency (blinks per second)
-            end_frequency: Ending blink frequency (blinks per second)
-        
-        Returns:
-            Current animation brightness (0.0-1.0)
-        """
-        if not self._initialized:
-            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
-        
-        if led_index < 0 or led_index >= self.num_pixels:
-            raise ValueError(f"LED index {led_index} out of range (0-{self.num_pixels-1})")
-        
-        # Calculate blink state based on increasing frequency
-        t = min(elapsed_time, animation_duration)  # Clamp to animation duration
-        if t <= 0:
-            animation_brightness = 0.0
-        else:
-            # Normalize time to animation duration
-            normalized_t = t / animation_duration if animation_duration > 0 else 0
-            
-            # Calculate current blink frequency (linear interpolation from start to end)
-            current_frequency = start_frequency + (end_frequency - start_frequency) * normalized_t
-            
-            # When frequency is very high (near end), transition to fully lit
-            # Use a smooth transition: when normalized_t > 0.8, gradually increase "on" time
-            transition_threshold = 0.8
-            if normalized_t >= transition_threshold:
-                # Smooth transition to fully lit
-                transition_progress = (normalized_t - transition_threshold) / (1.0 - transition_threshold)
-                # Gradually increase the "on" portion of the blink cycle
-                # Start with 50% duty cycle, increase to 100% (always on)
-                duty_cycle = 0.5 + 0.5 * transition_progress  # 0.5 -> 1.0
-                # Calculate blink phase
-                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
-                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
-                # Blink with increasing duty cycle
-                animation_brightness = 1.0 if phase < duty_cycle else 0.0
-            else:
-                # Blink based on current frequency (50% duty cycle)
-                # Calculate blink phase: 0 = off, 1 = on
-                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
-                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
-                # Blink: on for first half of period, off for second half
-                animation_brightness = 1.0 if phase < 0.5 else 0.0
-            
-            # Clamp to [0, 1]
-            animation_brightness = max(0.0, min(1.0, animation_brightness))
-        
-        # Set LED with calculated brightness
-        self.set_led(led_index, color, animation_brightness)
-        return animation_brightness
     
     def all_off(self):
         """Turn off all NeoPixels"""
@@ -1349,7 +1327,7 @@ class NeoPixelController:
             return
         if self._last_mode == "off":
             return
-        self._send_command("ALL:OFF")
+        self._send_command("ALL:OFF", expect_ack=True)
         self._current_led = -1
         self._last_mode = "off"
         self._last_led = None
@@ -1381,68 +1359,12 @@ class NeoPixelController:
         if self._last_mode == "all" and self._last_rgb == (r, g, b):
             return
         
-        self._send_command(f"ALL:ON:{r}:{g}:{b}")
+        self._send_command(f"ALL:ON:{r}:{g}:{b}", expect_ack=True)
         self._current_led = -2  # Special value for "all on"
         self._last_mode = "all"
         self._last_led = None
         self._last_rgb = (r, g, b)
     
-    def all_on_with_animation(self, color=(255, 255, 255), elapsed_time=0.0,
-                              animation_duration=3.3, start_frequency=0.5, end_frequency=15.0):
-        """Turn on all LEDs with blinking animation (increasing frequency)
-        
-        Args:
-            color: RGB color tuple (default: white)
-            elapsed_time: Time since animation started (seconds)
-            animation_duration: Total duration of animation (seconds)
-            start_frequency: Starting blink frequency (blinks per second)
-            end_frequency: Ending blink frequency (blinks per second)
-        
-        Returns:
-            Current animation brightness (0.0-1.0)
-        """
-        if not self._initialized:
-            raise RuntimeError("NeoPixel controller not initialized. Call start() first.")
-        
-        # Calculate blink state based on increasing frequency (same as set_led_with_animation)
-        t = min(elapsed_time, animation_duration)  # Clamp to animation duration
-        if t <= 0:
-            animation_brightness = 0.0
-        else:
-            # Normalize time to animation duration
-            normalized_t = t / animation_duration if animation_duration > 0 else 0
-            
-            # Calculate current blink frequency (linear interpolation from start to end)
-            current_frequency = start_frequency + (end_frequency - start_frequency) * normalized_t
-            
-            # When frequency is very high (near end), transition to fully lit
-            # Use a smooth transition: when normalized_t > 0.8, gradually increase "on" time
-            transition_threshold = 0.8
-            if normalized_t >= transition_threshold:
-                # Smooth transition to fully lit
-                transition_progress = (normalized_t - transition_threshold) / (1.0 - transition_threshold)
-                # Gradually increase the "on" portion of the blink cycle
-                # Start with 50% duty cycle, increase to 100% (always on)
-                duty_cycle = 0.5 + 0.5 * transition_progress  # 0.5 -> 1.0
-                # Calculate blink phase
-                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
-                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
-                # Blink with increasing duty cycle
-                animation_brightness = 1.0 if phase < duty_cycle else 0.0
-            else:
-                # Blink based on current frequency (50% duty cycle)
-                # Calculate blink phase: 0 = off, 1 = on
-                blink_period = 1.0 / current_frequency if current_frequency > 0 else float('inf')
-                phase = (t % blink_period) / blink_period if blink_period < float('inf') else 0.0
-                # Blink: on for first half of period, off for second half
-                animation_brightness = 1.0 if phase < 0.5 else 0.0
-            
-            # Clamp to [0, 1]
-            animation_brightness = max(0.0, min(1.0, animation_brightness))
-        
-        # Set all LEDs with calculated brightness
-        self.all_on(color, animation_brightness)
-        return animation_brightness
     
     def set_color(self, led_index, r, g, b):
         """Set specific RGB color for a NeoPixel"""
@@ -1469,7 +1391,7 @@ class NeoPixelController:
         
         self.brightness = brightness
         brightness_int = int(255 * brightness)
-        self._send_command(f"BRIGHTNESS:{brightness_int}")
+        self._send_command(f"BRIGHTNESS:{brightness_int}", expect_ack=True)
     
     def test_led(self, led_index, duration=2.0, color=(255, 255, 255)):
         """Test a specific NeoPixel by turning it on for a duration"""
@@ -2656,8 +2578,6 @@ def main():
                     if is_new_point:
                         led_calib_last_point_key = point_key
                         calib_led_animation_start.clear()
-                        if led_controller is not None:
-                            led_controller.all_off()
                         # Debug log: new point started (from CALIB_START_PT)
                         if calib_debug_last_point_key != point_key:
                             calib_debug_last_point_key = point_key
@@ -2718,19 +2638,10 @@ def main():
                         logical_step = pt_map.get(int(pt), -1)
 
                     if logical_step == 4:
-                        # Center step: all LEDs behave like other points (blink during delay, solid during timeout)
+                        # Center step: light all LEDs (no oscillation/blink logic).
                         calib_step = 4
                         if led_controller is not None:
-                            if LED_OSCILLATION_ENABLED and in_delay_phase:
-                                led_controller.all_on_with_animation(
-                                    color=(255, 255, 255),
-                                    elapsed_time=phase_elapsed,
-                                    animation_duration=max(0.001, GP_CALIBRATE_DELAY),
-                                    start_frequency=LED_BLINK_START_FREQUENCY,
-                                    end_frequency=LED_BLINK_END_FREQUENCY,
-                                )
-                            else:
-                                led_controller.all_on()
+                            led_controller.all_on()
                     elif 0 <= logical_step < 4 and len(LED_ORDER) >= 4:
                         # Corner step: select the configured physical LED for that corner
                         physical_led = LED_ORDER[logical_step]
@@ -2741,18 +2652,7 @@ def main():
                             calib_led_animation_start[physical_led] = pt_started_at
 
                         if led_controller is not None:
-                            if LED_OSCILLATION_ENABLED and in_delay_phase:
-                                animation_elapsed = now - calib_led_animation_start[physical_led]
-                                led_controller.set_led_with_animation(
-                                    physical_led,
-                                    color=(255, 255, 255),
-                                    elapsed_time=animation_elapsed,
-                                    animation_duration=max(0.001, GP_CALIBRATE_DELAY),
-                                    start_frequency=LED_BLINK_START_FREQUENCY,
-                                    end_frequency=LED_BLINK_END_FREQUENCY,
-                                )
-                            else:
-                                led_controller.set_led(physical_led)
+                            led_controller.set_led(physical_led)
                     else:
                         calib_step = -1
                         if led_controller is not None:
