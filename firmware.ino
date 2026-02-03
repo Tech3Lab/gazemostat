@@ -35,6 +35,21 @@
 #define OLED_ADDR_0  0x3C
 #define OLED_ADDR_1  0x3D
 
+// OLED Bonnet joystick + buttons (GPIO)
+//
+// IMPORTANT:
+// - The Bonnet's joystick + A/B buttons are typically simple switches to GND.
+// - To read them on RP2040, you must wire each button signal to an RP2040 GPIO.
+// - These defaults assume you wired them to GP6..GP12. Adjust to match your wiring.
+// - We use INPUT_PULLUP, so "pressed" reads LOW.
+#define BTN_UP_PIN      6
+#define BTN_DOWN_PIN    7
+#define BTN_LEFT_PIN    8
+#define BTN_RIGHT_PIN   9
+#define BTN_CENTER_PIN  10
+#define BTN_A_PIN       11
+#define BTN_B_PIN       12
+
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
@@ -47,11 +62,113 @@ uint8_t global_brightness = 76;  // Default: 30% (76/255)
 // OLED state
 bool oled_available = false;
 uint8_t oled_addr = OLED_ADDR_0;
+bool oled_input_feedback_enabled = true;
+
+// Button state (bitmask)
+// bit0..bit6 = UP,DOWN,LEFT,RIGHT,CENTER,A,B
+uint8_t buttons_prev = 0;
+unsigned long last_button_poll_ms = 0;
+const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz
 
 // Track if we've sent initial HELLO messages and when to stop
 unsigned long boot_time;
 bool serial_connected = false;
 const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
+
+static uint8_t readButtons() {
+  uint8_t s = 0;
+  if (digitalRead(BTN_UP_PIN) == LOW) s |= (1 << 0);
+  if (digitalRead(BTN_DOWN_PIN) == LOW) s |= (1 << 1);
+  if (digitalRead(BTN_LEFT_PIN) == LOW) s |= (1 << 2);
+  if (digitalRead(BTN_RIGHT_PIN) == LOW) s |= (1 << 3);
+  if (digitalRead(BTN_CENTER_PIN) == LOW) s |= (1 << 4);
+  if (digitalRead(BTN_A_PIN) == LOW) s |= (1 << 5);
+  if (digitalRead(BTN_B_PIN) == LOW) s |= (1 << 6);
+  return s;
+}
+
+static void drawKeyBox(int16_t x, int16_t y, int16_t w, int16_t h, const char *label, bool pressed) {
+  if (pressed) {
+    display.fillRect(x, y, w, h, SSD1306_WHITE);
+    display.drawRect(x, y, w, h, SSD1306_BLACK);
+    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
+  } else {
+    display.drawRect(x, y, w, h, SSD1306_WHITE);
+    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+  }
+
+  // Center label
+  int16_t x1, y1;
+  uint16_t tw, th;
+  display.getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
+  int16_t tx = x + (w - (int16_t)tw) / 2;
+  int16_t ty = y + (h - (int16_t)th) / 2;
+  display.setCursor(tx, ty);
+  display.print(label);
+}
+
+static void renderButtonFeedback(uint8_t buttons) {
+  if (!oled_available || !oled_input_feedback_enabled) return;
+
+  // Layout: D-pad left, A/B right, status bottom
+  display.clearDisplay();
+  display.setTextSize(1);
+
+  // D-pad boxes
+  bool up = buttons & (1 << 0);
+  bool down = buttons & (1 << 1);
+  bool left = buttons & (1 << 2);
+  bool right = buttons & (1 << 3);
+  bool center = buttons & (1 << 4);
+  bool a = buttons & (1 << 5);
+  bool b = buttons & (1 << 6);
+
+  drawKeyBox(20, 0, 24, 14, "^", up);
+  drawKeyBox(0, 16, 24, 14, "<", left);
+  drawKeyBox(20, 16, 24, 14, "OK", center);
+  drawKeyBox(40, 16, 24, 14, ">", right);
+  drawKeyBox(20, 32, 24, 14, "v", down);
+
+  // A/B buttons (distinct visuals)
+  drawKeyBox(90, 14, 34, 16, "A", a);
+  drawKeyBox(90, 34, 34, 16, "B", b);
+
+  // Title
+  display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
+  display.setCursor(0, 0);
+  display.print("INPUTS");
+
+  // Pressed summary
+  display.setCursor(0, 52);
+  display.print("Pressed: ");
+  bool any = false;
+  if (up) { display.print("UP "); any = true; }
+  if (down) { display.print("DN "); any = true; }
+  if (left) { display.print("LT "); any = true; }
+  if (right) { display.print("RT "); any = true; }
+  if (center) { display.print("OK "); any = true; }
+  if (a) { display.print("A "); any = true; }
+  if (b) { display.print("B "); any = true; }
+  if (!any) display.print("-");
+
+  display.display();
+}
+
+static void pollButtonsAndUpdateDisplay() {
+  if (!oled_available || !oled_input_feedback_enabled) return;
+  unsigned long now = millis();
+  if (now - last_button_poll_ms < BUTTON_POLL_MS) return;
+  last_button_poll_ms = now;
+
+  uint8_t cur = readButtons();
+  if (cur != buttons_prev) {
+    // Optional serial debug: emit only on change
+    Serial.print("BTN:");
+    Serial.println(cur, BIN);
+    buttons_prev = cur;
+    renderButtonFeedback(cur);
+  }
+}
 
 static bool i2cProbe(uint8_t addr) {
   Wire.beginTransmission(addr);
@@ -171,6 +288,15 @@ void setup() {
   boot_time = millis();
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
+
+  // Configure button GPIOs
+  pinMode(BTN_UP_PIN, INPUT_PULLUP);
+  pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
+  pinMode(BTN_LEFT_PIN, INPUT_PULLUP);
+  pinMode(BTN_RIGHT_PIN, INPUT_PULLUP);
+  pinMode(BTN_CENTER_PIN, INPUT_PULLUP);
+  pinMode(BTN_A_PIN, INPUT_PULLUP);
+  pinMode(BTN_B_PIN, INPUT_PULLUP);
   
   // Initialize NeoPixel strip (don't wait for Serial on RP2040)
   strip.begin();
@@ -179,6 +305,11 @@ void setup() {
 
   // Initialize OLED (non-fatal if missing)
   oledInit();
+  if (oled_available) {
+    // Render initial input UI so you see something immediately
+    buttons_prev = readButtons();
+    renderButtonFeedback(buttons_prev);
+  }
   
   // Wait a bit for serial to be ready, but don't block forever
   // On RP2040, Serial might not be available immediately
@@ -201,6 +332,9 @@ void setup() {
 }
 
 void loop() {
+  // Update OLED feedback for joystick/buttons (if enabled)
+  pollButtonsAndUpdateDisplay();
+
   // Send HELLO messages periodically for first few seconds after boot
   // This helps with auto-detection even if serial wasn't ready during setup()
   unsigned long elapsed = millis() - boot_time;
@@ -355,6 +489,33 @@ void processCommand(String cmd) {
           Serial.println("UNKNOWN");
         }
       }
+      return;
+    }
+
+    if (sub == "FEEDBACK") {
+      // OLED:FEEDBACK:ON|OFF|STATUS
+      String arg = getParam(params, 1);
+      arg.toUpperCase();
+      if (arg == "ON" || arg == "1") {
+        oled_input_feedback_enabled = true;
+        if (oled_available) {
+          buttons_prev = readButtons();
+          renderButtonFeedback(buttons_prev);
+        }
+        Serial.println("OLED:FEEDBACK:ON");
+        return;
+      }
+      if (arg == "OFF" || arg == "0") {
+        oled_input_feedback_enabled = false;
+        Serial.println("OLED:FEEDBACK:OFF");
+        return;
+      }
+      if (arg == "STATUS" || arg.length() == 0) {
+        Serial.print("OLED:FEEDBACK:");
+        Serial.println(oled_input_feedback_enabled ? "ON" : "OFF");
+        return;
+      }
+      Serial.println("ERROR:Invalid FEEDBACK arg");
       return;
     }
 
