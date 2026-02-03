@@ -30,6 +30,13 @@ DEFAULT_FIRMWARE_FILE = "firmware.ino"  # Default firmware filename
 BOARD_FQBN = "rp2040:rp2040:rpipico"  # Raspberry Pi Pico / RP2040
 LIBRARY_NAME = "Adafruit NeoPixel"
 LIBRARY_VERSION = "1.11.2"  # Or latest
+
+# Additional libraries for OLED support (SSD1306 + GFX stack)
+OLED_LIBRARIES = [
+    "Adafruit SSD1306",
+    "Adafruit GFX Library",
+    "Adafruit BusIO",
+]
 CONFIG_FILE = "config.yaml"  # Configuration file path
 
 # Windows-specific settings
@@ -170,6 +177,21 @@ def setup_arduino_cli(cli_path):
         return False
     
     print_success(f"{LIBRARY_NAME} library installed")
+
+    # Install OLED libraries
+    for lib in OLED_LIBRARIES:
+        print_info(f"Installing {lib} library...")
+        success, stdout, stderr = run_arduino_cli(cli_path, ["lib", "install", lib])
+        if not success:
+            # Don't hard-fail if it's already installed; arduino-cli sometimes returns non-0 with such text
+            already = (stdout + "\n" + stderr).lower()
+            if "already installed" in already or "already exists" in already:
+                print_info(f"{lib} already installed")
+                continue
+            print_error(f"Failed to install library {lib}: {stderr}")
+            return False
+        print_success(f"{lib} library installed")
+
     return True
 
 

@@ -1,23 +1,171 @@
-// NeoPixel Controller for LattePanda Iota RP2040
-// Implements serial protocol for controlling WS2812/SK6812 NeoPixels
+// RP2040 Co-Processor Firmware for LattePanda Iota
+// - NeoPixel controller (WS2812/SK6812)
+// - OLED controller/test for Adafruit 128x64 OLED Bonnet (SSD1306 over I2C)
+//
+// Serial protocol (line-based):
+//   - PING / HELLO -> replies with HELLO messages
+//   - NeoPixels:
+//       INIT:<count>:<brightness>
+//       PIXEL:<idx>:<r>:<g>:<b>
+//       ALL:ON:<r>:<g>:<b>
+//       ALL:OFF
+//       BRIGHTNESS:<value>
+//   - OLED:
+//       OLED:INIT
+//       OLED:TEST
 
 #include <Adafruit_NeoPixel.h>
+#include <Wire.h>
+#include <Adafruit_GFX.h>
+#include <Adafruit_SSD1306.h>
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
-#define NEOPIXEL_PIN    1      // GPIO pin connected to NeoPixel DIN (GP1)
-#define NEOPIXEL_COUNT  4      // Number of NeoPixels in chain
+#define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
+#define NEOPIXEL_COUNT  4       // Number of NeoPixels in chain
 #define SERIAL_BAUD     115200  // Serial communication baud rate
+
+// OLED over I2C (STEMMA QT / Qwiic)
+// User wiring:
+//   SDA = GP4 (blue)
+//   SCL = GP5 (yellow)
+#define OLED_SDA_PIN 4
+#define OLED_SCL_PIN 5
+#define OLED_WIDTH   128
+#define OLED_HEIGHT  64
+#define OLED_ADDR_0  0x3C
+#define OLED_ADDR_1  0x3D
 
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
+// Create OLED object (I2C, no reset pin)
+Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+
 // Global brightness (0-255)
 uint8_t global_brightness = 76;  // Default: 30% (76/255)
+
+// OLED state
+bool oled_available = false;
+uint8_t oled_addr = OLED_ADDR_0;
 
 // Track if we've sent initial HELLO messages and when to stop
 unsigned long boot_time;
 bool serial_connected = false;
 const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
+
+static bool i2cProbe(uint8_t addr) {
+  Wire.beginTransmission(addr);
+  uint8_t err = Wire.endTransmission();
+  return err == 0;
+}
+
+static bool oledInit() {
+  // Configure I2C pins explicitly for RP2040
+  Wire.setSDA(OLED_SDA_PIN);
+  Wire.setSCL(OLED_SCL_PIN);
+  Wire.begin();
+
+  // Prefer 0x3C, but accept 0x3D if that's what is strapped on the board
+  if (i2cProbe(OLED_ADDR_0)) {
+    oled_addr = OLED_ADDR_0;
+  } else if (i2cProbe(OLED_ADDR_1)) {
+    oled_addr = OLED_ADDR_1;
+  } else {
+    oled_available = false;
+    return false;
+  }
+
+  // SSD1306 init (returns false if allocation or device init fails)
+  if (!display.begin(SSD1306_SWITCHCAPVCC, oled_addr)) {
+    oled_available = false;
+    return false;
+  }
+
+  display.clearDisplay();
+  display.setTextSize(1);
+  display.setTextColor(SSD1306_WHITE);
+  display.setCursor(0, 0);
+  display.println("OLED READY");
+  display.print("ADDR 0x");
+  display.println(oled_addr, HEX);
+  display.display();
+
+  oled_available = true;
+  return true;
+}
+
+static bool oledIntegrityTest(String &failReason) {
+  // Ensure initialized
+  if (!oled_available) {
+    if (!oledInit()) {
+      failReason = "I2C device not found / init failed";
+      return false;
+    }
+  }
+
+  // Basic visual + bus integrity test.
+  // Note: SSD1306 is effectively write-only; we can't read pixels back.
+  // So "integrity" here means: device ACKs on I2C and display init succeeds,
+  // then we successfully push several full-frame updates without I2C errors.
+  Serial.println("OLED:TEST:START");
+  Serial.print("OLED:ADDR:0x");
+  Serial.println(oled_addr, HEX);
+
+  // Frame 1: Border + text
+  display.clearDisplay();
+  display.drawRect(0, 0, OLED_WIDTH, OLED_HEIGHT, SSD1306_WHITE);
+  display.setCursor(8, 10);
+  display.setTextSize(1);
+  display.println("OLED INTEGRITY");
+  display.setCursor(8, 24);
+  display.println("TEST RUNNING...");
+  display.setCursor(8, 38);
+  display.print("SDA GP");
+  display.print(OLED_SDA_PIN);
+  display.print(" SCL GP");
+  display.println(OLED_SCL_PIN);
+  display.display();
+  delay(700);
+
+  // Frame 2: Checkerboard-ish pattern
+  display.clearDisplay();
+  for (int y = 0; y < OLED_HEIGHT; y += 8) {
+    for (int x = 0; x < OLED_WIDTH; x += 8) {
+      if (((x + y) / 8) % 2 == 0) {
+        display.fillRect(x, y, 8, 8, SSD1306_WHITE);
+      }
+    }
+  }
+  display.display();
+  delay(600);
+
+  // Frame 3: Invert toggle
+  display.invertDisplay(true);
+  delay(250);
+  display.invertDisplay(false);
+  delay(250);
+
+  // Frame 4: Clear and show OK
+  display.clearDisplay();
+  display.setTextSize(2);
+  display.setCursor(18, 18);
+  display.println("OLED OK");
+  display.setTextSize(1);
+  display.setCursor(0, 52);
+  display.print("ADDR 0x");
+  display.print(oled_addr, HEX);
+  display.display();
+
+  // Quick I2C re-probe to confirm device still responds
+  if (!i2cProbe(oled_addr)) {
+    failReason = "Device stopped ACKing";
+    Serial.println("OLED:TEST:FAIL:I2C_NACK");
+    return false;
+  }
+
+  Serial.println("OLED:TEST:OK");
+  return true;
+}
 
 void setup() {
   boot_time = millis();
@@ -28,6 +176,9 @@ void setup() {
   strip.begin();
   strip.setBrightness(global_brightness);
   strip.show(); // Initialize all pixels to 'off'
+
+  // Initialize OLED (non-fatal if missing)
+  oledInit();
   
   // Wait a bit for serial to be ready, but don't block forever
   // On RP2040, Serial might not be available immediately
@@ -44,6 +195,7 @@ void setup() {
   // flag/DTR may stay false even though RX/TX works (you'll still get ACKs).
   for (int i = 0; i < 5; i++) {
     Serial.println("HELLO NEOPIXEL");
+    Serial.println("HELLO OLED");
     delay(100);
   }
 }
@@ -57,12 +209,14 @@ void loop() {
     static unsigned long last_hello = 0;
     if (millis() - last_hello >= 500) {
       Serial.println("HELLO NEOPIXEL");
+      Serial.println("HELLO OLED");
       serial_connected = true;
       last_hello = millis();
     }
   } else if (!serial_connected) {
     // Send one more HELLO when serial first becomes available after boot period
     Serial.println("HELLO NEOPIXEL");
+    Serial.println("HELLO OLED");
     serial_connected = true;
   }
   
@@ -89,6 +243,7 @@ void processCommand(String cmd) {
   if (cmd == "PING" || cmd == "HELLO") {
     // Respond to ping/hello for connection testing
     Serial.println("HELLO NEOPIXEL");
+    Serial.println("HELLO OLED");
     return;
   }
   
@@ -172,6 +327,39 @@ void processCommand(String cmd) {
       Serial.println("ERROR:Invalid brightness value");
     }
     
+  } else if (command == "OLED") {
+    // OLED:INIT or OLED:TEST
+    String sub = getParam(params, 0);
+    sub.toUpperCase();
+
+    if (sub == "INIT") {
+      if (oledInit()) {
+        Serial.print("OLED:OK:ADDR:0x");
+        Serial.println(oled_addr, HEX);
+      } else {
+        Serial.println("OLED:FAIL:NOT_FOUND");
+      }
+      return;
+    }
+
+    if (sub == "TEST") {
+      String reason = "";
+      bool ok = oledIntegrityTest(reason);
+      if (ok) {
+        Serial.println("OLED:OK");
+      } else {
+        Serial.print("OLED:FAIL:");
+        if (reason.length() > 0) {
+          Serial.println(reason);
+        } else {
+          Serial.println("UNKNOWN");
+        }
+      }
+      return;
+    }
+
+    Serial.println("ERROR:Invalid OLED command");
+    return;
   } else {
     Serial.println("ERROR:Unknown command");
   }
