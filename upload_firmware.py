@@ -300,6 +300,28 @@ def compile_firmware(cli_path, firmware_path):
         shutil.copy2(firmware_path, temp_sketch_dir / firmware_path.name)
         print_info(f"Copied {firmware_path.name} to sketch directory")
     
+    # Always check and copy ui/ directory if it exists (for generated_screens.h)
+    # This ensures ui files are up to date even if only .ino changed
+    ui_source = script_dir / "ui"
+    ui_dest = temp_sketch_dir / "ui"
+    if ui_source.exists() and ui_source.is_dir():
+        import shutil
+        # Check if ui directory needs updating
+        ui_needs_copy = True
+        if ui_dest.exists():
+            # Check if any file in ui/ is newer
+            ui_source_files = list(ui_source.rglob("*"))
+            ui_dest_files = list(ui_dest.rglob("*"))
+            if ui_dest_files:
+                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
+                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
+                ui_needs_copy = source_mtime > dest_mtime
+            if ui_needs_copy:
+                shutil.rmtree(ui_dest)
+        if ui_needs_copy:
+            shutil.copytree(ui_source, ui_dest)
+            print_info(f"Copied ui/ directory to sketch directory")
+    
     print_info(f"Compiling {firmware_path.name} from sketch directory {temp_sketch_dir}...")
     
     # Pass the sketch directory to arduino-cli (directory name must match .ino filename)
@@ -365,6 +387,26 @@ def upload_via_uf2(firmware_path):
         import shutil
         shutil.copy2(firmware_path, temp_ino)
         print_info(f"Copied {firmware_path.name} to sketch directory for compilation")
+    
+    # Always check and copy ui/ directory if it exists (for generated_screens.h)
+    ui_source = script_dir / "ui"
+    ui_dest = temp_sketch_dir / "ui"
+    if ui_source.exists() and ui_source.is_dir():
+        import shutil
+        ui_needs_copy = True
+        if ui_dest.exists():
+            # Check if any file in ui/ is newer
+            ui_source_files = list(ui_source.rglob("*"))
+            ui_dest_files = list(ui_dest.rglob("*"))
+            if ui_dest_files:
+                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
+                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
+                ui_needs_copy = source_mtime > dest_mtime
+            if ui_needs_copy:
+                shutil.rmtree(ui_dest)
+        if ui_needs_copy:
+            shutil.copytree(ui_source, ui_dest)
+            print_info(f"Copied ui/ directory to sketch directory")
     
     print_info(f"Compiling {firmware_path.name} for UF2 generation...")
     
@@ -466,11 +508,30 @@ def upload_firmware(cli_path, firmware_path, port=None):
     temp_sketch_dir = script_dir / firmware_name
     
     # Ensure sketch directory exists with the .ino file
+    import shutil
     temp_sketch_dir.mkdir(exist_ok=True)
     temp_ino = temp_sketch_dir / firmware_path.name
     if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
-        import shutil
         shutil.copy2(firmware_path, temp_ino)
+    
+    # Always check and copy ui/ directory if it exists (for generated_screens.h)
+    ui_source = script_dir / "ui"
+    ui_dest = temp_sketch_dir / "ui"
+    if ui_source.exists() and ui_source.is_dir():
+        ui_needs_copy = True
+        if ui_dest.exists():
+            # Check if any file in ui/ is newer
+            ui_source_files = list(ui_source.rglob("*"))
+            ui_dest_files = list(ui_dest.rglob("*"))
+            if ui_dest_files:
+                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
+                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
+                ui_needs_copy = source_mtime > dest_mtime
+            if ui_needs_copy:
+                shutil.rmtree(ui_dest)
+        if ui_needs_copy:
+            shutil.copytree(ui_source, ui_dest)
+            print_info(f"Copied ui/ directory to sketch directory")
     
     # Pass the sketch directory to arduino-cli
     cmd = [
