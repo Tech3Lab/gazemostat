@@ -18,6 +18,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
+#include "ui/generated_screens.h"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -62,13 +63,22 @@ uint8_t global_brightness = 76;  // Default: 30% (76/255)
 // OLED state
 bool oled_available = false;
 uint8_t oled_addr = OLED_ADDR_0;
-bool oled_input_feedback_enabled = true;
+bool oled_input_feedback_enabled = false;  // Disabled - using UI instead
+
+// UI state machine
+static UiScreen g_ui_screen = UiScreen::BOOT;
 
 // Button state (bitmask)
 // bit0..bit6 = UP,DOWN,LEFT,RIGHT,CENTER,A,B
 uint8_t buttons_prev = 0;
 unsigned long last_button_poll_ms = 0;
 const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz
+
+// UI state variables (track device state for dynamic UI elements)
+bool ui_tracker_detected_state = false;
+bool ui_led_detected_state = false;
+bool ui_connection_state = false;
+bool ui_calibration_ok_state = false;
 
 // Track if we've sent initial HELLO messages and when to stop
 unsigned long boot_time;
@@ -107,67 +117,90 @@ static void drawKeyBox(int16_t x, int16_t y, int16_t w, int16_t h, const char *l
   display.print(label);
 }
 
+// UI state machine navigation
+static UiScreen next_in_main_flow(UiScreen s) {
+  switch (s) {
+    case UiScreen::BOOT: return UiScreen::POSITION;
+    case UiScreen::POSITION: return UiScreen::CALIBRATION;
+    case UiScreen::CALIBRATION: return UiScreen::RECORDING;
+    case UiScreen::RECORDING: return UiScreen::RESULTS;
+    default: return s;
+  }
+}
+
+static void apply_button_action(uint8_t button_bit) {
+  // Handle button press based on current screen
+  switch (button_bit) {
+    case 0: // BTN_UP
+      // TODO: Add UP button behavior if needed
+      break;
+    case 1: // BTN_DOWN
+      // TODO: Add DOWN button behavior if needed
+      break;
+    case 2: // BTN_LEFT
+      // TODO: Add LEFT button behavior if needed
+      break;
+    case 3: // BTN_RIGHT
+      // Advance in main flow
+      g_ui_screen = next_in_main_flow(g_ui_screen);
+      break;
+    case 4: // BTN_CENTER
+      // TODO: Add CENTER button behavior if needed
+      break;
+    case 5: // BTN_A
+      g_ui_screen = UiScreen::MONITOR_POS;
+      break;
+    case 6: // BTN_B
+      g_ui_screen = UiScreen::MONITOR_GAZE;
+      break;
+  }
+}
+
+static void update_ui_dynamic_elements() {
+  // Update dynamic UI variables based on device state
+  ui_tracker_detected = ui_tracker_detected_state;
+  ui_led_detected = ui_led_detected_state;
+  ui_connection = ui_connection_state;
+  ui_calibration_ok = ui_calibration_ok_state;
+}
+
 static void renderButtonFeedback(uint8_t buttons) {
+  // Legacy function - kept for compatibility but not used when UI is active
   if (!oled_available || !oled_input_feedback_enabled) return;
-
-  // Layout: D-pad left, A/B right, status bottom
-  display.clearDisplay();
-  display.setTextSize(1);
-
-  // D-pad boxes
-  bool up = buttons & (1 << 0);
-  bool down = buttons & (1 << 1);
-  bool left = buttons & (1 << 2);
-  bool right = buttons & (1 << 3);
-  bool center = buttons & (1 << 4);
-  bool a = buttons & (1 << 5);
-  bool b = buttons & (1 << 6);
-
-  drawKeyBox(20, 0, 24, 14, "^", up);
-  drawKeyBox(0, 16, 24, 14, "<", left);
-  drawKeyBox(20, 16, 24, 14, "OK", center);
-  drawKeyBox(40, 16, 24, 14, ">", right);
-  drawKeyBox(20, 32, 24, 14, "v", down);
-
-  // A/B buttons (distinct visuals)
-  drawKeyBox(90, 14, 34, 16, "A", a);
-  drawKeyBox(90, 34, 34, 16, "B", b);
-
-  // Title
-  display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-  display.setCursor(0, 0);
-  display.print("INPUTS");
-
-  // Pressed summary
-  display.setCursor(0, 52);
-  display.print("Pressed: ");
-  bool any = false;
-  if (up) { display.print("UP "); any = true; }
-  if (down) { display.print("DN "); any = true; }
-  if (left) { display.print("LT "); any = true; }
-  if (right) { display.print("RT "); any = true; }
-  if (center) { display.print("OK "); any = true; }
-  if (a) { display.print("A "); any = true; }
-  if (b) { display.print("B "); any = true; }
-  if (!any) display.print("-");
-
-  display.display();
+  // Implementation removed - UI handles display now
 }
 
 static void pollButtonsAndUpdateDisplay() {
-  if (!oled_available || !oled_input_feedback_enabled) return;
+  if (!oled_available) return;
   unsigned long now = millis();
   if (now - last_button_poll_ms < BUTTON_POLL_MS) return;
   last_button_poll_ms = now;
 
   uint8_t cur = readButtons();
-  if (cur != buttons_prev) {
-    // Optional serial debug: emit only on change
-    Serial.print("BTN:");
-    Serial.println(cur, BIN);
+  uint8_t changed = cur ^ buttons_prev;
+  
+  if (changed != 0) {
+    // Detect button press edges (buttons are active LOW)
+    // When button is pressed: bit goes from 1 (not pressed) to 0 (pressed)
+    // We want to detect the transition from not-pressed to pressed
+    for (uint8_t i = 0; i < 7; i++) {
+      uint8_t mask = (1 << i);
+      if (changed & mask) {
+        // Button state changed - check if it's a press (1->0 transition)
+        // buttons_prev had 1 (not pressed), cur has 0 (pressed)
+        if ((buttons_prev & mask) && !(cur & mask)) {
+          // Button was just pressed (transition from 1 to 0)
+          apply_button_action(i);
+        }
+      }
+    }
+    
     buttons_prev = cur;
-    renderButtonFeedback(cur);
   }
+  
+  // Update UI display
+  update_ui_dynamic_elements();
+  draw_screen(display, g_ui_screen);
 }
 
 static bool i2cProbe(uint8_t addr) {
@@ -306,9 +339,11 @@ void setup() {
   // Initialize OLED (non-fatal if missing)
   oledInit();
   if (oled_available) {
-    // Render initial input UI so you see something immediately
+    // Initialize UI state
     buttons_prev = readButtons();
-    renderButtonFeedback(buttons_prev);
+    g_ui_screen = UiScreen::BOOT;
+    update_ui_dynamic_elements();
+    draw_screen(display, g_ui_screen);
   }
   
   // Wait a bit for serial to be ready, but don't block forever
@@ -332,7 +367,7 @@ void setup() {
 }
 
 void loop() {
-  // Update OLED feedback for joystick/buttons (if enabled)
+  // Poll buttons and update UI display
   pollButtonsAndUpdateDisplay();
 
   // Send HELLO messages periodically for first few seconds after boot
@@ -498,10 +533,6 @@ void processCommand(String cmd) {
       arg.toUpperCase();
       if (arg == "ON" || arg == "1") {
         oled_input_feedback_enabled = true;
-        if (oled_available) {
-          buttons_prev = readButtons();
-          renderButtonFeedback(buttons_prev);
-        }
         Serial.println("OLED:FEEDBACK:ON");
         return;
       }
@@ -516,6 +547,46 @@ void processCommand(String cmd) {
         return;
       }
       Serial.println("ERROR:Invalid FEEDBACK arg");
+      return;
+    }
+
+    if (sub == "UI") {
+      // OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>
+      // OLED:UI:SCREEN:<screen_name>
+      String arg = getParam(params, 1);
+      arg.toUpperCase();
+      if (arg == "STATE") {
+        // Update UI state variables
+        String tracker = getParam(params, 2);
+        String led = getParam(params, 3);
+        String conn = getParam(params, 4);
+        String calib = getParam(params, 5);
+        if (tracker.length() > 0) ui_tracker_detected_state = (tracker == "1" || tracker == "ON" || tracker == "TRUE");
+        if (led.length() > 0) ui_led_detected_state = (led == "1" || led == "ON" || led == "TRUE");
+        if (conn.length() > 0) ui_connection_state = (conn == "1" || conn == "ON" || conn == "TRUE");
+        if (calib.length() > 0) ui_calibration_ok_state = (calib == "1" || calib == "ON" || calib == "TRUE");
+        Serial.println("OLED:UI:STATE:OK");
+        return;
+      }
+      if (arg == "SCREEN") {
+        // Change UI screen
+        String screen_name = getParam(params, 2);
+        screen_name.toUpperCase();
+        if (screen_name == "BOOT") g_ui_screen = UiScreen::BOOT;
+        else if (screen_name == "POSITION") g_ui_screen = UiScreen::POSITION;
+        else if (screen_name == "CALIBRATION") g_ui_screen = UiScreen::CALIBRATION;
+        else if (screen_name == "RECORDING") g_ui_screen = UiScreen::RECORDING;
+        else if (screen_name == "RESULTS") g_ui_screen = UiScreen::RESULTS;
+        else if (screen_name == "MONITOR_POS") g_ui_screen = UiScreen::MONITOR_POS;
+        else if (screen_name == "MONITOR_GAZE") g_ui_screen = UiScreen::MONITOR_GAZE;
+        else {
+          Serial.println("ERROR:Invalid screen name");
+          return;
+        }
+        Serial.println("OLED:UI:SCREEN:OK");
+        return;
+      }
+      Serial.println("ERROR:Invalid UI command");
       return;
     }
 
