@@ -15,8 +15,8 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 - **Firmware**
   - `firmware.ino`: RP2040 co-processor firmware (NeoPixels + OLED UI + serial protocol)
-  - `ui/generated_screens.h`: header-only, UI designer output; contains `UiScreen` enum and `draw_screen(...)`
-  - `ui/ui_state_machine.h`, `ui/ui_state_machine.cpp`: UI navigation state machine (button→screen transitions)
+  - `ui/v2/generated_screens.h`: header-only, UI designer output (v2); contains `UiScreen` enum and `draw_screen(...)`
+  - `ui/v2/ui_state_machine.h`, `ui/v2/ui_state_machine.cpp`: UI navigation state machine (button→screen transitions)
   - `upload_firmware.py`: Windows helper to install Arduino CLI + compile + upload
 - **Host application**
   - `main.py`: primary Python application (UI, simulation toggles, Gazepoint TCP client, serial I/O)
@@ -44,22 +44,28 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 ### OLED UI rendering
 
-- The UI drawing code is generated in `ui/generated_screens.h`.
+- The UI drawing code is generated in `ui/v2/generated_screens.h`.
 - **Important invariant**: `draw_*_screen()` / `draw_screen()` do **not** call `display.display()`.
   - Firmware must call `display.display()` once per frame after drawing.
-- Dynamic UI variables are simple globals in `ui/generated_screens.h` (examples):
-  - `ui_tracker_detected`, `ui_led_detected`, `ui_connection`, `ui_calibration_ok`
+- Dynamic UI variables are simple globals in `ui/v2/generated_screens.h` (examples):
+  - booleans: `ui_tracker_detected`, `ui_led_detected`, `ui_connection`
+  - strings: `ui_loading_data`, `ui_calibration_status`, `ui_recording_timer`, `ui_event_name`, etc.
 - Firmware updates those globals from its own state before each render.
 
 ### UI navigation state machine
 
-- Implemented in `ui/ui_state_machine.{h,cpp}`.
+- Implemented in `ui/v2/ui_state_machine.{h,cpp}`.
 - Firmware-facing API:
   - `ui_sm_init()`
   - `ui_sm_on_button(Button btn)` (advances screen based on button presses)
   - `ui_sm_get_screen() -> UiScreen`
   - `ui_sm_set_screen(UiScreen)` (used by serial commands to force a screen)
 - The firmware polls buttons at ~50Hz and sends press edges into the state machine.
+- Main flow in v2 advances on `BTN_RIGHT`:
+  - `BOOT → IN_POSITION → MOVE_CLOSER → MOVE_FARTHER → CALIBRATION → CALIBRATION_WARNING → RECORDING → STOP_CONFIRMATION → MISSING_STOP_EVENT → INFERENCE_LOADING → GLOBAL_RESULTS → EVENT_RESULTS → QUIT_CONFIRMATION`
+- Shortcuts:
+  - `BTN_A` forces `IN_POSITION`
+  - `BTN_B` forces `MONITOR_GAZE`
 
 ### Serial protocol (firmware)
 
@@ -80,7 +86,8 @@ Line-based commands, `:`-separated, newline terminated.
   - `OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>`
     - Updates dynamic UI variables and re-renders
   - `OLED:UI:SCREEN:<screen_name>`
-    - Screen names: `BOOT`, `POSITION`, `CALIBRATION`, `RECORDING`, `RESULTS`, `MONITOR_POS`, `MONITOR_GAZE`
+    - Screen names (v2): `BOOT`, `LOADING`, `IN_POSITION`, `MOVE_CLOSER`, `MOVE_FARTHER`, `CALIBRATION`, `CALIBRATION_WARNING`, `RECORDING`, `STOP_CONFIRMATION`, `MISSING_STOP_EVENT`, `INFERENCE_LOADING`, `GLOBAL_RESULTS`, `EVENT_RESULTS`, `QUIT_CONFIRMATION`, `MONITOR_GAZE`
+    - Backward-compatible aliases: `POSITION`→`IN_POSITION`, `RESULTS`→`GLOBAL_RESULTS`, `MONITOR_POS`→`IN_POSITION`
     - Forces the UI screen via `ui_sm_set_screen(...)` and re-renders
 - **Button debug**
   - On any button state change, firmware prints `BTN:<7 bits>` where `1` indicates pressed.
@@ -117,16 +124,13 @@ On Windows, use `upload_firmware.py` which:
 
 ## Recent changes (this update)
 
-- Firmware UI navigation logic is now sourced from `ui/ui_state_machine.{h,cpp}` instead of a duplicate implementation in `firmware.ino`.
-- Fixed button edge detection so UI transitions happen on **press** (0→1 in the internal bitmask), not on release.
-- Centralized OLED rendering so each update performs:
-  - dynamic variable sync → `draw_screen(display, ui_sm_get_screen())` → `display.display()`
-- Added missing generated UI dynamic variable `ui_calibration_ok` and a small checkbox indicator on the CALIBRATION screen.
+- Firmware OLED UI now uses the **v2 generated UI** and **v2 navigation state machine** from `ui/v2/`.
+- Updated the firmware’s `OLED:UI:SCREEN:<name>` parsing to the new v2 `UiScreen` names (and kept a few legacy aliases).
+- Updated dynamic UI binding: calibration is now represented as a **status string** (`ui_calibration_status`) rather than a boolean checkbox variable.
 
 ## Rollback notes
 
 To revert this update:
 
-- Restore the previous inlined UI navigation logic in `firmware.ino` and remove the `ui_sm_*` integration.
-- Remove `ui_calibration_ok` additions from `ui/generated_screens.h` if your UI generator already provides a different calibration indicator.
+- Switch `firmware.ino` includes back from `ui/v2/*` to the prior `ui/*` generated UI + state machine, and restore the old `OLED:UI:SCREEN` name mapping.
 

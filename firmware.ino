@@ -18,11 +18,11 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "ui/generated_screens.h"
-#include "ui/ui_state_machine.h"
+#include "ui/v2/generated_screens.h"
+#include "ui/v2/ui_state_machine.h"
 // NOTE: Arduino CLI only compiles sources in the sketch root (and src/).
 // We keep UI sources under ui/ and include the .cpp here to ensure it builds.
-#include "ui/ui_state_machine.cpp"
+#include "ui/v2/ui_state_machine.cpp"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -136,7 +136,8 @@ static void update_ui_dynamic_elements() {
   ui_tracker_detected = ui_tracker_detected_state;
   ui_led_detected = ui_led_detected_state;
   ui_connection = ui_connection_state;
-  ui_calibration_ok = ui_calibration_ok_state;
+  // ui/v2 uses a status string rather than a boolean "calibration ok".
+  ui_calibration_status = ui_calibration_ok_state ? "OK" : "POOR";
 }
 
 static void renderUi() {
@@ -563,13 +564,26 @@ void processCommand(String cmd) {
         // Change UI screen
         String screen_name = getParam(params, 2);
         screen_name.toUpperCase();
+        // ui/v2 screens
         if (screen_name == "BOOT") ui_sm_set_screen(UiScreen::BOOT);
-        else if (screen_name == "POSITION") ui_sm_set_screen(UiScreen::POSITION);
+        else if (screen_name == "LOADING") ui_sm_set_screen(UiScreen::LOADING);
+        else if (screen_name == "IN_POSITION") ui_sm_set_screen(UiScreen::IN_POSITION);
+        else if (screen_name == "MOVE_CLOSER") ui_sm_set_screen(UiScreen::MOVE_CLOSER);
+        else if (screen_name == "MOVE_FARTHER") ui_sm_set_screen(UiScreen::MOVE_FARTHER);
         else if (screen_name == "CALIBRATION") ui_sm_set_screen(UiScreen::CALIBRATION);
+        else if (screen_name == "CALIBRATION_WARNING") ui_sm_set_screen(UiScreen::CALIBRATION_WARNING);
         else if (screen_name == "RECORDING") ui_sm_set_screen(UiScreen::RECORDING);
-        else if (screen_name == "RESULTS") ui_sm_set_screen(UiScreen::RESULTS);
-        else if (screen_name == "MONITOR_POS") ui_sm_set_screen(UiScreen::MONITOR_POS);
+        else if (screen_name == "STOP_CONFIRMATION") ui_sm_set_screen(UiScreen::STOP_CONFIRMATION);
+        else if (screen_name == "MISSING_STOP_EVENT") ui_sm_set_screen(UiScreen::MISSING_STOP_EVENT);
+        else if (screen_name == "INFERENCE_LOADING") ui_sm_set_screen(UiScreen::INFERENCE_LOADING);
+        else if (screen_name == "GLOBAL_RESULTS") ui_sm_set_screen(UiScreen::GLOBAL_RESULTS);
+        else if (screen_name == "EVENT_RESULTS") ui_sm_set_screen(UiScreen::EVENT_RESULTS);
+        else if (screen_name == "QUIT_CONFIRMATION") ui_sm_set_screen(UiScreen::QUIT_CONFIRMATION);
         else if (screen_name == "MONITOR_GAZE") ui_sm_set_screen(UiScreen::MONITOR_GAZE);
+        // Backward-compatible aliases (pre-v2 names)
+        else if (screen_name == "POSITION") ui_sm_set_screen(UiScreen::IN_POSITION);
+        else if (screen_name == "RESULTS") ui_sm_set_screen(UiScreen::GLOBAL_RESULTS);
+        else if (screen_name == "MONITOR_POS") ui_sm_set_screen(UiScreen::IN_POSITION);
         else {
           Serial.println("ERROR:Invalid screen name");
           return;

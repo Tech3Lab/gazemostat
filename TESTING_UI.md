@@ -46,14 +46,22 @@ After uploading, the OLED should display the **BOOT** screen immediately.
 
 ### Test Button Navigation:
 
-1. **RIGHT Button** - Advances through main flow:
-   - Press RIGHT: BOOT → POSITION
-   - Press RIGHT: POSITION → CALIBRATION
-   - Press RIGHT: CALIBRATION → RECORDING
-   - Press RIGHT: RECORDING → RESULTS
+1. **RIGHT Button** - Advances through main flow (v2):
+   - Press RIGHT: BOOT → IN_POSITION
+   - Press RIGHT: IN_POSITION → MOVE_CLOSER
+   - Press RIGHT: MOVE_CLOSER → MOVE_FARTHER
+   - Press RIGHT: MOVE_FARTHER → CALIBRATION
+   - Press RIGHT: CALIBRATION → CALIBRATION_WARNING
+   - Press RIGHT: CALIBRATION_WARNING → RECORDING
+   - Press RIGHT: RECORDING → STOP_CONFIRMATION
+   - Press RIGHT: STOP_CONFIRMATION → MISSING_STOP_EVENT
+   - Press RIGHT: MISSING_STOP_EVENT → INFERENCE_LOADING
+   - Press RIGHT: INFERENCE_LOADING → GLOBAL_RESULTS
+   - Press RIGHT: GLOBAL_RESULTS → EVENT_RESULTS
+   - Press RIGHT: EVENT_RESULTS → QUIT_CONFIRMATION
 
-2. **A Button** - Jump to position monitoring:
-   - Press A: Goes to MONITOR_POS screen
+2. **A Button** - Jump back to start of main flow:
+   - Press A: Goes to IN_POSITION screen
 
 3. **B Button** - Jump to gaze monitoring:
    - Press B: Goes to MONITOR_GAZE screen
@@ -93,12 +101,25 @@ OLED:UI:STATE:1:1:1:1
 #### Change UI Screen:
 ```bash
 OLED:UI:SCREEN:BOOT
-OLED:UI:SCREEN:POSITION
+OLED:UI:SCREEN:LOADING
+OLED:UI:SCREEN:IN_POSITION
+OLED:UI:SCREEN:MOVE_CLOSER
+OLED:UI:SCREEN:MOVE_FARTHER
 OLED:UI:SCREEN:CALIBRATION
+OLED:UI:SCREEN:CALIBRATION_WARNING
 OLED:UI:SCREEN:RECORDING
+OLED:UI:SCREEN:STOP_CONFIRMATION
+OLED:UI:SCREEN:MISSING_STOP_EVENT
+OLED:UI:SCREEN:INFERENCE_LOADING
+OLED:UI:SCREEN:GLOBAL_RESULTS
+OLED:UI:SCREEN:EVENT_RESULTS
+OLED:UI:SCREEN:QUIT_CONFIRMATION
+OLED:UI:SCREEN:MONITOR_GAZE
+
+# Backward-compatible aliases still accepted:
+OLED:UI:SCREEN:POSITION
 OLED:UI:SCREEN:RESULTS
 OLED:UI:SCREEN:MONITOR_POS
-OLED:UI:SCREEN:MONITOR_GAZE
 ```
 
 ### Using Serial Monitor:
@@ -131,13 +152,11 @@ ser.write(b'OLED:UI:SCREEN:POSITION\n')
 - [ ] Checkboxes update when state variables change
 
 ### POSITION Screen:
-- [ ] Shows calibration target diagram
-- [ ] Shows "START CALIBRATION" text
+- [ ] (v2: IN_POSITION) Shows head position UI and "Calib.>" hint
 
 ### CALIBRATION Screen:
-- [ ] Shows "CALIBRATION CHECK"
-- [ ] Shows "READY" text
-- [ ] Checkbox updates when `ui_calibration_ok` is set
+- [ ] (v2) Shows "CALIBRATION" header
+- [ ] Calibration status text updates when `OLED:UI:STATE:*:*:*:<calib>` changes (mapped to `ui_calibration_status`)
 
 ### RECORDING Screen:
 - [ ] Shows "MARKER STATUS:"
@@ -147,10 +166,10 @@ ser.write(b'OLED:UI:SCREEN:POSITION\n')
 - [ ] Shows "STOP RECORDING" button
 
 ### RESULTS Screen:
-- [ ] Shows "Results" text
+- [ ] (v2: GLOBAL_RESULTS / EVENT_RESULTS) Shows results headers and next/back hints
 
 ### MONITOR_POS Screen:
-- [ ] Shows "Monitoring pos" text
+- [ ] (v2) Not present; use `IN_POSITION` or other v2 screens instead
 
 ### MONITOR_GAZE Screen:
 - [ ] Shows "Monitoring gaze" text
