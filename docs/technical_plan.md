@@ -15,8 +15,7 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 - **Firmware**
   - `firmware.ino`: RP2040 co-processor firmware (NeoPixels + OLED UI + serial protocol)
-  - `ui/v2/generated_screens.h`: header-only, UI designer output (v2); contains `UiScreen` enum and `draw_screen(...)`
-  - `ui/v2/ui_state_machine.h`, `ui/v2/ui_state_machine.cpp`: UI navigation state machine (button→screen transitions)
+  - `ui/v3/generated_screens.h`: header-only OLED UI (v3); contains `UiScreen`, `UiDynamicVar`, `ui_get/ui_set`, and `draw_screen(...)`
   - `upload_firmware.py`: Windows helper to install Arduino CLI + compile + upload
 - **Host application**
   - `main.py`: primary Python application (UI, simulation toggles, Gazepoint TCP client, serial I/O)
@@ -44,28 +43,15 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 ### OLED UI rendering
 
-- The UI drawing code is generated in `ui/v2/generated_screens.h`.
+- The OLED UI drawing code is in `ui/v3/generated_screens.h`.
 - **Important invariant**: `draw_*_screen()` / `draw_screen()` do **not** call `display.display()`.
   - Firmware must call `display.display()` once per frame after drawing.
-- Dynamic UI variables are simple globals in `ui/v2/generated_screens.h` (examples):
+- Dynamic UI variables are simple globals in `ui/v3/generated_screens.h` (examples):
   - booleans: `ui_tracker_detected`, `ui_led_detected`, `ui_connection`
-  - strings: `ui_loading_data`, `ui_calibration_status`, `ui_recording_timer`, `ui_event_name`, etc.
-- Firmware updates those globals from its own state before each render.
+  - strings: `ui_loading_data`, `ui_calib_start_btn`, `ui_recording_timer`, `ui_event_name`, etc.
+  - u8: `ui_inference_prog_bar`, `ui_gaze_x`, `ui_gaze_y`
 
-### UI navigation state machine
-
-- Implemented in `ui/v2/ui_state_machine.{h,cpp}`.
-- Firmware-facing API:
-  - `ui_sm_init()`
-  - `ui_sm_on_button(Button btn)` (advances screen based on button presses)
-  - `ui_sm_get_screen() -> UiScreen`
-  - `ui_sm_set_screen(UiScreen)` (used by serial commands to force a screen)
-- The firmware polls buttons at ~50Hz and sends press edges into the state machine.
-- Main flow in v2 advances on `BTN_RIGHT`:
-  - `BOOT → IN_POSITION → MOVE_CLOSER → MOVE_FARTHER → CALIBRATION → CALIBRATION_WARNING → RECORDING → STOP_CONFIRMATION → MISSING_STOP_EVENT → INFERENCE_LOADING → GLOBAL_RESULTS → EVENT_RESULTS → QUIT_CONFIRMATION`
-- Shortcuts:
-  - `BTN_A` forces `IN_POSITION`
-  - `BTN_B` forces `MONITOR_GAZE`
+**Note on v3 header edits**: the repo does not include the UI designer project source; `ui/v3/generated_screens.h` is edited in-place to add a few missing dynamic variables and drawing behaviors (calibration LED indicators, inference progress bar, monitoring eye/gaze inputs). These edits must be preserved when regenerating UI.
 
 ### Serial protocol (firmware)
 
@@ -83,14 +69,17 @@ Line-based commands, `:`-separated, newline terminated.
   - `OLED:INIT`
   - `OLED:TEST`
   - `OLED:FEEDBACK:ON|OFF|STATUS`
-  - `OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>`
-    - Updates dynamic UI variables and re-renders
+  - `OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>` (legacy/back-compat; `<calib>` ignored in v3)
   - `OLED:UI:SCREEN:<screen_name>`
-    - Screen names (v2): `BOOT`, `LOADING`, `IN_POSITION`, `MOVE_CLOSER`, `MOVE_FARTHER`, `CALIBRATION`, `CALIBRATION_WARNING`, `RECORDING`, `STOP_CONFIRMATION`, `MISSING_STOP_EVENT`, `INFERENCE_LOADING`, `GLOBAL_RESULTS`, `EVENT_RESULTS`, `QUIT_CONFIRMATION`, `MONITOR_GAZE`
-    - Backward-compatible aliases: `POSITION`→`IN_POSITION`, `RESULTS`→`GLOBAL_RESULTS`, `MONITOR_POS`→`IN_POSITION`
-    - Forces the UI screen via `ui_sm_set_screen(...)` and re-renders
-- **Button debug**
-  - On any button state change, firmware prints `BTN:<7 bits>` where `1` indicates pressed.
+    - Screen names (v3): `LOADING`, `BOOT`, `FIND_POSITION`, `MOVE_CLOSER`, `MOVE_FARTHER`, `IN_POSITION`, `CALIBRATION`, `RECORD_CONFIRMATION`, `RECORDING`, `STOP_RECORD`, `INFERENCE_LOADING`, `RESULTS`, `MONITORING`
+  - `OLED:UI:SET:BOOL:<var_name>:<0|1>`
+  - `OLED:UI:SET:U8:<var_name>:<0..255>`
+  - `OLED:UI:SET:STR:<var_name>:<value...>`
+    - Host should escape newlines as `\\n` (firmware unescapes to actual newline).
+- **Buttons (RP2040 → CPU)**
+  - `BTN:PRESS:<BTN_NAME>`
+  - `BTN:RELEASE:<BTN_NAME>`
+  - Button names: `BTN_UP`, `BTN_DOWN`, `BTN_LEFT`, `BTN_RIGHT`, `BTN_CENTER`, `BTN_A`, `BTN_B`
 
 ## Host application architecture (Python)
 
@@ -102,6 +91,18 @@ Line-based commands, `:`-separated, newline terminated.
   - Gazepoint host/port
   - Calibration timing and points
   - RP2040 serial port/baud and NeoPixel brightness
+
+### Runtime workflow (host-owned state machine)
+
+The host owns the screen/state machine and drives both the OLED (via serial) and the Pygame window using the same pipeline screens:
+
+- `BOOT` → `FIND_POSITION` → (`MOVE_CLOSER`/`MOVE_FARTHER`/`IN_POSITION`) → `CALIBRATION` → `RECORD_CONFIRMATION` → `RECORDING` → `STOP_RECORD` → `INFERENCE_LOADING` → `RESULTS`
+- Modal: holding `BTN_B` enters `MONITORING` and releasing returns to previous screen.
+
+Keyboard simulation mapping in `main.py`:
+- `W/A/S/D/X` → joystick up/left/center/right/down
+- `P` → `BTN_A` (event marker toggle while recording)
+- `L` (hold) → `BTN_B` (monitoring modal)
 
 ### Dependencies
 
@@ -124,13 +125,17 @@ On Windows, use `upload_firmware.py` which:
 
 ## Recent changes (this update)
 
-- Firmware OLED UI now uses the **v2 generated UI** and **v2 navigation state machine** from `ui/v2/`.
-- Updated the firmware’s `OLED:UI:SCREEN:<name>` parsing to the new v2 `UiScreen` names (and kept a few legacy aliases).
-- Updated dynamic UI binding: calibration is now represented as a **status string** (`ui_calibration_status`) rather than a boolean checkbox variable.
+- Firmware OLED UI now uses **v3 UI** from `ui/v3/generated_screens.h` and no longer contains a demo/navigation state machine.
+- RP2040 now forwards button edge events to the host: `BTN:PRESS:*` / `BTN:RELEASE:*`.
+- Host (`main.py`) now owns the FLOW pipeline state machine and drives OLED screens/vars via `OLED:UI:*` commands.
+- Host terminology is now **events** (not tasks) and recording shows both **recording timer** and **event timer**.
+- Mock inference generates **4 values** per page (`val1..val4`) at **3 seconds per value** and displays progress/ETA.
+- Calibration quality is displayed as a **percentage** (derived from `average_error`).
 
 ## Rollback notes
 
 To revert this update:
 
-- Switch `firmware.ino` includes back from `ui/v2/*` to the prior `ui/*` generated UI + state machine, and restore the old `OLED:UI:SCREEN` name mapping.
+- Firmware: switch `firmware.ino` back to the prior v2 UI + `ui_state_machine` (and restore `BTN:<bitmask>` debug behavior if needed).
+- Host: revert `main.py` to the prior `READY/CALIBRATING/COLLECTING/ANALYZING/RESULTS` flow and its older keyboard shortcuts.
 

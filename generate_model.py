@@ -54,6 +54,9 @@ metadata = {
     "n_tasks": n_tasks,
     "output_format": "vector",
     "output_structure": ["global_score", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10"],
+    # UI/inference timing hints for the app (used to display ETA/progress).
+    "estimated_seconds_per_value": 3,
+    "n_values_per_page": 4,
     "feature_names": [
         "mean_gaze_x", "mean_gaze_y", "gaze_variance_x", "gaze_variance_y",
         "blink_count", "fixation_duration", "saccade_rate", "task_duration",

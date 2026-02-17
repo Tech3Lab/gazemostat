@@ -1008,8 +1008,15 @@ class GPIOButtonMonitor:
             traceback.print_exc()
 
 
-class NeoPixelController:
-    """Control NeoPixel LEDs via serial communication with microcontroller (Windows/Linux compatible)"""
+class Rp2040Controller:
+    """Control RP2040 co-processor over serial.
+
+    Responsibilities:
+    - NeoPixel control (existing INIT/PIXEL/ALL/BRIGHTNESS commands)
+    - OLED UI control (OLED:UI:* commands)
+    - Receive button edge events (BTN:PRESS/RELEASE:BTN_*) and forward to callback
+    """
+
     def __init__(self, serial_port="", serial_baud=115200, num_pixels=4, brightness=0.3):
         self.serial_port = serial_port
         self.serial_baud = serial_baud
@@ -1019,10 +1026,47 @@ class NeoPixelController:
         self._initialized = False
         self._current_led = -1  # Currently active LED (-1 = all off)
         self._lock = threading.Lock()  # Thread lock for serial access
+        self._rx_thr = None
+        self._rx_stop = threading.Event()
+        self._button_callback = None  # callable(kind:str, btn_name:str)
         # Cache last sent state to avoid spamming the serial link every frame (reduces flicker/glitches)
         self._last_mode = None  # "off" | "single" | "all"
         self._last_led = None
         self._last_rgb = None  # (r,g,b) after brightness applied
+
+    def set_button_callback(self, cb):
+        """Set callback(kind, btn_name) where kind is 'PRESS'|'RELEASE'."""
+        self._button_callback = cb
+
+    def _handle_rx_line(self, line: str):
+        if not line:
+            return
+        up = line.strip()
+        if up.startswith("BTN:PRESS:") or up.startswith("BTN:RELEASE:"):
+            try:
+                parts = up.split(":")
+                # BTN:PRESS:BTN_A
+                kind = parts[1].strip().upper()
+                btn = parts[2].strip().upper() if len(parts) >= 3 else ""
+                if self._button_callback and btn:
+                    self._button_callback(kind, btn)
+            except Exception:
+                pass
+
+    def _rx_loop(self):
+        """Continuously read serial lines so the RP2040 TX buffer never blocks."""
+        while not self._rx_stop.is_set():
+            try:
+                if self._serial is None:
+                    time.sleep(0.05)
+                    continue
+                raw = self._serial.readline()
+                if not raw:
+                    continue
+                line = raw.decode("utf-8", errors="ignore").strip()
+                self._handle_rx_line(line)
+            except Exception:
+                time.sleep(0.02)
         
     def _find_serial_port(self):
         """Auto-detect serial port by looking for microcontroller"""
@@ -1051,7 +1095,8 @@ class NeoPixelController:
                                 line = test_serial.readline().decode('utf-8', errors='ignore').strip()
                                 if line:
                                     lines_read.append(line)
-                                    if "HELLO" in line.upper() and "NEOPIXEL" in line.upper():
+                                    up = line.upper()
+                                    if "HELLO" in up and ("NEOPIXEL" in up or "OLED" in up):
                                         test_serial.close()
                                         return port_name
                             except UnicodeDecodeError:
@@ -1066,7 +1111,8 @@ class NeoPixelController:
                     
                     if test_serial.in_waiting > 0:
                         response = test_serial.readline().decode('utf-8', errors='ignore').strip()
-                        if "HELLO" in response.upper() and "NEOPIXEL" in response.upper():
+                        up = response.upper()
+                        if "HELLO" in up and ("NEOPIXEL" in up or "OLED" in up):
                             # Device responded with HELLO NEOPIXEL - confirmed!
                             test_serial.close()
                             return port_name
@@ -1116,7 +1162,10 @@ class NeoPixelController:
         lines = 0
         try:
             while lines < max_lines and (time.time() - t0) < max_time_s and self._serial.in_waiting > 0:
-                _ = self._serial.readline()
+                raw = self._serial.readline()
+                if raw:
+                    line = raw.decode("utf-8", errors="ignore").strip()
+                    self._handle_rx_line(line)
                 lines += 1
         except Exception:
             pass
@@ -1133,8 +1182,12 @@ class NeoPixelController:
                     if not line:
                         continue
                     up = line.upper()
+                    # Forward button lines to callback, don't treat as ACK.
+                    if up.startswith("BTN:PRESS:") or up.startswith("BTN:RELEASE:"):
+                        self._handle_rx_line(line)
+                        continue
                     # Ignore periodic boot/handshake messages
-                    if "HELLO" in up and "NEOPIXEL" in up:
+                    if up.startswith("HELLO"):
                         continue
                     if up.startswith("ACK") or up.startswith("ERROR"):
                         return line
@@ -1155,26 +1208,22 @@ class NeoPixelController:
 
         try:
             with self._lock:
-                # Drain any backlog (e.g., HELLO spam after reset)
-                self._drain_input()
                 cmd_str = command + "\n"
                 self._serial.write(cmd_str.encode('utf-8'))
                 self._serial.flush()
                 if not expect_ack:
                     return True
-                resp = self._read_response(timeout_s=timeout_s)
-                # If device is chatty or slow, still consider write successful; but log ERRORs.
-                if resp is None:
-                    return True
-                if resp.upper().startswith("ERROR"):
-                    print(f"Warning: NeoPixel controller error for '{command}': {resp}", file=sys.stderr)
-                return True
+            # Read ACK/ERROR without holding lock (RX thread may also be running)
+            resp = self._read_response(timeout_s=timeout_s)
+            if resp is not None and resp.upper().startswith("ERROR"):
+                print(f"Warning: RP2040 error for '{command}': {resp}", file=sys.stderr)
+            return True
         except Exception as e:
-            print(f"Warning: Failed to send NeoPixel command '{command}': {e}", file=sys.stderr)
+            print(f"Warning: Failed to send RP2040 command '{command}': {e}", file=sys.stderr)
             return False
     
     def start(self):
-        """Initialize serial connection to NeoPixel microcontroller"""
+        """Initialize serial connection to RP2040 co-processor"""
         if not pyserial_available:
             raise ImportError(
                 "pyserial library is required but not installed. "
@@ -1279,6 +1328,11 @@ class NeoPixelController:
                 self._serial.reset_input_buffer()
             # Drain any boot-time HELLO spam (avoids mixing with ACK reads)
             self._drain_input(max_lines=200, max_time_s=0.5)
+
+            # Start RX loop to keep buffers drained (and receive button events)
+            self._rx_stop.clear()
+            self._rx_thr = threading.Thread(target=self._rx_loop, daemon=True)
+            self._rx_thr.start()
             
             # Send initialization command with brightness
             brightness_int = int(255 * self.brightness)
@@ -1288,7 +1342,7 @@ class NeoPixelController:
             self.all_off()
             
             self._initialized = True
-            print(f"NeoPixel controller initialized on {port}")
+            print(f"RP2040 controller initialized on {port}")
             return True
             
         except serial.SerialException as e:
@@ -1312,6 +1366,10 @@ class NeoPixelController:
     def stop(self):
         """Cleanup and turn off all NeoPixels"""
         self.all_off()
+        self._rx_stop.set()
+        if self._rx_thr:
+            self._rx_thr.join(timeout=1.0)
+            self._rx_thr = None
         if self._serial is not None:
             try:
                 with self._lock:
@@ -1324,6 +1382,27 @@ class NeoPixelController:
         self._last_mode = None
         self._last_led = None
         self._last_rgb = None
+
+    # -----------------------
+    # OLED UI helpers (v3)
+    # -----------------------
+
+    def oled_set_screen(self, screen_name: str):
+        """Set OLED UI screen by name (e.g., 'BOOT', 'RECORDING', 'RESULTS')."""
+        self._send_command(f"OLED:UI:SCREEN:{screen_name}", expect_ack=False)
+
+    def oled_set_bool(self, var_name: str, value: bool):
+        v = "1" if value else "0"
+        self._send_command(f"OLED:UI:SET:BOOL:{var_name}:{v}", expect_ack=False)
+
+    def oled_set_u8(self, var_name: str, value: int):
+        v = max(0, min(255, int(value)))
+        self._send_command(f"OLED:UI:SET:U8:{var_name}:{v}", expect_ack=False)
+
+    def oled_set_str(self, var_name: str, value: str):
+        # Avoid sending raw newlines (protocol is line-based). Firmware unescapes \\n -> newline.
+        safe = (value or "").replace("\n", "\\n")
+        self._send_command(f"OLED:UI:SET:STR:{var_name}:{safe}", expect_ack=False)
     
     def set_led(self, led_index, color=(255, 255, 255), animation_brightness=1.0):
         """Turn on a specific NeoPixel (0-3) with color and turn off all others
@@ -1657,6 +1736,11 @@ def main():
     gp = GazeClient(simulate=SIM_GAZE)
     gp.start()
     
+    # Button events can come from:
+    # - keyboard simulation (Pygame)
+    # - RP2040 serial (BTN:PRESS/RELEASE)
+    btn_event_q = queue.Queue()
+
     # Start GPIO button monitor for LattePanda Iota (if enabled)
     gpio_monitor = None
     if GPIO_BTN_MARKER_ENABLE and gpiod is not None:
@@ -1681,7 +1765,7 @@ def main():
     led_controller = None
     if GPIO_LED_CALIBRATION_ENABLE:
         try:
-            led_controller = NeoPixelController(
+            led_controller = Rp2040Controller(
                 serial_port=NEOPIXEL_SERIAL_PORT,
                 serial_baud=NEOPIXEL_SERIAL_BAUD,
                 num_pixels=NEOPIXEL_COUNT,
@@ -1689,6 +1773,11 @@ def main():
             )
             # start() will raise error if library unavailable or initialization fails
             led_controller.start()
+            # Forward RP2040 button edges into the main loop.
+            try:
+                led_controller.set_button_callback(lambda kind, btn: btn_event_q.put((kind, btn)))
+            except Exception:
+                pass
             print("NeoPixel controller initialized successfully")
         except Exception as e:
             print(f"Warning: Failed to initialize NeoPixel controller: {e}", file=sys.stderr)
@@ -1703,9 +1792,23 @@ def main():
     calib_status = "red"
     receiving_hint = False
 
-    state = "READY"  # READY|CALIBRATING|COLLECTING|ANALYZING|RESULTS
+    # FLOW screen id (matches ui/v3 UiScreen names).
+    # BOOT -> FIND_POSITION -> (MOVE_*/IN_POSITION) -> CALIBRATION -> RECORD_CONFIRMATION ->
+    # RECORDING -> STOP_RECORD -> INFERENCE_LOADING -> RESULTS, with MONITORING as a BTN_B-held modal.
+    state = "BOOT"
+    prev_state = None  # for MONITORING modal
+    monitoring_active = False
     running = True
     clock = pygame.time.Clock()
+
+    # Ensure OLED starts on BOOT screen (if RP2040 is connected)
+    if led_controller is not None:
+        try:
+            led_controller.oled_set_screen("BOOT")
+        except Exception:
+            pass
+
+    # (btn_event_q is defined earlier, before hardware initialization)
 
     # Calibration
     aff = Affine2D()
@@ -1763,16 +1866,33 @@ def main():
 
     # Collection
     session_t0 = None
-    next_task_id = 1
-    task_open = False
+    next_event_index = 1
+    event_open = False
+    event_started_at = None  # wall time (time.time()) when current event started
     events = []  # list of (elapsed_ms, elapsed_str, wall_str, label)
     gaze_samples = []  # store minimal fields for analysis
 
     # Analyzing/Results
     analyze_t0 = 0.0
-    per_task_scores = {}
+    per_event_scores = {}
     global_score = 0.0
     results_scroll = 0.0
+    results_pages = []  # list of {"title": str, "vals": [str,str,str,str]}
+    results_page_index = 0
+    analysis_total_values = 0
+    analysis_values_done = 0
+    analysis_seconds_per_value = 3  # also written to models/model_metadata.json
+    # If model metadata exists, prefer its ETA hints.
+    try:
+        meta_path = os.path.join("models", "model_metadata.json")
+        if os.path.exists(meta_path):
+            with open(meta_path, "r", encoding="utf-8") as f:
+                meta = json.load(f)
+            est = meta.get("estimated_seconds_per_value")
+            if isinstance(est, (int, float)) and est > 0:
+                analysis_seconds_per_value = float(est)
+    except Exception:
+        pass
     # Transient user feedback message
     info_msg = None
     info_msg_until = 0.0
@@ -1830,7 +1950,8 @@ def main():
             using_led_calib=GP_CALIBRATION_METHOD in ("LED", "BOTH"),
             using_overlay_calib=(GP_CALIBRATION_METHOD in ("OVERLAY", "BOTH") and not SIM_GAZE),
         )
-        state = "CALIBRATING"
+        # FLOW screen stays CALIBRATION; internal calibration work runs while on this screen.
+        state = "CALIBRATION"
         calib_status = "orange"
         calib_quality = "none"
         # Record override result for this calibration session (dev simulation)
@@ -1905,7 +2026,7 @@ def main():
                     log_calibration_event("calibration_abort", method="LED", note="Failed to configure calibration (CALIBRATE_SHOW)")
                     save_calibration_logs(calib_debug_events, calib_debug_t0)
                     calib_debug_saved_for_t0 = calib_debug_t0
-                    state = "READY"
+                    state = "CALIBRATION"
                     return
             
             # Start the calibration sequence and wait for ACK
@@ -1923,7 +2044,7 @@ def main():
                         log_calibration_event("calibration_abort", method="LED", note="Failed to start calibration (CALIBRATE_START)")
                         save_calibration_logs(calib_debug_events, calib_debug_t0)
                         calib_debug_saved_for_t0 = calib_debug_t0
-                        state = "READY"
+                        state = "CALIBRATION"
                         return
         
         # Start overlay calibration if enabled (only works with real hardware)
@@ -1974,7 +2095,7 @@ def main():
                     log_calibration_event("calibration_abort", method="OVERLAY", note="Failed to show calibration window (CALIBRATE_SHOW)")
                     save_calibration_logs(calib_debug_events, calib_debug_t0)
                     calib_debug_saved_for_t0 = calib_debug_t0
-                    state = "READY"
+                    state = "CALIBRATION"
                     return
             
             # Start the calibration sequence and wait for ACK
@@ -1990,60 +2111,115 @@ def main():
                         log_calibration_event("calibration_abort", method="OVERLAY", note="Failed to start overlay calibration (CALIBRATE_START)")
                         save_calibration_logs(calib_debug_events, calib_debug_t0)
                         calib_debug_saved_for_t0 = calib_debug_t0
-                        state = "READY"
+                        state = "CALIBRATION"
                         return
 
     def start_collection():
-        nonlocal state, session_t0, next_task_id, task_open, events, gaze_samples
+        nonlocal state, session_t0, next_event_index, event_open, event_started_at, events, gaze_samples
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
         if calib_quality not in ("ok", "low"):
             set_info_msg("Calibrate first")
             return
-        state = "COLLECTING"
+        state = "RECORDING"
+        if led_controller is not None:
+            try:
+                led_controller.oled_set_screen("RECORDING")
+            except Exception:
+                pass
         session_t0 = time.time()
-        next_task_id = 1
-        task_open = False
+        next_event_index = 1
+        event_open = False
+        event_started_at = None
         events = []
         gaze_samples = []
 
     def stop_collection_begin_analysis():
-        nonlocal state, analyze_t0, per_task_scores, global_score
-        state = "ANALYZING"
+        nonlocal state, analyze_t0, per_event_scores, global_score
+        nonlocal event_open, next_event_index, event_started_at
+        nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
+        state = "INFERENCE_LOADING"
+        if led_controller is not None:
+            try:
+                led_controller.oled_set_screen("INFERENCE_LOADING")
+            except Exception:
+                pass
         analyze_t0 = time.time()
+
+        # If the last event is still open, auto-close it before analysis.
+        if event_open and session_t0 is not None:
+            elapsed_ms, elapsed_str, wall_str = time_strings(session_t0)
+            label = f"EVENT{next_event_index}_STOP"
+            events.append((elapsed_ms, elapsed_str, wall_str, label))
+            event_open = False
+            event_started_at = None
+            next_event_index += 1
         
         # Save session logs to CSV
         save_session_logs(events, gaze_samples, session_t0)
         
         # Run analysis in a tiny thread to simulate progress
         def _run():
-            nonlocal per_task_scores, global_score
-            time.sleep(1.2)
+            nonlocal per_event_scores, global_score
+            nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
+
+            # Build page list: [global, event1, event2, ...]
+            n_events = max(0, next_event_index - 1)
+            pages = [{"title": "GLOBAL RESULTS", "vals": ["", "", "", ""]}]
+            for eidx in range(1, n_events + 1):
+                pages.append({"title": f"EVENT {eidx} RESULTS", "vals": ["", "", "", ""]})
+
+            results_pages = pages
+            results_page_index = 0
+            analysis_total_values = len(pages) * 4
+            analysis_values_done = 0
+
             if SIM_XGB:
-                # Fake: global = mean of per-task synthetic, per task = simple function of duration
-                per_task_scores = {}
-                # derive durations from events
-                starts = {}
-                for _, _, _, lab in events:
-                    if lab.endswith("_START"):
-                        starts[lab.split("_")[0]] = True
-                # simple deterministic values
-                for t in range(1, (next_task_id if not task_open else next_task_id) + 1):
-                    key = f"T{t}"
-                    per_task_scores[key] = round(0.5 + 0.1 * (t % 5), 3)
-                if per_task_scores:
-                    global_score = round(sum(per_task_scores.values()) / len(per_task_scores), 3)
-                else:
-                    global_score = 0.0
+                # Mock model: generate 4 values per page, one every 3 seconds.
+                for pidx, page in enumerate(pages):
+                    for vidx in range(4):
+                        time.sleep(float(analysis_seconds_per_value))
+                        # Deterministic-ish values in [0..1]
+                        val = 0.25 + 0.15 * (vidx) + 0.05 * (pidx % 5)
+                        val = max(0.0, min(1.0, val))
+                        page["vals"][vidx] = f"val{vidx+1}: {val:.3f}"
+                        analysis_values_done += 1
+
+                # Derive a simple scalar global/event score from val1 (placeholder)
+                per_event_scores = {}
+                for pidx in range(1, len(pages)):
+                    try:
+                        v1 = pages[pidx]["vals"][0].split(":")[1].strip()
+                        per_event_scores[f"E{pidx}"] = float(v1)
+                    except Exception:
+                        per_event_scores[f"E{pidx}"] = 0.0
+                global_score = float(sum(per_event_scores.values()) / len(per_event_scores)) if per_event_scores else 0.0
             else:
-                per_task_scores, global_score = run_xgb_results({
+                # Real model path: compute per-event scores once and map them into 4 display slots.
+                per_event_scores, global_score = run_xgb_results({
                     "events": events,
                     "gaze": gaze_samples,
                 }, aff=aff, session_t0=session_t0)
+                # Fill page values immediately (no artificial delay)
+                pages[0]["vals"] = [
+                    f"val1: {global_score:.3f}",
+                    "val2: --",
+                    "val3: --",
+                    "val4: --",
+                ]
+                for pidx in range(1, len(pages)):
+                    score = per_event_scores.get(f"E{pidx}", 0.0)
+                    pages[pidx]["vals"] = [
+                        f"val1: {score:.3f}",
+                        "val2: --",
+                        "val3: --",
+                        "val4: --",
+                    ]
+                analysis_values_done = analysis_total_values
             
             # Save results to CSV
-            save_results_logs(per_task_scores, global_score, session_t0)
+            save_results_logs(per_event_scores, global_score, session_t0)
             
             # flip to results after small delay
             time.sleep(0.3)
@@ -2053,20 +2229,27 @@ def main():
     def set_results_state():
         nonlocal state, results_scroll
         state = "RESULTS"
+        if led_controller is not None:
+            try:
+                led_controller.oled_set_screen("RESULTS")
+            except Exception:
+                pass
         results_scroll = 0.0
 
     def marker_toggle():
-        nonlocal task_open, next_task_id, button_pressed_until
+        nonlocal event_open, next_event_index, event_started_at, button_pressed_until
         if session_t0 is None:
             return
         elapsed_ms, elapsed_str, wall_str = time_strings(session_t0)
-        if not task_open:
-            label = f"T{next_task_id}_START"
-            task_open = True
+        if not event_open:
+            label = f"EVENT{next_event_index}_START"
+            event_open = True
+            event_started_at = time.time()
         else:
-            label = f"T{next_task_id}_END"
-            task_open = False
-            next_task_id += 1
+            label = f"EVENT{next_event_index}_STOP"
+            event_open = False
+            event_started_at = None
+            next_event_index += 1
         events.append((elapsed_ms, elapsed_str, wall_str, label))
         # Show visual feedback for 200ms
         button_pressed_until = time.time() + 0.2
@@ -2079,12 +2262,13 @@ def main():
     def reset_app_state():
         nonlocal state, calib_status, receiving_hint, aff, calib_points, target_points
         nonlocal calib_step, calib_step_start, calib_collect_start, calib_quality, calib_avg_error, current_calib_override
-        nonlocal session_t0, next_task_id, task_open, events, gaze_samples
-        nonlocal analyze_t0, per_task_scores, global_score, results_scroll
+        nonlocal session_t0, next_event_index, event_open, event_started_at, events, gaze_samples
+        nonlocal analyze_t0, per_event_scores, global_score, results_scroll
+        nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
         nonlocal eye_view_active, last_eye_data, last_eye_data_time, calib_sequence, calib_led_animation_start
         nonlocal led_calib_last_point_key
-        state = "READY"
+        state = "BOOT"
         calib_status = "red"
         receiving_hint = False
         aff = Affine2D()
@@ -2104,14 +2288,19 @@ def main():
         if not SIM_GAZE:
             gp.reset_calibration_point_progress()
         session_t0 = None
-        next_task_id = 1
-        task_open = False
+        next_event_index = 1
+        event_open = False
+        event_started_at = None
         events = []
         gaze_samples = []
         analyze_t0 = 0.0
-        per_task_scores = {}
+        per_event_scores = {}
         global_score = 0.0
         results_scroll = 0.0
+        results_pages = []
+        results_page_index = 0
+        analysis_total_values = 0
+        analysis_values_done = 0
         info_msg = None
         info_msg_until = 0.0
         last_calib_gaze = None
@@ -2119,6 +2308,289 @@ def main():
         last_eye_data = None
         last_eye_data_time = None
         set_info_msg("App state reset", dur=2.0)
+
+    def _position_status_from_eye_data():
+        """Return position status string: 'Good'|'Far'|'Near'."""
+        nonlocal last_eye_data
+        if not last_eye_data:
+            return "Far"
+        leyez = last_eye_data.get("leyez")
+        reyez = last_eye_data.get("reyez")
+        # Prefer any available eye distance (meters) and convert to cm.
+        dist_cm = None
+        if leyez is not None:
+            dist_cm = get_distance_cm(leyez)
+        elif reyez is not None:
+            dist_cm = get_distance_cm(reyez)
+        if dist_cm is None:
+            return "Far"
+        if dist_cm < 45.0:
+            return "Near"
+        if dist_cm > 75.0:
+            return "Far"
+        return "Good"
+
+    def _set_screen(new_screen: str):
+        """Set FLOW screen and update OLED immediately."""
+        nonlocal state
+        if new_screen == state:
+            return
+        state = new_screen
+        if led_controller is not None:
+            try:
+                led_controller.oled_set_screen(new_screen)
+            except Exception:
+                pass
+
+    def handle_button(kind: str, btn: str):
+        """Handle a button edge event from keyboard or RP2040."""
+        nonlocal prev_state, monitoring_active
+        nonlocal results_pages, results_page_index
+        kind = (kind or "").upper()
+        btn = (btn or "").upper()
+
+        # Modal monitoring (hold BTN_B)
+        if btn == "BTN_B":
+            if kind == "PRESS" and state != "MONITORING":
+                prev_state = state
+                monitoring_active = True
+                _set_screen("MONITORING")
+            elif kind == "RELEASE" and state == "MONITORING":
+                monitoring_active = False
+                _set_screen(prev_state or "BOOT")
+            return
+
+        # Ignore all other inputs while monitoring modal is active
+        if state == "MONITORING":
+            return
+
+        if kind != "PRESS":
+            return
+
+        if state == "BOOT":
+            if btn == "BTN_RIGHT":
+                _set_screen("FIND_POSITION")
+            return
+
+        if state == "FIND_POSITION":
+            if btn == "BTN_RIGHT":
+                pos = _position_status_from_eye_data()
+                if pos == "Good":
+                    _set_screen("IN_POSITION")
+                elif pos == "Near":
+                    _set_screen("MOVE_FARTHER")
+                else:
+                    _set_screen("MOVE_CLOSER")
+            return
+
+        if state in ("MOVE_CLOSER", "MOVE_FARTHER"):
+            if btn == "BTN_RIGHT":
+                _set_screen("FIND_POSITION")
+            return
+
+        if state == "IN_POSITION":
+            if btn == "BTN_RIGHT":
+                _set_screen("CALIBRATION")
+            return
+
+        if state == "CALIBRATION":
+            running_now = using_led_calib or using_overlay_calib
+            done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
+            if btn == "BTN_RIGHT":
+                if (not running_now) and calib_quality == "none":
+                    start_calibration(override=None)
+                elif done_now and calib_quality in ("ok", "low"):
+                    _set_screen("RECORD_CONFIRMATION")
+            elif btn == "BTN_LEFT":
+                if done_now:
+                    start_calibration(override=None)
+            return
+
+        if state == "RECORD_CONFIRMATION":
+            if btn == "BTN_RIGHT":
+                start_collection()
+            return
+
+        if state == "RECORDING":
+            if btn == "BTN_A":
+                marker_toggle()
+            elif btn == "BTN_RIGHT":
+                _set_screen("STOP_RECORD")
+            return
+
+        if state == "STOP_RECORD":
+            if btn == "BTN_LEFT":
+                _set_screen("RECORDING")
+            elif btn == "BTN_RIGHT":
+                stop_collection_begin_analysis()
+            return
+
+        if state == "RESULTS":
+            if btn == "BTN_RIGHT" and results_pages and results_page_index < (len(results_pages) - 1):
+                results_page_index += 1
+            elif btn == "BTN_LEFT" and results_pages and results_page_index > 0:
+                results_page_index -= 1
+            return
+
+    # -----------------------
+    # OLED v3 sync (cached)
+    # -----------------------
+    oled_last = {}
+
+    def _oled_set_bool(var_name: str, value: bool):
+        if led_controller is None:
+            return
+        key = ("B", var_name)
+        v = bool(value)
+        if oled_last.get(key) == v:
+            return
+        oled_last[key] = v
+        try:
+            led_controller.oled_set_bool(var_name, v)
+        except Exception:
+            pass
+
+    def _oled_set_u8(var_name: str, value: int):
+        if led_controller is None:
+            return
+        key = ("U8", var_name)
+        v = int(max(0, min(255, int(value))))
+        if oled_last.get(key) == v:
+            return
+        oled_last[key] = v
+        try:
+            led_controller.oled_set_u8(var_name, v)
+        except Exception:
+            pass
+
+    def _oled_set_str(var_name: str, value: str):
+        if led_controller is None:
+            return
+        key = ("S", var_name)
+        v = "" if value is None else str(value)
+        if oled_last.get(key) == v:
+            return
+        oled_last[key] = v
+        try:
+            led_controller.oled_set_str(var_name, v)
+        except Exception:
+            pass
+
+    def _fmt_mmss(seconds: float) -> str:
+        if seconds is None or seconds < 0:
+            return "--:--"
+        s = int(seconds)
+        m = s // 60
+        ss = s % 60
+        return f"{m:02d}:{ss:02d}"
+
+    def oled_sync():
+        """Push current state + dynamic vars to the OLED (ui/v3)."""
+        # BOOT screen status
+        if state == "BOOT":
+            _oled_set_bool("ui_tracker_detected", bool(gp.connected))
+            _oled_set_bool("ui_led_detected", True)
+            _oled_set_bool("ui_connection", bool(gp.connected))
+            _oled_set_str("ui_loading_data", "")
+
+        # CALIBRATION screen vars
+        if state == "CALIBRATION":
+            running_now = using_led_calib or using_overlay_calib
+            done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
+            _oled_set_str("ui_calib_start_btn", "Start calibration>" if (not running_now and calib_quality == "none") else "")
+            _oled_set_str("ui_calib_redo_btn", "<Redo" if done_now else "")
+            _oled_set_str("ui_calib_next_btn", "Next>" if (done_now and calib_quality in ("ok", "low")) else "")
+            # Calibration result as percentage
+            if done_now and calib_quality in ("ok", "low") and calib_avg_error is not None:
+                try:
+                    pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
+                    pct = max(0.0, min(100.0, pct))
+                    _oled_set_str("ui_calib_result", f"{pct:.0f}%")
+                except Exception:
+                    _oled_set_str("ui_calib_result", "")
+            else:
+                _oled_set_str("ui_calib_result", "")
+
+            # LED indicators
+            ul = ur = bl = br = False
+            if running_now:
+                if calib_step == 4:
+                    ul = ur = bl = br = True
+                elif calib_step == 0:
+                    br = True  # low_right
+                elif calib_step == 1:
+                    bl = True  # low_left
+                elif calib_step == 2:
+                    ul = True  # high_left
+                elif calib_step == 3:
+                    ur = True  # high_right
+            _oled_set_bool("ui_led_up_left", ul)
+            _oled_set_bool("ui_led_up_right", ur)
+            _oled_set_bool("ui_led_bottom_left", bl)
+            _oled_set_bool("ui_led_bottom_right", br)
+
+        # RECORDING screen vars
+        if state == "RECORDING":
+            total = (time.time() - session_t0) if session_t0 else None
+            _oled_set_str("ui_recording_timer", _fmt_mmss(total))
+            if event_open and event_started_at is not None:
+                _oled_set_str("ui_event_time", _fmt_mmss(time.time() - event_started_at))
+                _oled_set_str("ui_event_name", f"START EVENT {next_event_index}")
+            else:
+                _oled_set_str("ui_event_time", "--:--")
+                if next_event_index > 1:
+                    _oled_set_str("ui_event_name", f"STOP EVENT {next_event_index - 1}")
+                else:
+                    _oled_set_str("ui_event_name", "START EVENT 1")
+
+        # INFERENCE_LOADING
+        if state == "INFERENCE_LOADING":
+            pct = 0
+            rem_s = None
+            if analysis_total_values > 0:
+                pct = int(100 * float(analysis_values_done) / float(analysis_total_values))
+                pct = max(0, min(100, pct))
+                rem_s = (analysis_total_values - analysis_values_done) * float(analysis_seconds_per_value)
+            _oled_set_u8("ui_inference_prog_bar", pct)
+            _oled_set_str("ui_inference_timer", _fmt_mmss(rem_s) if rem_s is not None else "")
+            _oled_set_str("ui_loading_data", "")
+
+        # STOP_RECORD warning
+        if state == "STOP_RECORD":
+            if event_open:
+                _oled_set_str("ui_close_event_warning", f"Event marker {next_event_index} will be closed automatically")
+            else:
+                _oled_set_str("ui_close_event_warning", "")
+
+        # RESULTS (placeholder wiring; refined in later todos)
+        if state == "RESULTS":
+            page = results_pages[results_page_index] if (results_pages and 0 <= results_page_index < len(results_pages)) else {"title": "RESULTS", "vals": ["", "", "", ""]}
+            _oled_set_str("ui_results_title", page.get("title", "RESULTS"))
+            _oled_set_str("ui_results_prev_btn", "<Previous" if (results_pages and results_page_index > 0) else "")
+            _oled_set_str("ui_results_next_btn", "Next>" if (results_pages and results_page_index < (len(results_pages) - 1)) else "")
+            vals = page.get("vals") or ["", "", "", ""]
+            vals = (vals + ["", "", "", ""])[:4]
+            _oled_set_str("ui_result_1", vals[0])
+            _oled_set_str("ui_result_2", vals[1])
+            _oled_set_str("ui_result_3", vals[2])
+            _oled_set_str("ui_result_4", vals[3])
+
+        # MONITORING modal
+        if state == "MONITORING":
+            lpv = bool(last_eye_data.get("lpv")) if last_eye_data else False
+            rpv = bool(last_eye_data.get("rpv")) if last_eye_data else False
+            _oled_set_bool("ui_left_eye", lpv)
+            _oled_set_bool("ui_right_eye", rpv)
+            pos = _position_status_from_eye_data()
+            _oled_set_str("ui_position_status", pos)
+            if last_calib_gaze and len(last_calib_gaze) >= 2:
+                gx = max(0.0, min(1.0, float(last_calib_gaze[0])))
+                gy = max(0.0, min(1.0, float(last_calib_gaze[1])))
+                _oled_set_u8("ui_gaze_x", int(gx * 255))
+                _oled_set_u8("ui_gaze_y", int(gy * 255))
+            else:
+                _oled_set_u8("ui_gaze_x", 128)
+                _oled_set_u8("ui_gaze_y", 128)
     
     def gpio_button_callback():
         """Called when GPIO marker button is pressed"""
@@ -2148,20 +2620,20 @@ def main():
         if receiving_hint:
             pygame.draw.circle(screen, (255, 255, 255), (conn_x, 30), 4)
         # Blink calibration circle while calibrating
-        if state == "CALIBRATING":
+        if state == "CALIBRATION":
             blink_on = (int(time.time() * 2) % 2) == 0
             if blink_on:
                 draw_circle(screen, calib_status, (cal_x, 30))
         else:
             draw_circle(screen, calib_status, (cal_x, 30))
-        # Middle collecting indicator when collecting
-        if state == "COLLECTING":
+        # Middle recording indicator when recording
+        if state == "RECORDING":
             mid_x = WIDTH // 2
             # blink at ~2 Hz
             blink_on = (int(time.time() * 2) % 2) == 0
             if blink_on:
                 pygame.draw.circle(screen, (220, 50, 47), (mid_x, 30), 12)
-            lbl_col = small.render("Collecting", True, (200, 200, 200))
+            lbl_col = small.render("Recording", True, (200, 200, 200))
             screen.blit(lbl_col, (mid_x - lbl_col.get_width() // 2, 30 + 16))
         # Labels under circles
         lbl_conn = small.render("Connection", True, (200, 200, 200))
@@ -2170,7 +2642,12 @@ def main():
         screen.blit(lbl_cal, (cal_x - lbl_cal.get_width() // 2, 30 + 16))
         # Display calibration quality value if ok or low
         if calib_quality in ("ok", "low") and calib_avg_error is not None:
-            error_str = f"{calib_avg_error:.2f}"
+            try:
+                pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
+                pct = max(0.0, min(100.0, pct))
+                error_str = f"{pct:.0f}%"
+            except Exception:
+                error_str = ""
             lbl_error = small.render(error_str, True, (180, 180, 180))
             screen.blit(lbl_error, (cal_x - lbl_error.get_width() // 2, 30 + 16 + lbl_cal.get_height() + 2))
 
@@ -2279,34 +2756,17 @@ def main():
     def draw_key_overlay():
         if not SHOW_KEYS:
             return
-        cheat = []
-        if GPIO_LED_CALIBRATION_KEYBOARD:
-            cheat += [
-                "Z — Start calibration",
-                "X — Start collection",
-                "B — Stop collection (analyze)",
-            ]
-        if GPIO_BTN_MARKER_SIM:
-            cheat += [
-                "N — Marker (toggle start/end)",
-            ]
-        if GPIO_BTN_EYE_VIEW_SIM:
-            key_name = GPIO_BTN_EYE_VIEW_KEY.replace("K_", "").upper()
-            cheat += [
-                f"{key_name} — Eye view (hold)",
-            ]
-        if led_controller is not None:
-            cheat += [
-                "T — Test all LEDs",
-                "Q/W/E/U — Test LED 1/2/3/4",
-            ]
+        cheat = [
+            "W/A/S/D/X — Joystick Up/Left/Center/Right/Down",
+            "P — A button (toggle event marker in RECORDING)",
+            "L (hold) — B button (Monitoring modal)",
+            "M — Quit",
+        ]
         if SIM_GAZE:
             cheat += [
                 "1 — Gaze: Connected",
                 "2 — Gaze: Disconnected",
                 "3 — Gaze: Toggle stream",
-                "4 — Start failed calibration (sim)",
-                "5 — Start bad calibration (low quality)",
             ]
         cheat += [
             "R — Reset app state",
@@ -2348,15 +2808,15 @@ def main():
             center_y = icon_y + icon_size // 2
             pygame.draw.circle(screen, (0, 200, 100), (center_x, center_y), icon_size // 2)
             
-            # Draw "M" letter in white
-            m_font = pygame.font.SysFont(None, 32, bold=True)
-            m_text = m_font.render("M", True, (255, 255, 255))
-            m_x = center_x - m_text.get_width() // 2
-            m_y = center_y - m_text.get_height() // 2
-            screen.blit(m_text, (m_x, m_y))
+            # Draw "A" letter in white (event marker button)
+            a_font = pygame.font.SysFont(None, 32, bold=True)
+            a_text = a_font.render("A", True, (255, 255, 255))
+            a_x = center_x - a_text.get_width() // 2
+            a_y = center_y - a_text.get_height() // 2
+            screen.blit(a_text, (a_x, a_y))
             
-            # Draw "Marker" label below icon
-            label = small.render("Marker", True, (200, 200, 200))
+            # Draw "Event" label below icon
+            label = small.render("Event", True, (200, 200, 200))
             label_x = center_x - label.get_width() // 2
             label_y = icon_y + icon_size + 4
             screen.blit(label, (label_x, label_y))
@@ -2366,9 +2826,21 @@ def main():
             if ev.type == pygame.QUIT:
                 running = False
             elif ev.type == pygame.KEYDOWN:
-                if GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_z and state == "READY":
-                    log_key("Z")
-                    start_calibration(override=None)
+                # Keyboard -> simulated button edges (FLOW)
+                KEY_TO_BTN = {
+                    pygame.K_w: "BTN_UP",
+                    pygame.K_x: "BTN_DOWN",
+                    pygame.K_a: "BTN_LEFT",
+                    pygame.K_d: "BTN_RIGHT",
+                    pygame.K_s: "BTN_CENTER",
+                    pygame.K_p: "BTN_A",
+                    pygame.K_l: "BTN_B",
+                }
+                if ev.key in KEY_TO_BTN:
+                    k = KEY_TO_BTN[ev.key]
+                    if SHOW_KEYS:
+                        log_key(k.replace("BTN_", ""))
+                    btn_event_q.put(("PRESS", k))
                 elif SIM_GAZE and ev.key == pygame.K_1:
                     log_key("1")
                     gp.sim_connect()
@@ -2378,70 +2850,25 @@ def main():
                 elif SIM_GAZE and ev.key == pygame.K_3:
                     log_key("3")
                     gp.sim_toggle_stream()
-                elif SIM_GAZE and ev.key == pygame.K_4 and state == "READY":
-                    # Start calibration with simulated failed result (same routine, overridden outcome)
-                    log_key("4")
-                    start_calibration(override="failed")
-                elif SIM_GAZE and ev.key == pygame.K_5 and state == "READY":
-                    # Start calibration with simulated low-quality result (same routine, overridden outcome)
-                    log_key("5")
-                    start_calibration(override="low")
-                elif GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_x and state == "READY":
-                    log_key("X")
-                    start_collection()
-                elif GPIO_BTN_MARKER_SIM and ev.key == pygame.K_n and state == "COLLECTING":
-                    log_key("N")
-                    marker_toggle()
-                elif GPIO_LED_CALIBRATION_KEYBOARD and ev.key == pygame.K_b and state == "COLLECTING":
-                    log_key("B")
-                    stop_collection_begin_analysis()
-                elif GPIO_BTN_EYE_VIEW_SIM:
-                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
-                    try:
-                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
-                        if key_attr is not None and ev.key == key_attr:
-                            log_key(GPIO_BTN_EYE_VIEW_KEY.replace("K_", "").upper())
-                            set_eye_view(True)
-                    except Exception:
-                        pass
                 elif ev.key == pygame.K_m:
                     if SHOW_KEYS:
                         log_key("M")
                     running = False
-                # LED testing shortcuts (for debugging)
-                elif ev.key == pygame.K_t and led_controller is not None:
-                    # T key: Test all LEDs
-                    log_key("T")
-                    led_controller.all_on()
-                    threading.Thread(target=lambda: (time.sleep(2), led_controller.all_off()), daemon=True).start()
-                elif ev.key == pygame.K_q and led_controller is not None:
-                    # Q key: Test LED 1
-                    log_key("Q")
-                    led_controller.test_led(0, duration=1.0)
-                elif ev.key == pygame.K_w and led_controller is not None:
-                    # W key: Test LED 2
-                    log_key("W")
-                    led_controller.test_led(1, duration=1.0)
-                elif ev.key == pygame.K_e and led_controller is not None:
-                    # E key: Test LED 3
-                    log_key("E")
-                    led_controller.test_led(2, duration=1.0)
-                elif ev.key == pygame.K_u and led_controller is not None:
-                    # U key: Test LED 4
-                    log_key("U")
-                    led_controller.test_led(3, duration=1.0)
                 elif ev.key == pygame.K_r:
                     log_key("R")
                     reset_app_state()
             elif ev.type == pygame.KEYUP:
-                if GPIO_BTN_EYE_VIEW_SIM:
-                    # Parse configurable key from string (e.g., "K_v" -> pygame.K_v)
-                    try:
-                        key_attr = getattr(pygame, GPIO_BTN_EYE_VIEW_KEY, None)
-                        if key_attr is not None and ev.key == key_attr:
-                            set_eye_view(False)
-                    except Exception:
-                        pass
+                # Only BTN_B is hold-to-monitor in the FLOW.
+                if ev.key == pygame.K_l:
+                    btn_event_q.put(("RELEASE", "BTN_B"))
+
+        # Apply all queued button events (keyboard + RP2040)
+        try:
+            while True:
+                kind, btn = btn_event_q.get_nowait()
+                handle_button(kind, btn)
+        except queue.Empty:
+            pass
 
         # Pull gaze samples
         # Show red when disconnected, green when connected
@@ -2458,7 +2885,7 @@ def main():
                 s = gp.q.get_nowait()
                 samples_processed += 1
                 
-                if state == "COLLECTING":
+                if state == "RECORDING":
                     gaze_samples.append(s)
                 
                 # Remember last for preview (include validity) - only keep latest for display
@@ -2494,8 +2921,11 @@ def main():
             print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
                   f"Processed {samples_processed} samples this frame.", file=sys.stderr)
 
+        # Sync current screen variables to OLED
+        oled_sync()
+
         # Calibration sequencing
-        if state == "CALIBRATING":
+        if state == "CALIBRATION":
             # Handle overlay calibration (if enabled)
             overlay_complete = False
             if using_overlay_calib:
@@ -2573,7 +3003,7 @@ def main():
                             log_calibration_event("calibration_end", method="OVERLAY", note="overlay result -> READY")
                             save_calibration_logs(calib_debug_events, calib_debug_t0)
                             calib_debug_saved_for_t0 = calib_debug_t0
-                        state = "READY"
+                        state = "CALIBRATION"
                 else:
                     # Still calibrating overlay, wait for CALIB_RESULT message
                     # The server will send CALIB_START_PT and CALIB_RESULT_PT messages for each point
@@ -2603,7 +3033,7 @@ def main():
                         # If LED calibration is also disabled, abort
                         if not using_led_calib:
                             current_calib_override = None
-                            state = "READY"
+                            state = "CALIBRATION"
                             calib_status = "red"
                             calib_quality = "failed"
                             if calib_debug_saved_for_t0 != calib_debug_t0:
@@ -2840,7 +3270,7 @@ def main():
                             )
                             save_calibration_logs(calib_debug_events, calib_debug_t0)
                             calib_debug_saved_for_t0 = calib_debug_t0
-                        state = "READY"
+                        state = "CALIBRATION"
                 else:
                     # Still calibrating, wait for CALIB_RESULT message from Gazepoint
                     elapsed = time.time() - calib_step_start
@@ -2869,7 +3299,7 @@ def main():
                         # If overlay calibration is also disabled, abort
                         if not using_overlay_calib:
                             current_calib_override = None
-                            state = "READY"
+                            state = "CALIBRATION"
                             calib_status = "red"
                             calib_quality = "failed"
                             if calib_debug_saved_for_t0 != calib_debug_t0:
@@ -2879,12 +3309,12 @@ def main():
             
             # If both calibrations are complete, finalize
             if (overlay_complete or not using_overlay_calib) and (led_complete or not using_led_calib):
-                if state == "CALIBRATING":
+                if state == "CALIBRATION":
                     # Both are done, finalize
                     current_calib_override = None
-                    state = "READY"
+                    state = "CALIBRATION"
                     if calib_debug_saved_for_t0 != calib_debug_t0:
-                        log_calibration_event("calibration_end", method=GP_CALIBRATION_METHOD, note="finalize -> READY")
+                        log_calibration_event("calibration_end", method=GP_CALIBRATION_METHOD, note="finalize -> CALIBRATION")
                         save_calibration_logs(calib_debug_events, calib_debug_t0)
                         calib_debug_saved_for_t0 = calib_debug_t0
 
@@ -2893,7 +3323,7 @@ def main():
         draw_status_header()
 
         # On-screen calibration NeoPixel hints (only for LED-based calibration)
-        if state == "CALIBRATING" and GPIO_LED_CALIBRATION_DISPLAY and using_led_calib:
+        if state == "CALIBRATION" and GPIO_LED_CALIBRATION_DISPLAY and using_led_calib:
             # Map logical positions to screen coordinates
             # LED_ORDER maps: [low_right, low_left, high_left, high_right] -> physical LED indices
             logical_positions = [
@@ -2936,127 +3366,123 @@ def main():
         if led_controller is not None:
             # Turn off LEDs when not calibrating or when not using LED-based calibration.
             # (When calibrating with LEDs, the calibration loop above is the single source of truth.)
-            if state != "CALIBRATING" or not using_led_calib:
+            if state != "CALIBRATION" or not using_led_calib:
                 led_controller.all_off()
 
-        if state == "READY":
-            # Message logic based on connection and calibration
-            now = time.time()
-            if info_msg and now < info_msg_until:
-                msg = info_msg
-            else:
-                info_msg = None
-                if not gp.connected:
-                    msg = "Connect Gazepoint"
-                else:
-                    if calib_quality == "ok":
-                        msg = "Ready"
-                    elif calib_quality == "low":
-                        msg = "Ready, low quality calibration"
-                    elif calib_quality == "failed":
-                        msg = "Calibration failed, try again"
-                    else:
-                        msg = "Start calibration"
+        # Screen-specific rendering (FLOW screens)
+        if state == "BOOT":
+            msg = info_msg if (info_msg and time.time() < info_msg_until) else "Press D to start"
             txt = big.render(msg, True, (255, 255, 255))
-            
-            # Show gaze preview after successful calibration
-            if calib_quality in ("ok", "low") and last_calib_gaze is not None:
-                # Draw preview square below the message
-                preview_y = HEIGHT // 2 + 40
-                sq = min(200, WIDTH - 40)
-                cx = WIDTH // 2
-                rect = pygame.Rect(cx - sq // 2, preview_y, sq, sq)
-                pygame.draw.rect(screen, (30, 30, 30), rect, border_radius=6)
-                
-                # Draw gaze position
-                # Handle new format: (gx, gy, valid) or old format: (gx, gy)
-                if len(last_calib_gaze) == 3:
-                    gx, gy, valid = last_calib_gaze
-                else:
-                    gx, gy = last_calib_gaze
-                    valid = True  # Assume valid for old format compatibility
-                
-                if valid:
-                    # Valid gaze: draw at actual position
-                    # Gazepoint coordinates: gx=0.0 (left), gx=1.0 (right), gy=0.0 (top), gy=1.0 (bottom)
-                    # Map normalized coordinates (0-1) to preview rectangle pixels
-                    dx = rect.left + int(gx * rect.width)
-                    dy = rect.top + int(gy * rect.height)
-                    # Clamp to rectangle bounds to prevent drawing outside
-                    dx = max(rect.left, min(rect.right - 1, dx))
-                    dy = max(rect.top, min(rect.bottom - 1, dy))
-                    pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
-                else:
-                    # Invalid gaze: show blinking red marker at center
-                    blink_rate = 0.5  # Blink every 0.5 seconds
-                    should_show = int(time.time() / blink_rate) % 2 == 0
-                    if should_show:
-                        pygame.draw.circle(screen, (255, 0, 0), (rect.centerx, rect.centery), 8)
-                        pygame.draw.circle(screen, (200, 0, 0), (rect.centerx, rect.centery), 10, 2)
-                
-                # Draw crosshair in center for reference
-                pygame.draw.line(screen, (60, 60, 60), 
-                               (rect.centerx - 10, rect.centery), 
-                               (rect.centerx + 10, rect.centery), 1)
-                pygame.draw.line(screen, (60, 60, 60), 
-                               (rect.centerx, rect.centery - 10), 
-                               (rect.centerx, rect.centery + 10), 1)
-                
-                # Show message above preview
-                screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, preview_y - 60))
-            else:
-                # Show message in center when no preview
-                screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-        elif state == "CALIBRATING":
-            # Only show calibration indicators, not the preview/list squares
-            txt = big.render("Calibrating…", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+        elif state == "FIND_POSITION":
+            pos = _position_status_from_eye_data()
+            txt = big.render("Find position", True, (255, 255, 255))
             screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-        elif state == "COLLECTING":
-            # Show collecting label and live marker list on right half
-            txt = big.render("Collecting…", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            # reuse preview pane for live gaze
+            st = font.render(f"Position: {pos}  (D to continue)", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, 110))
+            # Reuse gaze preview styling
             draw_preview_and_markers()
-        elif state == "ANALYZING":
-            txt = big.render("Calculating…", True, (255, 255, 255))
+        elif state == "MOVE_CLOSER":
+            txt = big.render("Move closer", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            st = font.render("Press D to re-check", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
+        elif state == "MOVE_FARTHER":
+            txt = big.render("Move farther", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            st = font.render("Press D to re-check", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
+        elif state == "IN_POSITION":
+            txt = big.render("In position", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            st = font.render("Press D for calibration", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
+        elif state == "CALIBRATION":
+            running_now = using_led_calib or using_overlay_calib
+            if running_now:
+                txt = big.render("Calibrating…", True, (255, 255, 255))
+            else:
+                if calib_quality in ("ok", "low"):
+                    txt = big.render("Calibration done", True, (255, 255, 255))
+                elif calib_quality == "failed":
+                    txt = big.render("Calibration failed", True, (255, 255, 255))
+                else:
+                    txt = big.render("Calibration", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
+            hint = font.render("D=start/next, A=redo (if done)", True, (180, 180, 180))
+            screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, 110))
+        elif state == "RECORD_CONFIRMATION":
+            txt = big.render("Ready to record?", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            st = font.render("Press D to start", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
+        elif state == "RECORDING":
+            txt = big.render("Recording…", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
+            # Timers + current event label
+            total = _fmt_mmss(time.time() - session_t0) if session_t0 else "--:--"
+            if event_open and event_started_at is not None:
+                ev_t = _fmt_mmss(time.time() - event_started_at)
+                ev_name = f"START EVENT {next_event_index}"
+            else:
+                ev_t = "--:--"
+                ev_name = f"STOP EVENT {next_event_index - 1}" if next_event_index > 1 else "START EVENT 1"
+            t1 = font.render(f"Total: {total}", True, (220, 220, 220))
+            t2 = font.render(f"Event:  {ev_t}", True, (220, 220, 220))
+            t3 = font.render(ev_name, True, (0, 0, 0))
+            screen.blit(t1, (WIDTH // 2 - t1.get_width() // 2, 100))
+            screen.blit(t2, (WIDTH // 2 - t2.get_width() // 2, 120))
+            # Highlight event name
+            bg = pygame.Rect(WIDTH // 2 - 140, 145, 280, 26)
+            pygame.draw.rect(screen, (230, 230, 230), bg, border_radius=6)
+            screen.blit(t3, (WIDTH // 2 - t3.get_width() // 2, 150))
+            draw_preview_and_markers()
+        elif state == "STOP_RECORD":
+            txt = big.render("End recording?", True, (255, 255, 255))
+            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
+            st = font.render("A=No, D=Yes", True, (200, 200, 200))
+            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
+            if event_open:
+                warn = font.render(f"Event marker {next_event_index} will be closed automatically", True, (255, 200, 0))
+                screen.blit(warn, (WIDTH // 2 - warn.get_width() // 2, HEIGHT // 2 + 55))
+        elif state == "INFERENCE_LOADING":
+            txt = big.render("Analysing…", True, (255, 255, 255))
             screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 60))
-            # progress bar
             bar_w, bar_h = int(WIDTH * 0.7), 18
             bx = WIDTH // 2 - bar_w // 2
             by = HEIGHT // 2
             pygame.draw.rect(screen, (40, 40, 40), (bx, by, bar_w, bar_h), border_radius=6)
-            pr = min(1.0, (time.time() - analyze_t0) / 1.5)
+            pr = 0.0
+            if analysis_total_values > 0:
+                pr = float(analysis_values_done) / float(analysis_total_values)
+            pr = max(0.0, min(1.0, pr))
             pygame.draw.rect(screen, (80, 180, 80), (bx, by, int(bar_w * pr), bar_h), border_radius=6)
+            rem_s = (analysis_total_values - analysis_values_done) * float(analysis_seconds_per_value) if analysis_total_values > 0 else None
+            eta = font.render(f"ETA: {_fmt_mmss(rem_s)}", True, (200, 200, 200))
+            screen.blit(eta, (WIDTH // 2 - eta.get_width() // 2, by + 30))
         elif state == "RESULTS":
-            txt = big.render(f"Global: {global_score:.3f}", True, (255, 255, 255))
+            txt = big.render("Results", True, (255, 255, 255))
             screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            # Per-task list: only loop if too many to fit; slower loop speed
             y0 = 120
-            lines = [f"{k}: {v:.3f}" for k, v in sorted(per_task_scores.items(), key=lambda kv: int(kv[0][1:]))]
-            if lines:
-                line_h = font.get_height() + 4
-                avail_h = HEIGHT - y0 - 20
-                visible = max(1, avail_h // line_h)
-                if len(lines) > visible:
-                    results_scroll = (results_scroll + 0.05) % len(lines)
-                    start = int(results_scroll)
-                    count = visible
-                else:
-                    start = 0
-                    count = len(lines)
-                for i in range(count):
-                    line = lines[(start + i) % len(lines)]
-                    surf = font.render(line, True, (230, 230, 230))
-                    screen.blit(surf, (WIDTH // 2 - 120, y0 + i * line_h))
-
-        # Draw eye view if active (overlay on top of everything)
-        if eye_view_active:
-            # Draw semi-transparent overlay
-            overlay = pygame.Surface((WIDTH, HEIGHT))
-            overlay.set_alpha(200)
-            overlay.fill((0, 0, 0))
-            screen.blit(overlay, (0, 0))
-            # Draw eye view
+            page = results_pages[results_page_index] if (results_pages and 0 <= results_page_index < len(results_pages)) else {"title": "RESULTS", "vals": ["", "", "", ""]}
+            title = page.get("title", "RESULTS")
+            title_surf = font.render(title, True, (200, 200, 200))
+            screen.blit(title_surf, (WIDTH // 2 - title_surf.get_width() // 2, y0))
+            vals = (page.get("vals") or ["", "", "", ""])
+            for i in range(4):
+                line = vals[i] if i < len(vals) else ""
+                surf = font.render(line, True, (230, 230, 230))
+                screen.blit(surf, (WIDTH // 2 - surf.get_width() // 2, y0 + 30 + i * (font.get_height() + 6)))
+            nav = []
+            if results_pages and results_page_index > 0:
+                nav.append("<A Prev")
+            if results_pages and results_page_index < (len(results_pages) - 1):
+                nav.append("D Next>")
+            if nav:
+                nav_s = font.render("   ".join(nav), True, (180, 180, 180))
+                screen.blit(nav_s, (WIDTH // 2 - nav_s.get_width() // 2, HEIGHT - 60))
+        elif state == "MONITORING":
+            # Full-screen monitoring view (modal). Reuse existing eye view renderer.
             draw_eye_view(screen, last_eye_data, last_eye_data_time, font, small, big)
         
         # Button feedback and key overlay drawn last
@@ -3131,7 +3557,7 @@ def save_session_logs(events, gaze_samples, session_t0):
     except Exception as e:
         print(f"Warning: Failed to save session logs: {e}", file=sys.stderr)
 
-def save_results_logs(per_task_scores, global_score, session_t0):
+def save_results_logs(per_event_scores, global_score, session_t0):
     """Save analysis results to CSV file in /logs folder."""
     try:
         # Create logs directory
@@ -3156,9 +3582,9 @@ def save_results_logs(per_task_scores, global_score, session_t0):
             # Write global score
             writer.writerow(['GLOBAL', f"{global_score:.6f}"])
             
-            # Write per-task scores
-            for task_key in sorted(per_task_scores.keys(), key=lambda k: int(k[1:])):
-                writer.writerow([task_key, f"{per_task_scores[task_key]:.6f}"])
+            # Write per-event scores
+            for event_key in sorted(per_event_scores.keys(), key=lambda k: int(k[1:]) if k.startswith("E") else 0):
+                writer.writerow([event_key, f"{per_event_scores[event_key]:.6f}"])
     except Exception as e:
         print(f"Warning: Failed to save results logs: {e}", file=sys.stderr)
 
@@ -3236,7 +3662,7 @@ _xgb_model = None
 _xgb_loaded = False
 
 def load_xgb_models():
-    """Load XGBoost model from disk. Model outputs a vector: [global_score, T1, T2, ..., T10]."""
+    """Load XGBoost model from disk. Model outputs a vector: [global_score, score_1, score_2, ..., score_10]."""
     global _xgb_model, _xgb_loaded
     if _xgb_loaded or (xgb is None and joblib is None):
         return
@@ -3356,19 +3782,19 @@ def extract_features(gaze_samples, events, session_t0, aff):
         saccade_count = 0.0
         saccade_rate = 0.0
     
-    # Task duration (from events)
-    task_duration = 0.0
+    # Session duration (from events)
+    session_duration = 0.0
     if events and session_t0:
         if len(events) >= 2:
             last_event_time = events[-1][0] / 1000.0  # Convert ms to seconds
-            task_duration = last_event_time
+            session_duration = last_event_time
     
     total_samples = float(len(gaze_samples))
     
     # Build feature vector (20 features)
     features = np.array([
         mean_gaze_x, mean_gaze_y, gaze_variance_x, gaze_variance_y,
-        blink_count, fixation_duration, saccade_rate, task_duration,
+        blink_count, fixation_duration, saccade_rate, session_duration,
         gaze_std_x, gaze_std_y, pupil_mean, pupil_std,
         validity_rate, gaze_range_x, gaze_range_y, gaze_velocity_mean,
         gaze_velocity_std, fixation_count, saccade_count, total_samples
@@ -3379,8 +3805,8 @@ def extract_features(gaze_samples, events, session_t0, aff):
 def run_xgb_results(collected, aff=None, session_t0=None):
     """
     Run XGBoost inference on collected data.
-    Model outputs a vector: [global_score, T1, T2, ..., T10]
-    Returns (per_task_dict, global_score) where per_task_dict maps "T1", "T2", etc. to scores.
+    Model outputs a vector: [global_score, score_1, score_2, ..., score_10]
+    Returns (per_event_dict, global_score) where per_event_dict maps "E1", "E2", etc. to scores.
     """
     global _xgb_model
     
@@ -3395,52 +3821,57 @@ def run_xgb_results(collected, aff=None, session_t0=None):
     features = extract_features(gaze_samples, events, session_t0, aff)
     features_2d = features.reshape(1, -1)
     
-    per_task = {}
+    per_event = {}
     
-    # Get task IDs from events
-    tasks = set()
+    # Get event indices from events
+    event_ids = set()
     for _, _, _, lab in events:
-        if lab.endswith("_START") or lab.endswith("_END"):
-            task_id = int(lab.split("_")[0][1:])  # Extract number from "T1_START"
-            tasks.add(task_id)
+        if lab.endswith("_START") or lab.endswith("_STOP"):
+            head = lab.split("_")[0]  # e.g. "EVENT3"
+            if head.startswith("EVENT"):
+                try:
+                    event_id = int(head[5:])
+                    event_ids.add(event_id)
+                except Exception:
+                    pass
     
     # Predict using the single model that outputs a vector
     if _xgb_model is not None and _xgb_loaded:
         try:
-            # Model outputs: [global_score, T1, T2, ..., T10]
+            # Model outputs: [global_score, score_1, score_2, ..., score_10]
             predictions = _xgb_model.predict(features_2d)[0]  # Get first (and only) prediction
             
-            # Verify output vector has expected length (11: 1 global + 10 tasks)
+            # Verify output vector has expected length (11: 1 global + 10 event slots)
             if len(predictions) < 11:
                 raise ValueError(f"Expected 11 outputs, got {len(predictions)}")
             
             # Parse the output vector
             # predictions[0] = global_score
-            # predictions[1:] = [T1, T2, ..., T10]
+            # predictions[1:] = [score_1, score_2, ..., score_10]
             global_score = float(max(0.0, min(1.0, predictions[0])))  # Clamp to [0, 1]
             
-            # Extract per-task scores for tasks that exist in events
-            for task_id in sorted(tasks):
-                if task_id >= 1 and task_id <= 10:  # Valid task range
-                    key = f"T{task_id}"
-                    # predictions[task_id] corresponds to T{task_id} (since index 0 is global)
-                    task_score = float(max(0.0, min(1.0, predictions[task_id])))
-                    per_task[key] = task_score
+            # Extract per-event scores for events that exist in events
+            for event_id in sorted(event_ids):
+                if event_id >= 1 and event_id <= 10:  # Valid event range
+                    key = f"E{event_id}"
+                    # predictions[event_id] corresponds to former T{event_id} (since index 0 is global)
+                    event_score = float(max(0.0, min(1.0, predictions[event_id])))
+                    per_event[key] = event_score
         except Exception as e:
             print(f"Warning: Model prediction failed: {e}", file=sys.stderr)
             # Fallback to random values
-            for task_id in sorted(tasks):
-                key = f"T{task_id}"
-                per_task[key] = np.random.rand()
-            global_score = np.random.rand() if not per_task else float(np.mean(list(per_task.values())))
+            for event_id in sorted(event_ids):
+                key = f"E{event_id}"
+                per_event[key] = np.random.rand()
+            global_score = np.random.rand() if not per_event else float(np.mean(list(per_event.values())))
     else:
         # Fallback to random values if model not available
-        for task_id in sorted(tasks):
-            key = f"T{task_id}"
-            per_task[key] = np.random.rand()
-        global_score = np.random.rand() if not per_task else float(np.mean(list(per_task.values())))
+        for event_id in sorted(event_ids):
+            key = f"E{event_id}"
+            per_event[key] = np.random.rand()
+        global_score = np.random.rand() if not per_event else float(np.mean(list(per_event.values())))
     
-    return per_task, global_score
+    return per_event, global_score
 
 
 if __name__ == "__main__":

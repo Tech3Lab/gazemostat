@@ -18,11 +18,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "ui/v2/generated_screens.h"
-#include "ui/v2/ui_state_machine.h"
-// NOTE: Arduino CLI only compiles sources in the sketch root (and src/).
-// We keep UI sources under ui/ and include the .cpp here to ensure it builds.
-#include "ui/v2/ui_state_machine.cpp"
+#include "ui/v3/generated_screens.h"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -75,11 +71,13 @@ uint8_t buttons_prev = 0;
 unsigned long last_button_poll_ms = 0;
 const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz
 
-// UI state variables (track device state for dynamic UI elements)
+// UI screen state (CPU is the source of truth; firmware only renders).
+UiScreen ui_current_screen = UiScreen::BOOT;
+
+// Backward-compatible v2-style state variables (used only by OLED:UI:STATE).
 bool ui_tracker_detected_state = false;
 bool ui_led_detected_state = false;
 bool ui_connection_state = false;
-bool ui_calibration_ok_state = false;
 
 // Track if we've sent initial HELLO messages and when to stop
 unsigned long boot_time;
@@ -118,32 +116,31 @@ static void drawKeyBox(int16_t x, int16_t y, int16_t w, int16_t h, const char *l
   display.print(label);
 }
 
-static Button bitToButton(uint8_t button_bit) {
+static const char *buttonNameFromBit(uint8_t button_bit) {
   switch (button_bit) {
-    case 0: return Button::BTN_UP;
-    case 1: return Button::BTN_DOWN;
-    case 2: return Button::BTN_LEFT;
-    case 3: return Button::BTN_RIGHT;
-    case 4: return Button::BTN_CENTER;
-    case 5: return Button::BTN_A;
-    case 6: return Button::BTN_B;
-    default: return Button::BTN_CENTER;
+    case 0: return "BTN_UP";
+    case 1: return "BTN_DOWN";
+    case 2: return "BTN_LEFT";
+    case 3: return "BTN_RIGHT";
+    case 4: return "BTN_CENTER";
+    case 5: return "BTN_A";
+    case 6: return "BTN_B";
+    default: return "BTN_CENTER";
   }
 }
 
 static void update_ui_dynamic_elements() {
-  // Update dynamic UI variables based on device state
+  // Backward-compatible bridge for OLED:UI:STATE (v2-style command).
+  // New protocol should prefer OLED:UI:SET:* commands which directly set UiDynamicVar values.
   ui_tracker_detected = ui_tracker_detected_state;
   ui_led_detected = ui_led_detected_state;
   ui_connection = ui_connection_state;
-  // ui/v2 uses a status string rather than a boolean "calibration ok".
-  ui_calibration_status = ui_calibration_ok_state ? "OK" : "POOR";
 }
 
 static void renderUi() {
   if (!oled_available) return;
   update_ui_dynamic_elements();
-  draw_screen(display, ui_sm_get_screen());
+  draw_screen(display, ui_current_screen);
   display.display();
 }
 
@@ -163,36 +160,95 @@ static void pollButtonsAndUpdateDisplay() {
   uint8_t changed = cur ^ buttons_prev;
   
   if (changed != 0) {
-    // Debug: report current button state bitmask (1 = pressed)
-    Serial.print("BTN:");
-    for (int8_t i = 6; i >= 0; i--) {
-      Serial.print((cur >> i) & 0x01);
-    }
-    Serial.println();
-
-    bool anyPress = false;
-    // Detect button press edges (readButtons() sets bit=1 when pressed)
-    // Press edge is 0 -> 1.
+    // Emit press/release edges to the CPU (needed for BTN_B hold-to-monitor).
     for (uint8_t i = 0; i < 7; i++) {
       uint8_t mask = (1 << i);
       if (changed & mask) {
-        if (!(buttons_prev & mask) && (cur & mask)) {
-          // Button was just pressed (transition from 0 to 1)
-          ui_sm_on_button(bitToButton(i));
-          anyPress = true;
+        bool prevPressed = (buttons_prev & mask) != 0;
+        bool curPressed = (cur & mask) != 0;
+        if (!prevPressed && curPressed) {
+          Serial.print("BTN:PRESS:");
+          Serial.println(buttonNameFromBit(i));
+        } else if (prevPressed && !curPressed) {
+          Serial.print("BTN:RELEASE:");
+          Serial.println(buttonNameFromBit(i));
         }
       }
     }
     
     buttons_prev = cur;
-    if (anyPress) {
-      renderUi();
-      return;
-    }
   }
   
   // Refresh UI even without input (dynamic elements may change via serial)
   renderUi();
+}
+
+static bool parseBool01(const String &s, bool &out) {
+  if (s.length() == 0) return false;
+  String t = s;
+  t.trim();
+  t.toUpperCase();
+  if (t == "1" || t == "ON" || t == "TRUE") { out = true; return true; }
+  if (t == "0" || t == "OFF" || t == "FALSE") { out = false; return true; }
+  return false;
+}
+
+static UiScreen screenFromString(String name, bool &ok) {
+  ok = true;
+  name.trim();
+  name.toUpperCase();
+  if (name == "LOADING") return UiScreen::LOADING;
+  if (name == "BOOT") return UiScreen::BOOT;
+  if (name == "FIND_POSITION") return UiScreen::FIND_POSITION;
+  if (name == "MOVE_CLOSER") return UiScreen::MOVE_CLOSER;
+  if (name == "MOVE_FARTHER") return UiScreen::MOVE_FARTHER;
+  if (name == "IN_POSITION") return UiScreen::IN_POSITION;
+  if (name == "CALIBRATION") return UiScreen::CALIBRATION;
+  if (name == "RECORD_CONFIRMATION") return UiScreen::RECORD_CONFIRMATION;
+  if (name == "RECORDING") return UiScreen::RECORDING;
+  if (name == "STOP_RECORD") return UiScreen::STOP_RECORD;
+  if (name == "INFERENCE_LOADING") return UiScreen::INFERENCE_LOADING;
+  if (name == "RESULTS") return UiScreen::RESULTS;
+  if (name == "MONITORING") return UiScreen::MONITORING;
+  ok = false;
+  return UiScreen::BOOT;
+}
+
+static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
+  varName.trim();
+  varName.toLowerCase();
+  // v3 generated vars
+  if (varName == "ui_loading_data") { out = UiDynamicVar::UI_LOADING_DATA; return true; }
+  if (varName == "ui_tracker_detected") { out = UiDynamicVar::UI_TRACKER_DETECTED; return true; }
+  if (varName == "ui_led_detected") { out = UiDynamicVar::UI_LED_DETECTED; return true; }
+  if (varName == "ui_connection") { out = UiDynamicVar::UI_CONNECTION; return true; }
+  if (varName == "ui_calib_start_btn") { out = UiDynamicVar::UI_CALIB_START_BTN; return true; }
+  if (varName == "ui_calib_next_btn") { out = UiDynamicVar::UI_CALIB_NEXT_BTN; return true; }
+  if (varName == "ui_calib_redo_btn") { out = UiDynamicVar::UI_CALIB_REDO_BTN; return true; }
+  if (varName == "ui_calib_result") { out = UiDynamicVar::UI_CALIB_RESULT; return true; }
+  if (varName == "ui_led_up_left") { out = UiDynamicVar::UI_LED_UP_LEFT; return true; }
+  if (varName == "ui_led_up_right") { out = UiDynamicVar::UI_LED_UP_RIGHT; return true; }
+  if (varName == "ui_led_bottom_left") { out = UiDynamicVar::UI_LED_BOTTOM_LEFT; return true; }
+  if (varName == "ui_led_bottom_right") { out = UiDynamicVar::UI_LED_BOTTOM_RIGHT; return true; }
+  if (varName == "ui_recording_timer") { out = UiDynamicVar::UI_RECORDING_TIMER; return true; }
+  if (varName == "ui_event_time") { out = UiDynamicVar::UI_EVENT_TIME; return true; }
+  if (varName == "ui_event_name") { out = UiDynamicVar::UI_EVENT_NAME; return true; }
+  if (varName == "ui_closed_event_warning" || varName == "ui_close_event_warning") { out = UiDynamicVar::UI_CLOSE_EVENT_WARNING; return true; }
+  if (varName == "ui_inference_timer") { out = UiDynamicVar::UI_INFERENCE_TIMER; return true; }
+  if (varName == "ui_inference_prog_bar") { out = UiDynamicVar::UI_INFERENCE_PROG_BAR; return true; }
+  if (varName == "ui_results_title") { out = UiDynamicVar::UI_RESULTS_TITLE; return true; }
+  if (varName == "ui_results_next_btn") { out = UiDynamicVar::UI_RESULTS_NEXT_BTN; return true; }
+  if (varName == "ui_results_prev_btn") { out = UiDynamicVar::UI_RESULTS_PREV_BTN; return true; }
+  if (varName == "ui_result_1") { out = UiDynamicVar::UI_RESULT_1; return true; }
+  if (varName == "ui_result_2") { out = UiDynamicVar::UI_RESULT_2; return true; }
+  if (varName == "ui_result_3") { out = UiDynamicVar::UI_RESULT_3; return true; }
+  if (varName == "ui_result_4") { out = UiDynamicVar::UI_RESULT_4; return true; }
+  if (varName == "ui_left_eye") { out = UiDynamicVar::UI_LEFT_EYE; return true; }
+  if (varName == "ui_right_eye") { out = UiDynamicVar::UI_RIGHT_EYE; return true; }
+  if (varName == "ui_gaze_x") { out = UiDynamicVar::UI_GAZE_X; return true; }
+  if (varName == "ui_gaze_y") { out = UiDynamicVar::UI_GAZE_Y; return true; }
+  if (varName == "ui_position_status" || varName == "ui_text_el_269") { out = UiDynamicVar::UI_TEXT_EL_269; return true; }
+  return false;
 }
 
 static bool i2cProbe(uint8_t addr) {
@@ -331,9 +387,9 @@ void setup() {
   // Initialize OLED (non-fatal if missing)
   oledInit();
   if (oled_available) {
-    // Initialize UI state
+    // Initialize UI state (CPU will override screen shortly after boot)
     buttons_prev = readButtons();
-    ui_sm_init();
+    ui_current_screen = UiScreen::BOOT;
     renderUi();
   }
   
@@ -542,8 +598,11 @@ void processCommand(String cmd) {
     }
 
     if (sub == "UI") {
-      // OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>
+      // OLED:UI:STATE:<tracker>:<led>:<connection>:<calib> (legacy/back-compat; calib ignored in v3)
       // OLED:UI:SCREEN:<screen_name>
+      // OLED:UI:SET:BOOL:<var_name>:<0|1>
+      // OLED:UI:SET:U8:<var_name>:<0..255>
+      // OLED:UI:SET:STR:<var_name>:<value...>  (value may contain ':'; we use remainder parsing)
       String arg = getParam(params, 1);
       arg.toUpperCase();
       if (arg == "STATE") {
@@ -551,11 +610,9 @@ void processCommand(String cmd) {
         String tracker = getParam(params, 2);
         String led = getParam(params, 3);
         String conn = getParam(params, 4);
-        String calib = getParam(params, 5);
         if (tracker.length() > 0) ui_tracker_detected_state = (tracker == "1" || tracker == "ON" || tracker == "TRUE");
         if (led.length() > 0) ui_led_detected_state = (led == "1" || led == "ON" || led == "TRUE");
         if (conn.length() > 0) ui_connection_state = (conn == "1" || conn == "ON" || conn == "TRUE");
-        if (calib.length() > 0) ui_calibration_ok_state = (calib == "1" || calib == "ON" || calib == "TRUE");
         renderUi();
         Serial.println("OLED:UI:STATE:OK");
         return;
@@ -563,33 +620,72 @@ void processCommand(String cmd) {
       if (arg == "SCREEN") {
         // Change UI screen
         String screen_name = getParam(params, 2);
-        screen_name.toUpperCase();
-        // ui/v2 screens
-        if (screen_name == "BOOT") ui_sm_set_screen(UiScreen::BOOT);
-        else if (screen_name == "LOADING") ui_sm_set_screen(UiScreen::LOADING);
-        else if (screen_name == "IN_POSITION") ui_sm_set_screen(UiScreen::IN_POSITION);
-        else if (screen_name == "MOVE_CLOSER") ui_sm_set_screen(UiScreen::MOVE_CLOSER);
-        else if (screen_name == "MOVE_FARTHER") ui_sm_set_screen(UiScreen::MOVE_FARTHER);
-        else if (screen_name == "CALIBRATION") ui_sm_set_screen(UiScreen::CALIBRATION);
-        else if (screen_name == "CALIBRATION_WARNING") ui_sm_set_screen(UiScreen::CALIBRATION_WARNING);
-        else if (screen_name == "RECORDING") ui_sm_set_screen(UiScreen::RECORDING);
-        else if (screen_name == "STOP_CONFIRMATION") ui_sm_set_screen(UiScreen::STOP_CONFIRMATION);
-        else if (screen_name == "MISSING_STOP_EVENT") ui_sm_set_screen(UiScreen::MISSING_STOP_EVENT);
-        else if (screen_name == "INFERENCE_LOADING") ui_sm_set_screen(UiScreen::INFERENCE_LOADING);
-        else if (screen_name == "GLOBAL_RESULTS") ui_sm_set_screen(UiScreen::GLOBAL_RESULTS);
-        else if (screen_name == "EVENT_RESULTS") ui_sm_set_screen(UiScreen::EVENT_RESULTS);
-        else if (screen_name == "QUIT_CONFIRMATION") ui_sm_set_screen(UiScreen::QUIT_CONFIRMATION);
-        else if (screen_name == "MONITOR_GAZE") ui_sm_set_screen(UiScreen::MONITOR_GAZE);
-        // Backward-compatible aliases (pre-v2 names)
-        else if (screen_name == "POSITION") ui_sm_set_screen(UiScreen::IN_POSITION);
-        else if (screen_name == "RESULTS") ui_sm_set_screen(UiScreen::GLOBAL_RESULTS);
-        else if (screen_name == "MONITOR_POS") ui_sm_set_screen(UiScreen::IN_POSITION);
-        else {
+        bool ok = false;
+        UiScreen s = screenFromString(screen_name, ok);
+        if (!ok) {
           Serial.println("ERROR:Invalid screen name");
           return;
         }
+        ui_current_screen = s;
         renderUi();
         Serial.println("OLED:UI:SCREEN:OK");
+        return;
+      }
+      if (arg == "SET") {
+        String type = getParam(params, 2);
+        type.toUpperCase();
+        String varName = getParam(params, 3);
+        UiDynamicVar var;
+        if (!dynamicVarFromString(varName, var)) {
+          Serial.println("ERROR:Invalid var name");
+          return;
+        }
+
+        if (type == "BOOL") {
+          bool v = false;
+          String raw = getParam(params, 4);
+          if (!parseBool01(raw, v)) {
+            Serial.println("ERROR:Invalid BOOL value");
+            return;
+          }
+          ui_set<bool>(var, v);
+          renderUi();
+          Serial.println("OLED:UI:SET:OK");
+          return;
+        }
+
+        if (type == "U8") {
+          String raw = getParam(params, 4);
+          int n = raw.toInt();
+          if (n < 0) n = 0;
+          if (n > 255) n = 255;
+          ui_set<uint8_t>(var, (uint8_t)n);
+          renderUi();
+          Serial.println("OLED:UI:SET:OK");
+          return;
+        }
+
+        if (type == "STR") {
+          // Parse remainder after the prefix: UI:SET:STR:<var_name>:
+          // We intentionally allow ':' inside the value.
+          String prefix = "UI:SET:STR:" + varName + ":";
+          int idx = params.indexOf(prefix);
+          String value = "";
+          if (idx >= 0) {
+            value = params.substring(idx + prefix.length());
+          } else {
+            // Fallback if varName casing differs; take 4th param only.
+            value = getParam(params, 4);
+          }
+          // Unescape common sequences from host (so host can send multi-line strings safely).
+          value.replace("\\n", "\n");
+          ui_set<String>(var, value);
+          renderUi();
+          Serial.println("OLED:UI:SET:OK");
+          return;
+        }
+
+        Serial.println("ERROR:Invalid SET type");
         return;
       }
       Serial.println("ERROR:Invalid UI command");
