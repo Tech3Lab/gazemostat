@@ -317,6 +317,12 @@ dev_show_keys: true
 #   Default: true
 fullscreen: true
 
+# ui_refresh_ms: UI refresh cadence in milliseconds for positioning/OLED updates
+#   - Lower values update more frequently but increase serial/UI activity
+#   - Recommended: 100
+#   Default: 100
+ui_refresh_ms: 100
+
 # ----------------------------------------------------------------------------
 # RP2040 boot/reset handling
 # ----------------------------------------------------------------------------

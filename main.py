@@ -2,6 +2,7 @@ import os
 import sys
 import time
 import math
+import re
 import threading
 import queue
 import socket
@@ -30,13 +31,14 @@ NEOPIXEL_COUNT = 4  # Number of NeoPixels in chain
 NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0 (sent to microcontroller)
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
-SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
+SHOW_KEYS = True     # Keep key history for debug panels (keyboard HUD is hidden)
 # Windowed fullscreen (borderless), not exclusive fullscreen.
 # If False, runs in a fixed-size frameless window (WIDTH x HEIGHT).
 FULLSCREEN = True
 
 WIDTH, HEIGHT = 480, 800
 FPS = 60  # Increased from 30 to reduce display latency
+UI_REFRESH_MS = 100
 GP_HOST, GP_PORT = "127.0.0.1", 4242
 MODEL_PATH = "models/model.xgb"
 FEATURE_WINDOW_MS = 1500
@@ -77,6 +79,19 @@ LED_BLINK_DUTY = 0.5           # Duty cycle (0..1): fraction of period LEDs are 
 RP2040_BOOT_REINIT_APP_STATE = True
 RP2040_HEARTBEAT_TIMEOUT_S = 3.0
 
+# Eye tracker raw fields expected from Gazepoint REC frames.
+EYE_TRACKER_RAW_FIELDS = [
+    "BPOGX", "BPOGY", "BPOGV",
+    "FPOGX", "FPOGY", "FPOGV",
+    "LPOGX", "LPOGY", "LPOGV",
+    "RPOGX", "RPOGY", "RPOGV",
+    "LPD", "RPD",
+    "LEYEZ", "REYEZ",
+    "LPV", "RPV",
+    "LPUPILV", "RPUPILV",
+    "LPUPILD", "RPUPILD",
+]
+
 # Load config.yaml if it exists
 def load_config():
     global GPIO_BTN_MARKER_SIM, GPIO_BTN_MARKER_ENABLE, GPIO_BTN_MARKER_PIN
@@ -84,7 +99,7 @@ def load_config():
     global GP_CALIBRATION_METHOD
     global GPIO_LED_CALIBRATION_ENABLE
     global NEOPIXEL_SERIAL_PORT, NEOPIXEL_SERIAL_BAUD, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
-    global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS
+    global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS, UI_REFRESH_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GP_CALIBRATE_DELAY, GP_CALIBRATE_TIMEOUT
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
@@ -131,6 +146,7 @@ def load_config():
                     GP_PORT = config.get('gp_port', GP_PORT)
                     MODEL_PATH = config.get('model_path', MODEL_PATH)
                     FEATURE_WINDOW_MS = config.get('feature_window_ms', FEATURE_WINDOW_MS)
+                    UI_REFRESH_MS = config.get('ui_refresh_ms', UI_REFRESH_MS)
                     CALIB_OK_THRESHOLD = config.get('calibration_ok_threshold', CALIB_OK_THRESHOLD)
                     CALIB_LOW_THRESHOLD = config.get('calibration_low_threshold', CALIB_LOW_THRESHOLD)
                     CALIB_DELAY = config.get('calib_delay', CALIB_DELAY)
@@ -187,6 +203,11 @@ def load_config():
                     if not isinstance(LED_BLINK_DUTY, (int, float)) or LED_BLINK_DUTY <= 0.0 or LED_BLINK_DUTY >= 1.0:
                         print(f"Warning: Invalid led_blink_duty '{LED_BLINK_DUTY}', using default 0.5", file=sys.stderr)
                         LED_BLINK_DUTY = 0.5
+                    if not isinstance(UI_REFRESH_MS, (int, float)) or UI_REFRESH_MS < 10:
+                        print(f"Warning: Invalid ui_refresh_ms '{UI_REFRESH_MS}', using default 100", file=sys.stderr)
+                        UI_REFRESH_MS = 100
+                    else:
+                        UI_REFRESH_MS = int(UI_REFRESH_MS)
                     # Oscillation/blinking animation has been removed for reliability.
         except Exception as e:
             print(f"Warning: Failed to load config.yaml: {e}", file=sys.stderr)
@@ -713,6 +734,13 @@ class GazeClient:
                             elif b'<REC' in line:
                                 self.receiving = True
                                 try:
+                                    # Capture all attributes present in the REC frame for raw diagnostics display.
+                                    raw_fields = {}
+                                    for m in re.finditer(r'([A-Za-z0-9_]+)="([^"]*)"', line_str):
+                                        key = m.group(1).upper()
+                                        val = m.group(2).strip()
+                                        raw_fields[key] = None if val == "" else val
+
                                     # Try Best POG first (Section 5.7 - average or best available)
                                     gx = get_attr(line_str, 'BPOGX', None)
                                     gy = get_attr(line_str, 'BPOGY', None)
@@ -832,13 +860,45 @@ class GazeClient:
                                     gy = max(0.0, min(1.0, float(gy)))
                                     
                                     t = time.time()
-                                    self._push_sample(t, gx, gy, pupil, valid, leyez=leyez, reyez=reyez, 
-                                                     lpv=lpv, rpv=rpv, lpupild=lpupild, rpupild=rpupild)
+                                    self._push_sample(
+                                        t,
+                                        gx,
+                                        gy,
+                                        pupil,
+                                        valid,
+                                        leyez=leyez,
+                                        reyez=reyez,
+                                        lpv=lpv,
+                                        rpv=rpv,
+                                        lpupild=lpupild,
+                                        rpupild=rpupild,
+                                        lpd=lpd,
+                                        rpd=rpd,
+                                        lpupilv=lpupilv,
+                                        rpupilv=rpupilv,
+                                        bpogv=bpogv,
+                                        fpogv=fpogv,
+                                        lpogv=lpogv,
+                                        rpogv=rpogv,
+                                        raw_fields=raw_fields,
+                                    )
                                 except Exception:
                                     # Fallback on parse error - use center position with invalid flag
                                     t = time.time()
-                                    self._push_sample(t, 0.5, 0.5, 2.5, False, leyez=None, reyez=None,
-                                                     lpv=False, rpv=False, lpupild=None, rpupild=None)
+                                    self._push_sample(
+                                        t,
+                                        0.5,
+                                        0.5,
+                                        2.5,
+                                        False,
+                                        leyez=None,
+                                        reyez=None,
+                                        lpv=False,
+                                        rpv=False,
+                                        lpupild=None,
+                                        rpupild=None,
+                                        raw_fields={},
+                                    )
                             
                     except socket.timeout:
                         # Timeout is normal - continue reading
@@ -898,20 +958,60 @@ class GazeClient:
                 lpupild = 0.004 + 0.001 * math.sin(ang * 0.6)  # Vary around 4mm
                 rpupild = 0.004 + 0.001 * math.cos(ang * 0.6)  # Slightly different phase
                 
-                self._push_sample(now, gx, gy, pupil, valid, leyez=leyez, reyez=reyez,
-                                 lpv=lpv, rpv=rpv, lpupild=lpupild, rpupild=rpupild)
+                self._push_sample(
+                    now,
+                    gx,
+                    gy,
+                    pupil,
+                    valid,
+                    leyez=leyez,
+                    reyez=reyez,
+                    lpv=lpv,
+                    rpv=rpv,
+                    lpupild=lpupild,
+                    rpupild=rpupild,
+                    raw_fields={
+                        "BPOGX": f"{gx:.6f}",
+                        "BPOGY": f"{gy:.6f}",
+                        "BPOGV": "1" if valid else "0",
+                        "LEYEZ": f"{leyez:.6f}",
+                        "REYEZ": f"{reyez:.6f}",
+                        "LPV": "1" if lpv else "0",
+                        "RPV": "1" if rpv else "0",
+                        "LPUPILD": f"{lpupild:.6f}",
+                        "RPUPILD": f"{rpupild:.6f}",
+                    },
+                )
                 time.sleep(1.0 / 60.0)
             else:
                 self.receiving = False
                 time.sleep(0.05)
 
-    def _push_sample(self, t, gx, gy, pupil, valid, leyez=None, reyez=None, lpv=None, rpv=None, 
-                     lpupild=None, rpupild=None):
+    def _push_sample(
+        self,
+        t,
+        gx,
+        gy,
+        pupil,
+        valid,
+        leyez=None,
+        reyez=None,
+        lpv=None,
+        rpv=None,
+        lpupild=None,
+        rpupild=None,
+        raw_fields=None,
+        **extra_fields,
+    ):
         sample = {
             "t": t, "gx": gx, "gy": gy, "pupil": pupil, "valid": valid,
             "leyez": leyez, "reyez": reyez, "lpv": lpv, "rpv": rpv,
             "lpupild": lpupild, "rpupild": rpupild
         }
+        if raw_fields is not None:
+            sample["raw_fields"] = raw_fields
+        if extra_fields:
+            sample.update(extra_fields)
         try:
             self.q.put_nowait(sample)
         except queue.Full:
@@ -1049,7 +1149,7 @@ class Rp2040Controller:
         self._last_uptime_s = None
         # Serial/heartbeat log for UI (thread-safe, last N lines)
         self._serial_log = []
-        self._serial_log_max = 80
+        self._serial_log_max = 500
         self._serial_log_lock = threading.Lock()
         # Cache last sent state to avoid spamming the serial link every frame (reduces flicker/glitches)
         self._last_mode = None  # "off" | "single" | "all"
@@ -1911,7 +2011,7 @@ def main():
     monitoring_active = False
     running = True
     clock = pygame.time.Clock()
-    position_next_eval = 0.0  # head positioning UI refresh (200ms)
+    position_next_eval = 0.0  # head positioning UI refresh cadence (UI_REFRESH_MS)
 
     # Ensure OLED starts on BOOT screen (if RP2040 is connected)
     if led_controller is not None:
@@ -2518,7 +2618,7 @@ def main():
                 _set_screen("FIND_POSITION")
             return
 
-        # Head positioning: continuously re-evaluated elsewhere (every 200ms) and displayed
+        # Head positioning: continuously re-evaluated elsewhere (every UI_REFRESH_MS) and displayed
         # as MOVE_CLOSER / MOVE_FARTHER / IN_POSITION. Advancement to calibration is NEVER
         # automatic: user must press RIGHT while in a good position.
         if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
@@ -2881,6 +2981,16 @@ def main():
     key_log = []  # list of (time, label)
     button_log = []  # list of (time, src, kind, btn)
     app_t0 = time.time()
+    serial_log_autoscroll = True
+    serial_log_scroll_offset = 0  # lines from bottom when autoscroll is disabled
+    serial_log_rect_for_input = None
+
+    def _fmt_unknown(v):
+        if v is None:
+            return "unknown"
+        if isinstance(v, str) and v.strip() == "":
+            return "unknown"
+        return str(v)
 
     def log_button(kind: str, btn: str, src: str):
         button_log.append((time.time(), src, kind, btn))
@@ -3017,6 +3127,25 @@ def main():
                 # Only BTN_B is hold-to-monitor in the FLOW.
                 if ev.key == pygame.K_l:
                     btn_event_q.put(("RELEASE", "BTN_B", "KB"))
+            elif ev.type == pygame.MOUSEWHEEL:
+                # Heartbeat/serial panel scrolling.
+                if serial_log_rect_for_input is not None:
+                    mx, my = pygame.mouse.get_pos()
+                    if serial_log_rect_for_input.collidepoint(mx, my):
+                        line_h = small.get_height() + 2
+                        visible_rows = max(1, (serial_log_rect_for_input.height - 40) // line_h)
+                        total_lines = len(led_controller.get_serial_log(1000)) if led_controller else 0
+                        max_offset = max(0, total_lines - visible_rows)
+                        if ev.y > 0:
+                            # First upward scroll disables autoscroll and navigates to older lines.
+                            if serial_log_autoscroll:
+                                serial_log_autoscroll = False
+                            serial_log_scroll_offset = min(max_offset, serial_log_scroll_offset + int(ev.y))
+                        elif ev.y < 0 and (not serial_log_autoscroll):
+                            serial_log_scroll_offset = max(0, serial_log_scroll_offset + int(ev.y))
+                            # Re-enable autoscroll when user returns to newest line.
+                            if serial_log_scroll_offset == 0:
+                                serial_log_autoscroll = True
 
         # Apply all queued button events (keyboard + RP2040)
         try:
@@ -3146,7 +3275,7 @@ def main():
                 else:
                     desired = "MOVE_CLOSER"
                 _set_screen(desired)
-                position_next_eval = now + 0.2
+                position_next_eval = now + (float(UI_REFRESH_MS) / 1000.0)
 
         # Sync current screen variables to OLED
         oled_sync()
@@ -3681,36 +3810,55 @@ def main():
         PANEL_W = max(200, WIDTH - 2 * MARGIN)
         HALF_W = (PANEL_W - GAP) // 2
         TOP_Y = 72
-        ROW_H1 = max(140, min(220, (HEIGHT - TOP_Y - 7 * MARGIN - 130 - 90 - 90 - 110) // 1))  # preview + tracker height
+        ROW_H_RAW = 150
         ROW_H_PIPELINE = 130
         ROW_H_EVENTS = 90
         ROW_H_BUTTONS = 90
         ROW_H_SHORTCUTS = 110
+        ROW_H1 = max(
+            120,
+            min(
+                220,
+                HEIGHT
+                - TOP_Y
+                - ROW_H_RAW
+                - ROW_H_PIPELINE
+                - ROW_H_EVENTS
+                - ROW_H_BUTTONS
+                - ROW_H_SHORTCUTS
+                - 6 * MARGIN
+                - 80
+                - 20,
+            ),
+        )  # preview + interpreted tracker height
         remaining_h = max(
-            100,
+            80,
             HEIGHT
             - TOP_Y
             - ROW_H1
+            - ROW_H_RAW
             - ROW_H_PIPELINE
             - ROW_H_EVENTS
             - ROW_H_BUTTONS
             - ROW_H_SHORTCUTS
-            - 7 * MARGIN
-            - 50,
+            - 6 * MARGIN
+            - 20,
         )
 
         preview_rect = pygame.Rect(MARGIN, TOP_Y, HALF_W, ROW_H1)
-        tracker_rect = pygame.Rect(MARGIN + HALF_W + GAP, TOP_Y, HALF_W, ROW_H1)
+        interpreted_rect = pygame.Rect(MARGIN + HALF_W + GAP, TOP_Y, HALF_W, ROW_H1)
         y2 = TOP_Y + ROW_H1 + MARGIN
-        pipeline_rect = pygame.Rect(MARGIN, y2, PANEL_W, ROW_H_PIPELINE)
-        y3 = y2 + ROW_H_PIPELINE + MARGIN
-        events_rect = pygame.Rect(MARGIN, y3, PANEL_W, ROW_H_EVENTS)
-        y4 = y3 + ROW_H_EVENTS + MARGIN
-        buttons_rect = pygame.Rect(MARGIN, y4, PANEL_W, ROW_H_BUTTONS)
-        y5 = y4 + ROW_H_BUTTONS + MARGIN
-        shortcuts_rect = pygame.Rect(MARGIN, y5, PANEL_W, ROW_H_SHORTCUTS)
-        y6 = y5 + ROW_H_SHORTCUTS + MARGIN
-        serial_log_rect = pygame.Rect(MARGIN, y6, PANEL_W, remaining_h)
+        raw_rect = pygame.Rect(MARGIN, y2, PANEL_W, ROW_H_RAW)
+        y3 = y2 + ROW_H_RAW + MARGIN
+        pipeline_rect = pygame.Rect(MARGIN, y3, PANEL_W, ROW_H_PIPELINE)
+        y4 = y3 + ROW_H_PIPELINE + MARGIN
+        events_rect = pygame.Rect(MARGIN, y4, PANEL_W, ROW_H_EVENTS)
+        y5 = y4 + ROW_H_EVENTS + MARGIN
+        buttons_rect = pygame.Rect(MARGIN, y5, PANEL_W, ROW_H_BUTTONS)
+        y6 = y5 + ROW_H_BUTTONS + MARGIN
+        shortcuts_rect = pygame.Rect(MARGIN, y6, PANEL_W, ROW_H_SHORTCUTS)
+        y7 = y6 + ROW_H_SHORTCUTS + MARGIN
+        serial_log_rect = pygame.Rect(MARGIN, y7, PANEL_W, remaining_h)
 
         # Preview panel (gaze)
         px, py = _draw_panel(preview_rect, "Gaze preview (normalized)")
@@ -3739,8 +3887,8 @@ def main():
                     pygame.draw.circle(screen, (255, 0, 0), (inner.centerx, inner.centery), 8)
                     pygame.draw.circle(screen, (200, 0, 0), (inner.centerx, inner.centery), 10, 2)
 
-        # Tracker panel (latest values)
-        tx, ty = _draw_panel(tracker_rect, "Eye tracker (latest sample)")
+        # Interpreted tracker panel
+        tx, ty = _draw_panel(interpreted_rect, "Eye tracker (interpreted)")
         pos = _position_status_from_eye_data()
         dist_cm = None
         if last_eye_data:
@@ -3755,8 +3903,33 @@ def main():
         tracker_lines = [
             f"Connected: {bool(gp.connected)}  Receiving: {bool(gp.receiving)}",
             f"Queue size: {gp.q.qsize()}",
-            f"Position eval: {pos}  (updates OLED @ 200ms)",
+            f"Position eval: {pos}  (updates OLED @ {UI_REFRESH_MS}ms)",
         ]
+        sample = last_sample_raw or {}
+        gx_raw = sample.get("gx")
+        gy_raw = sample.get("gy")
+        valid_raw = sample.get("valid")
+        leyez_raw = sample.get("leyez")
+        reyez_raw = sample.get("reyez")
+        lpv_raw_u = sample.get("lpv")
+        rpv_raw_u = sample.get("rpv")
+        lpupild_raw_u = sample.get("lpupild")
+        rpupild_raw_u = sample.get("rpupild")
+        lcm = get_distance_cm(leyez_raw) if leyez_raw is not None else None
+        rcm = get_distance_cm(reyez_raw) if reyez_raw is not None else None
+        left_open_u = None if (rpv_raw_u is None and rpupild_raw_u is None) else (bool(rpv_raw_u) if rpupild_raw_u is None else (rpupild_raw_u is not None))
+        right_open_u = None if (lpv_raw_u is None and lpupild_raw_u is None) else (bool(lpv_raw_u) if lpupild_raw_u is None else (lpupild_raw_u is not None))
+        tracker_lines.extend(
+            [
+                f"Gaze gx/gy: {_fmt_unknown(gx_raw)} / {_fmt_unknown(gy_raw)}",
+                f"Gaze valid: {_fmt_unknown(valid_raw)}",
+                f"Distance cm L/R: {_fmt_unknown(lcm)} / {_fmt_unknown(rcm)}",
+                f"Eyes open L/R: {_fmt_unknown(left_open_u)} / {_fmt_unknown(right_open_u)}",
+                f"Pupil diam m L/R: {_fmt_unknown(lpupild_raw_u)} / {_fmt_unknown(rpupild_raw_u)}",
+                f"LPV/RPV: {_fmt_unknown(lpv_raw_u)} / {_fmt_unknown(rpv_raw_u)}",
+                f"Last eye data age: {f'{(time.time() - last_eye_data_time):.2f}s' if last_eye_data_time is not None else 'unknown'}",
+            ]
+        )
         if last_calib_gaze is not None:
             if len(last_calib_gaze) == 3:
                 gx, gy, valid = last_calib_gaze
@@ -3785,6 +3958,39 @@ def main():
             except Exception:
                 pass
         _draw_lines(tx, ty, tracker_lines)
+
+        # Raw tracker panel (all available fields, unknown values explicitly shown)
+        rx, ry = _draw_panel(raw_rect, "Eye tracker (raw REC fields)")
+        raw_fields = sample.get("raw_fields") if isinstance(sample.get("raw_fields"), dict) else {}
+        extra_keys = sorted(k for k in raw_fields.keys() if k not in EYE_TRACKER_RAW_FIELDS)
+        raw_keys = list(EYE_TRACKER_RAW_FIELDS) + extra_keys
+        raw_items = [(k, _fmt_unknown(raw_fields.get(k))) for k in raw_keys]
+        if not raw_items:
+            raw_items = [("status", "unknown")]
+
+        def _clip_for_width(text: str, max_px: int) -> str:
+            if max_px <= 8:
+                return ""
+            if small.size(text)[0] <= max_px:
+                return text
+            out = text
+            while out and small.size(out + "...")[0] > max_px:
+                out = out[:-1]
+            return (out + "...") if out else "..."
+
+        line_h = small.get_height() + 2
+        content_h = max(1, raw_rect.height - 34)
+        rows = max(1, content_h // line_h)
+        cols = max(1, (len(raw_items) + rows - 1) // rows)
+        col_w = max(1, (raw_rect.width - 20) // cols)
+        for i, (k, v) in enumerate(raw_items):
+            c = i // rows
+            r = i % rows
+            x = rx + c * col_w
+            y = ry + r * line_h
+            txt = _clip_for_width(f"{k}={v}", col_w - 6)
+            surf = small.render(txt, True, (235, 235, 235))
+            screen.blit(surf, (x, y))
 
         # Pipeline panel
         px2, py2 = _draw_panel(pipeline_rect, "Pipeline / state")
@@ -3856,15 +4062,35 @@ def main():
 
         # Heartbeat / Serial messages log
         sx, sy = _draw_panel(serial_log_rect, "Heartbeat / Serial log")
-        serial_lines = led_controller.get_serial_log(25) if led_controller else []
-        if not serial_lines:
-            _draw_lines(sx, sy, ["(no RP2040 or no messages yet)"])
+        serial_log_rect_for_input = serial_log_rect.copy()
+        serial_lines_all = led_controller.get_serial_log(1000) if led_controller else []
+        line_h = small.get_height() + 2
+        visible_rows = max(1, (serial_log_rect.height - 40) // line_h)
+        total_lines = len(serial_lines_all)
+        max_offset = max(0, total_lines - visible_rows)
+        if serial_log_autoscroll:
+            serial_log_scroll_offset = 0
         else:
-            _draw_lines(sx, sy, serial_lines[-25:])
+            serial_log_scroll_offset = max(0, min(serial_log_scroll_offset, max_offset))
+            if serial_log_scroll_offset == 0:
+                serial_log_autoscroll = True
+
+        if serial_log_autoscroll:
+            start_idx = max(0, total_lines - visible_rows)
+            end_idx = total_lines
+        else:
+            end_idx = max(0, total_lines - serial_log_scroll_offset)
+            start_idx = max(0, end_idx - visible_rows)
+
+        status = f"autoscroll={'on' if serial_log_autoscroll else 'off'}  lines={total_lines}  offset={serial_log_scroll_offset}"
+        sy_next = _draw_lines(sx, sy, [status])
+        if not serial_lines_all:
+            _draw_lines(sx, sy_next, ["(no RP2040 or no messages yet)"])
+        else:
+            _draw_lines(sx, sy_next, serial_lines_all[start_idx:end_idx])
 
         # Keep existing overlays (useful while debugging)
         draw_button_feedback()
-        draw_key_overlay()
 
         pygame.display.flip()
         clock.tick(FPS)
