@@ -15,7 +15,7 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 - **Firmware**
   - `firmware.ino`: RP2040 co-processor firmware (NeoPixels + OLED UI + serial protocol)
-  - `ui/v3/generated_screens.h`: header-only OLED UI (v3); contains `UiScreen`, `UiDynamicVar`, `ui_get/ui_set`, and `draw_screen(...)`
+  - `ui/v4/generated_screens.h`: header-only OLED UI (v4); contains `UiScreen`, `UiDynamicVar`, `ui_get/ui_set`, and `draw_screen(...)`
   - `upload_firmware.py`: Windows helper to install Arduino CLI + compile + upload
 - **Host application**
   - `main.py`: primary Python application (UI, simulation toggles, Gazepoint TCP client, serial I/O)
@@ -41,21 +41,29 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
   - Pins default to GP6..GP12 (`BTN_*_PIN`)
   - `readButtons()` returns a **bitmask where bit=1 means pressed**
 
-### OLED UI rendering
+### OLED UI rendering (v4)
 
-- The OLED UI drawing code is in `ui/v3/generated_screens.h`.
+- The OLED UI drawing code is in `ui/v4/generated_screens.h`.
 - **Important invariant**: `draw_*_screen()` / `draw_screen()` do **not** call `display.display()`.
   - Firmware must call `display.display()` once per frame after drawing.
-- Dynamic UI variables are simple globals in `ui/v3/generated_screens.h` (examples):
-  - booleans: `ui_tracker_detected`, `ui_led_detected`, `ui_connection`
-  - strings: `ui_loading_data`, `ui_calib_start_btn`, `ui_recording_timer`, `ui_event_name`, etc.
-  - u8: `ui_inference_prog_bar`, `ui_gaze_x`, `ui_gaze_y`
+- Dynamic UI variables are simple globals in `ui/v4/generated_screens.h`.
+  - Auto-generated vars cover core strings/bools (boot, calibration, recording, results).
+  - **Post-generation additions** (kept in-repo because the UI designer project source is not present):
+    - **Calibration corner indicators**: `ui_led_up_left`, `ui_led_up_right`, `ui_led_bottom_left`, `ui_led_bottom_right` (bool)
+    - **Monitoring eye state**: `ui_left_eye`, `ui_right_eye` (bool)
+    - **Monitoring gaze dot**: `ui_gaze_x`, `ui_gaze_y` (u8 0..255)
+    - **Inference progress**: `ui_inference_prog_bar` (u8; host uses 0..100)
 
-**Note on v3 header edits**: the repo does not include the UI designer project source; `ui/v3/generated_screens.h` is edited in-place to add a few missing dynamic variables and drawing behaviors (calibration LED indicators, inference progress bar, monitoring eye/gaze inputs). These edits must be preserved when regenerating UI.
+**Note on v4 header edits**: the repo does not include the UI designer project source; `ui/v4/generated_screens.h` is edited in-place to add a few missing dynamic variables and drawing behaviors (calibration corner indicators, inference progress bar, monitoring eye/gaze inputs). These edits must be preserved when regenerating UI.
 
 ### Serial protocol (firmware)
 
 Line-based commands, `:`-separated, newline terminated.
+
+- **RP2040 liveness / reset detection**
+  - `BOOT:<boot_id>:<uptime_s>` (RP2040 → host, 1 Hz until ACK)
+  - `HB:<boot_id>:<uptime_s>` (RP2040 → host, 1 Hz after ACK)
+  - `ACK:BOOT:<boot_id>` (host → RP2040, once host finished re-init/resync)
 
 - **Ping**
   - `PING` / `HELLO` → replies `HELLO NEOPIXEL` and `HELLO OLED`
@@ -91,6 +99,9 @@ Line-based commands, `:`-separated, newline terminated.
   - Gazepoint host/port
   - Calibration timing and points
   - RP2040 serial port/baud and NeoPixel brightness
+  - RP2040 boot/reset handling:
+    - `rp2040_boot_reinit_app_state` (default true): full app reset on RP2040 reboot
+    - `rp2040_heartbeat_timeout_s` (default 3.0): liveness timeout for BOOT/HB
 
 ### Runtime workflow (host-owned state machine)
 
@@ -120,6 +131,9 @@ The Pygame window is a **debugging dashboard** and no longer mirrors the OLED �
 - current pipeline step/state
 - recent button edge events from the RP2040 (press/release log)
 
+Window mode:
+- The debug dashboard runs as a **borderless “windowed fullscreen”** window when `fullscreen: true` in `config.yaml` (not exclusive fullscreen).
+
 ### Dependencies
 
 - Runtime (`requirements.txt`):
@@ -141,11 +155,12 @@ On Windows, use `upload_firmware.py` which:
 
 ## Recent changes (this update)
 
-- Firmware OLED UI now uses **v3 UI** from `ui/v3/generated_screens.h` and no longer contains a demo/navigation state machine.
+- Firmware OLED UI now uses **v4 UI** from `ui/v4/generated_screens.h` and no longer contains a demo/navigation state machine.
 - RP2040 now forwards button edge events to the host: `BTN:PRESS:*` / `BTN:RELEASE:*`.
 - Host (`main.py`) now owns the FLOW pipeline state machine and drives OLED screens/vars via `OLED:UI:*` commands.
 - Host terminology is now **events** (not tasks) and recording shows both **recording timer** and **event timer**.
-- Mock inference generates **4 values** per page (`val1..val4`) at **3 seconds per value** and displays progress/ETA.
+- Model/inference outputs are now **4 values for global results followed by 4 values per event** (up to 10 event slots).
+- Mock inference generates **4 values** per page (`val1..val4`) at **~3 seconds per value** and displays progress/ETA.
 - Calibration quality is displayed as a **percentage** (derived from `average_error`).
 
 ## Rollback notes

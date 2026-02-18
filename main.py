@@ -31,7 +31,9 @@ NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0 (sent to microcontroller)
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Show on-screen overlay of pressed keyboard inputs
-FULLSCREEN = False    # Run app in fullscreen mode
+# Windowed fullscreen (borderless), not exclusive fullscreen.
+# If False, runs in a fixed-size frameless window (WIDTH x HEIGHT).
+FULLSCREEN = True
 
 WIDTH, HEIGHT = 480, 800
 FPS = 60  # Increased from 30 to reduce display latency
@@ -71,6 +73,10 @@ LED_BLINK_PERIOD_S = 0.6       # Blink period in seconds (higher = fewer serial 
 LED_BLINK_DUTY = 0.5           # Duty cycle (0..1): fraction of period LEDs are ON
 # Oscillation/blinking animation has been removed for reliability.
 
+# RP2040 boot/reset handling
+RP2040_BOOT_REINIT_APP_STATE = True
+RP2040_HEARTBEAT_TIMEOUT_S = 3.0
+
 # Load config.yaml if it exists
 def load_config():
     global GPIO_BTN_MARKER_SIM, GPIO_BTN_MARKER_ENABLE, GPIO_BTN_MARKER_PIN
@@ -86,6 +92,7 @@ def load_config():
     global GPIO_BTN_EYE_VIEW_DEBOUNCE, GPIO_BTN_EYE_VIEW_KEY, EYE_VIEW_TIMEOUT
     global LED_ORDER, LED_RANDOM_ORDER, LED_REPETITIONS
     global LED_BLINK_DURING_DELAY, LED_BLINK_PERIOD_S, LED_BLINK_DUTY
+    global RP2040_BOOT_REINIT_APP_STATE, RP2040_HEARTBEAT_TIMEOUT_S
     # Oscillation/blinking animation has been removed for reliability.
     if yaml is None:
         return
@@ -153,6 +160,13 @@ def load_config():
                     LED_BLINK_DURING_DELAY = config.get('led_blink_during_delay', LED_BLINK_DURING_DELAY)
                     LED_BLINK_PERIOD_S = config.get('led_blink_period_s', LED_BLINK_PERIOD_S)
                     LED_BLINK_DUTY = config.get('led_blink_duty', LED_BLINK_DUTY)
+                    # RP2040 boot/reset handling
+                    RP2040_BOOT_REINIT_APP_STATE = config.get('rp2040_boot_reinit_app_state', RP2040_BOOT_REINIT_APP_STATE)
+                    RP2040_HEARTBEAT_TIMEOUT_S = config.get('rp2040_heartbeat_timeout_s', RP2040_HEARTBEAT_TIMEOUT_S)
+                    try:
+                        RP2040_HEARTBEAT_TIMEOUT_S = float(RP2040_HEARTBEAT_TIMEOUT_S)
+                    except Exception:
+                        RP2040_HEARTBEAT_TIMEOUT_S = 3.0
                     # Oscillation/blinking animation has been removed for reliability.
                     # Validate LED_ORDER: must be exactly 4 integers (corners only).
                     # Center is NOT configured here; it is detected from Gazepoint CALX/CALY and lights all LEDs.
@@ -1029,6 +1043,10 @@ class Rp2040Controller:
         self._rx_thr = None
         self._rx_stop = threading.Event()
         self._button_callback = None  # callable(kind:str, btn_name:str)
+        self._boot_callback = None  # callable(kind:str, boot_id:int, uptime_s:int)
+        self._last_seen_wall_time = None
+        self._last_boot_id = None
+        self._last_uptime_s = None
         # Cache last sent state to avoid spamming the serial link every frame (reduces flicker/glitches)
         self._last_mode = None  # "off" | "single" | "all"
         self._last_led = None
@@ -1038,10 +1056,50 @@ class Rp2040Controller:
         """Set callback(kind, btn_name) where kind is 'PRESS'|'RELEASE'."""
         self._button_callback = cb
 
+    def set_boot_callback(self, cb):
+        """Set callback(kind, boot_id, uptime_s) for BOOT/HB parsing."""
+        self._boot_callback = cb
+
+    def is_alive(self, timeout_s: float = 3.0) -> bool:
+        """True if we saw BOOT/HB recently."""
+        if self._last_seen_wall_time is None:
+            return False
+        try:
+            return (time.time() - float(self._last_seen_wall_time)) <= float(timeout_s)
+        except Exception:
+            return False
+
+    def last_seen_age_s(self):
+        if self._last_seen_wall_time is None:
+            return None
+        try:
+            return float(time.time() - float(self._last_seen_wall_time))
+        except Exception:
+            return None
+
     def _handle_rx_line(self, line: str):
         if not line:
             return
         up = line.strip()
+        # BOOT/HB (1 Hz):
+        #   BOOT:<boot_id>:<uptime_s>
+        #   HB:<boot_id>:<uptime_s>
+        if up.startswith("BOOT:") or up.startswith("HB:"):
+            try:
+                parts = up.split(":")
+                kind = parts[0].strip().upper()  # BOOT or HB
+                boot_id = int(parts[1].strip()) if len(parts) > 1 else None
+                uptime_s = int(parts[2].strip()) if len(parts) > 2 else None
+                self._last_seen_wall_time = time.time()
+                self._last_uptime_s = uptime_s
+                # Treat HB with a changed boot_id as a reboot (robustness).
+                if boot_id is not None and (self._last_boot_id is None or boot_id != self._last_boot_id):
+                    self._last_boot_id = boot_id
+                    if self._boot_callback:
+                        self._boot_callback("BOOT", boot_id, uptime_s if uptime_s is not None else 0)
+            except Exception:
+                pass
+            return
         if up.startswith("BTN:PRESS:") or up.startswith("BTN:RELEASE:"):
             try:
                 parts = up.split(":")
@@ -1052,6 +1110,27 @@ class Rp2040Controller:
                     self._button_callback(kind, btn)
             except Exception:
                 pass
+
+    def ack_boot(self, boot_id: int):
+        """Send ACK:BOOT:<boot_id> (no response expected)."""
+        try:
+            self._send_command(f"ACK:BOOT:{int(boot_id)}", expect_ack=False)
+        except Exception:
+            pass
+
+    def reinit_outputs(self, oled_init: bool = True):
+        """Re-send INIT and optionally OLED:INIT after RP2040 reboot."""
+        if not self._initialized:
+            return False
+        try:
+            brightness_int = int(255 * self.brightness)
+            self._send_command(f"INIT:{self.num_pixels}:{brightness_int}", expect_ack=True, timeout_s=0.5)
+            self.all_off()
+            if oled_init:
+                self._send_command("OLED:INIT", expect_ack=False)
+            return True
+        except Exception:
+            return False
 
     def _rx_loop(self):
         """Continuously read serial lines so the RP2040 TX buffer never blocks."""
@@ -1623,10 +1702,25 @@ def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
     # Extract values
     leyez = eye_data.get("leyez")
     reyez = eye_data.get("reyez")
-    lpv = eye_data.get("lpv", False)  # Left pupil validity (LPV)
-    rpv = eye_data.get("rpv", False)  # Right pupil validity (RPV)
-    lpupild = eye_data.get("lpupild")  # Left pupil diameter in meters
-    rpupild = eye_data.get("rpupild")  # Right pupil diameter in meters
+    # NOTE: Gazepoint validity fields are reported as LPV/RPV, but the physical
+    # "left/right" can appear swapped depending on tracker coordinate conventions.
+    # The UI uses user-facing left/right, so we map as:
+    #   left_open  <- rpv
+    #   right_open <- lpv
+    lpv_raw = bool(eye_data.get("lpv", False))
+    rpv_raw = bool(eye_data.get("rpv", False))
+    # Prefer diameter presence to decide "open" when available, otherwise validity.
+    lpupild_raw = eye_data.get("lpupild")  # meters
+    rpupild_raw = eye_data.get("rpupild")  # meters
+
+    left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
+    right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+
+    # For display values, keep physical mapping consistent with open/closed mapping.
+    lpv = left_open
+    rpv = right_open
+    lpupild = rpupild_raw
+    rpupild = lpupild_raw
     
     # Eye positions (centered horizontally, spaced vertically)
     eye_radius = 40
@@ -1704,11 +1798,15 @@ def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
 
 def main():
     pygame.init()
-    # Set up display flags: frameless + optional fullscreen
+    # Set up display: frameless window; optionally borderless "windowed fullscreen".
     display_flags = pygame.NOFRAME
+    global WIDTH, HEIGHT
     if FULLSCREEN:
-        display_flags |= pygame.FULLSCREEN
-    screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
+        info = pygame.display.Info()
+        WIDTH, HEIGHT = int(info.current_w), int(info.current_h)
+        screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
+    else:
+        screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
     pygame.display.set_caption("Gaze App")
     font = pygame.font.SysFont(None, 26)
     big = pygame.font.SysFont(None, 40)
@@ -1741,6 +1839,8 @@ def main():
     # - RP2040 serial (BTN:PRESS/RELEASE)
     # Queue items are (kind, btn, src) where src is "KB"|"RP2040".
     btn_event_q = queue.Queue()
+    # RP2040 boot/heartbeat events: (kind, boot_id, uptime_s)
+    rp2040_evt_q = queue.Queue()
 
     # Start GPIO button monitor for LattePanda Iota (if enabled)
     gpio_monitor = None
@@ -1777,6 +1877,11 @@ def main():
             # Forward RP2040 button edges into the main loop.
             try:
                 led_controller.set_button_callback(lambda kind, btn: btn_event_q.put((kind, btn, "RP2040")))
+            except Exception:
+                pass
+            # Forward RP2040 BOOT detection into main loop.
+            try:
+                led_controller.set_boot_callback(lambda kind, boot_id, uptime_s: rp2040_evt_q.put((kind, boot_id, uptime_s)))
             except Exception:
                 pass
             print("NeoPixel controller initialized successfully")
@@ -1868,9 +1973,11 @@ def main():
 
     # Collection
     session_t0 = None
+    recording_elapsed_frozen = None  # seconds, freezes after stop
     next_event_index = 1
     event_open = False
     event_started_at = None  # wall time (time.time()) when current event started
+    event_elapsed_frozen = None  # seconds, freezes after stop
     events = []  # list of (elapsed_ms, elapsed_str, wall_str, label)
     gaze_samples = []  # store minimal fields for analysis
 
@@ -2118,6 +2225,7 @@ def main():
 
     def start_collection():
         nonlocal state, session_t0, next_event_index, event_open, event_started_at, events, gaze_samples
+        nonlocal recording_elapsed_frozen, event_elapsed_frozen
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
             return
@@ -2131,9 +2239,11 @@ def main():
             except Exception:
                 pass
         session_t0 = time.time()
+        recording_elapsed_frozen = None
         next_event_index = 1
         event_open = False
         event_started_at = None
+        event_elapsed_frozen = None
         events = []
         gaze_samples = []
 
@@ -2141,6 +2251,7 @@ def main():
         nonlocal state, analyze_t0, per_event_scores, global_score
         nonlocal event_open, next_event_index, event_started_at
         nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
+        nonlocal recording_elapsed_frozen, event_elapsed_frozen
         state = "INFERENCE_LOADING"
         if led_controller is not None:
             try:
@@ -2148,6 +2259,15 @@ def main():
             except Exception:
                 pass
         analyze_t0 = time.time()
+        # Freeze timers for UI once recording stops.
+        try:
+            recording_elapsed_frozen = (time.time() - session_t0) if session_t0 else None
+        except Exception:
+            recording_elapsed_frozen = None
+        try:
+            event_elapsed_frozen = (time.time() - event_started_at) if (event_open and event_started_at is not None) else None
+        except Exception:
+            event_elapsed_frozen = None
 
         # If the last event is still open, auto-close it before analysis.
         if event_open and session_t0 is not None:
@@ -2198,26 +2318,23 @@ def main():
                         per_event_scores[f"E{pidx}"] = 0.0
                 global_score = float(sum(per_event_scores.values()) / len(per_event_scores)) if per_event_scores else 0.0
             else:
-                # Real model path: compute per-event scores once and map them into 4 display slots.
-                per_event_scores, global_score = run_xgb_results({
+                # Real model path: model returns 4 global values, then 4 values per event.
+                per_event_vals, global_vals = run_xgb_results({
                     "events": events,
                     "gaze": gaze_samples,
                 }, aff=aff, session_t0=session_t0)
+                global_vals = (global_vals or [0.0, 0.0, 0.0, 0.0])[:4]
+                # For compatibility with existing CSV logging, keep a scalar score (val1).
+                global_score = float(global_vals[0]) if global_vals else 0.0
+                per_event_scores = {}
+
                 # Fill page values immediately (no artificial delay)
-                pages[0]["vals"] = [
-                    f"val1: {global_score:.3f}",
-                    "val2: --",
-                    "val3: --",
-                    "val4: --",
-                ]
+                pages[0]["vals"] = [f"val{i+1}: {float(v):.3f}" for i, v in enumerate(global_vals)]
                 for pidx in range(1, len(pages)):
-                    score = per_event_scores.get(f"E{pidx}", 0.0)
-                    pages[pidx]["vals"] = [
-                        f"val1: {score:.3f}",
-                        "val2: --",
-                        "val3: --",
-                        "val4: --",
-                    ]
+                    ev = (per_event_vals or {}).get(f"E{pidx}") or [0.0, 0.0, 0.0, 0.0]
+                    ev = (list(ev) + [0.0, 0.0, 0.0, 0.0])[:4]
+                    per_event_scores[f"E{pidx}"] = float(ev[0])
+                    pages[pidx]["vals"] = [f"val{i+1}: {float(v):.3f}" for i, v in enumerate(ev)]
                 analysis_values_done = analysis_total_values
             
             # Save results to CSV
@@ -2264,7 +2381,7 @@ def main():
     def reset_app_state():
         nonlocal state, calib_status, receiving_hint, aff, calib_points, target_points
         nonlocal calib_step, calib_step_start, calib_collect_start, calib_quality, calib_avg_error, current_calib_override
-        nonlocal session_t0, next_event_index, event_open, event_started_at, events, gaze_samples
+        nonlocal session_t0, recording_elapsed_frozen, next_event_index, event_open, event_started_at, event_elapsed_frozen, events, gaze_samples
         nonlocal analyze_t0, per_event_scores, global_score, results_scroll
         nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
@@ -2296,9 +2413,11 @@ def main():
         if not SIM_GAZE:
             gp.reset_calibration_point_progress()
         session_t0 = None
+        recording_elapsed_frozen = None
         next_event_index = 1
         event_open = False
         event_started_at = None
+        event_elapsed_frozen = None
         events = []
         gaze_samples = []
         analyze_t0 = 0.0
@@ -2499,12 +2618,17 @@ def main():
         return f"{m:02d}:{ss:02d}"
 
     def oled_sync():
-        """Push current state + dynamic vars to the OLED (ui/v3)."""
+        """Push current state + dynamic vars to the OLED (ui/v4)."""
+        rp2040_ok = (led_controller is not None and getattr(led_controller, "_serial", None) is not None)
+        rp2040_alive = bool(led_controller.is_alive(RP2040_HEARTBEAT_TIMEOUT_S)) if led_controller is not None else False
         # BOOT screen status
         if state == "BOOT":
+            # Eye tracker checkbox must reflect tracker connection.
             _oled_set_bool("ui_tracker_detected", bool(gp.connected))
-            _oled_set_bool("ui_led_detected", True)
-            _oled_set_bool("ui_connection", bool(gp.connected))
+            # LED checkbox reflects whether the RP2040 co-processor is connected.
+            _oled_set_bool("ui_led_detected", bool(rp2040_ok and rp2040_alive))
+            # Connection reflects whether we're actually receiving gaze data.
+            _oled_set_bool("ui_connection", bool(gp.receiving))
             _oled_set_str("ui_loading_data", "")
 
         # CALIBRATION screen vars
@@ -2519,7 +2643,8 @@ def main():
                 try:
                     pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
                     pct = max(0.0, min(100.0, pct))
-                    _oled_set_str("ui_calib_result", f"{pct:.0f}%")
+                    # Truncate (not round) so "almost 100%" doesn't always show 100%.
+                    _oled_set_str("ui_calib_result", f"{int(pct)}%")
                 except Exception:
                     _oled_set_str("ui_calib_result", "")
             else:
@@ -2549,13 +2674,12 @@ def main():
             _oled_set_str("ui_recording_timer", _fmt_mmss(total))
             if event_open and event_started_at is not None:
                 _oled_set_str("ui_event_time", _fmt_mmss(time.time() - event_started_at))
-                _oled_set_str("ui_event_name", f"START EVENT {next_event_index}")
+                # Event is currently open => next A press will STOP it.
+                _oled_set_str("ui_event_name", f"STOP EVENT {next_event_index}")
             else:
                 _oled_set_str("ui_event_time", "--:--")
-                if next_event_index > 1:
-                    _oled_set_str("ui_event_name", f"STOP EVENT {next_event_index - 1}")
-                else:
-                    _oled_set_str("ui_event_name", "START EVENT 1")
+                # No open event => next A press will START the next event.
+                _oled_set_str("ui_event_name", f"START EVENT {next_event_index}")
 
         # INFERENCE_LOADING
         if state == "INFERENCE_LOADING":
@@ -2591,12 +2715,21 @@ def main():
 
         # MONITORING modal
         if state == "MONITORING":
-            lpv = bool(last_eye_data.get("lpv")) if last_eye_data else False
-            rpv = bool(last_eye_data.get("rpv")) if last_eye_data else False
-            _oled_set_bool("ui_left_eye", lpv)
-            _oled_set_bool("ui_right_eye", rpv)
+            if last_eye_data:
+                lpv_raw = bool(last_eye_data.get("lpv"))
+                rpv_raw = bool(last_eye_data.get("rpv"))
+                lpupild_raw = last_eye_data.get("lpupild")
+                rpupild_raw = last_eye_data.get("rpupild")
+                left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
+                right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+            else:
+                left_open = False
+                right_open = False
+            _oled_set_bool("ui_left_eye", bool(left_open))
+            _oled_set_bool("ui_right_eye", bool(right_open))
             pos = _position_status_from_eye_data()
-            _oled_set_str("ui_position_status", pos)
+            # v4 UI uses ui_text_el_269 for position status.
+            _oled_set_str("ui_text_el_269", pos)
             if last_calib_gaze and len(last_calib_gaze) >= 2:
                 gx = max(0.0, min(1.0, float(last_calib_gaze[0])))
                 gy = max(0.0, min(1.0, float(last_calib_gaze[1])))
@@ -2659,7 +2792,7 @@ def main():
             try:
                 pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
                 pct = max(0.0, min(100.0, pct))
-                error_str = f"{pct:.0f}%"
+                error_str = f"{int(pct)}%"
             except Exception:
                 error_str = ""
             lbl_error = small.render(error_str, True, (180, 180, 180))
@@ -2901,6 +3034,50 @@ def main():
                 except Exception:
                     pass
                 handle_button(kind, btn)
+        except queue.Empty:
+            pass
+
+        # Handle RP2040 BOOT detection events.
+        try:
+            while True:
+                kind, boot_id, uptime_s = rp2040_evt_q.get_nowait()
+                if kind != "BOOT" or led_controller is None:
+                    continue
+
+                # Case A (default): full re-init including eye tracking state.
+                if RP2040_BOOT_REINIT_APP_STATE:
+                    reset_app_state()
+                    _set_screen("BOOT")
+                else:
+                    # Case B: keep current pipeline; force OLED resync.
+                    try:
+                        oled_last.clear()
+                    except Exception:
+                        pass
+
+                # Reinitialize RP2040 outputs and resync OLED to current state.
+                try:
+                    led_controller.reinit_outputs(oled_init=True)
+                except Exception:
+                    pass
+
+                # Ensure OLED shows the current FLOW screen.
+                try:
+                    led_controller.oled_set_screen(state)
+                except Exception:
+                    pass
+
+                # Force a sync ASAP (next tick is fine; doing it now reduces visible stale UI).
+                try:
+                    oled_sync()
+                except Exception:
+                    pass
+
+                # Send ACK so RP2040 switches from BOOT spam to HB.
+                try:
+                    led_controller.ack_boot(boot_id)
+                except Exception:
+                    pass
         except queue.Empty:
             pass
 
@@ -3438,6 +3615,48 @@ def main():
                 y += s.get_height() + 2
             return y
 
+        def _draw_pipeline_diagram(rect: pygame.Rect, state_name: str, monitoring: bool):
+            """Draw the pipeline as boxes, highlighting the current step."""
+            steps = [
+                ("BOOT", {"BOOT"}),
+                ("POS", {"FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"}),
+                ("CAL", {"CALIBRATION"}),
+                ("CONF", {"RECORD_CONFIRMATION"}),
+                ("REC", {"RECORDING", "STOP_RECORD"}),  # STOP_RECORD is still "recording context"
+                ("INF", {"INFERENCE_LOADING"}),
+                ("RES", {"RESULTS"}),
+            ]
+            cur = state_name
+            cur_idx = 0
+            for i, (_, states) in enumerate(steps):
+                if cur in states:
+                    cur_idx = i
+                    break
+            pad_x = 6
+            pad_y = 6
+            x0 = rect.left + pad_x
+            y0 = rect.top + 30  # below title row
+            w0 = rect.width - pad_x * 2
+            h0 = 26
+            n = len(steps)
+            gap = 6
+            box_w = max(30, (w0 - gap * (n - 1)) // n)
+            for i, (label, _) in enumerate(steps):
+                bx = x0 + i * (box_w + gap)
+                r = pygame.Rect(bx, y0, box_w, h0)
+                active = (i == cur_idx)
+                bg = (0, 120, 255) if active else (28, 28, 28)
+                bd = (200, 220, 255) if active else (70, 70, 70)
+                pygame.draw.rect(screen, bg, r, border_radius=6)
+                pygame.draw.rect(screen, bd, r, 2, border_radius=6)
+                t = small.render(label, True, (15, 15, 15) if active else (220, 220, 220))
+                screen.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
+            if monitoring:
+                pill = pygame.Rect(x0, y0 + h0 + 6, 78, 18)
+                pygame.draw.rect(screen, (180, 80, 255), pill, border_radius=9)
+                mtxt = small.render("MONITOR", True, (15, 15, 15))
+                screen.blit(mtxt, (pill.centerx - mtxt.get_width() // 2, pill.centery - mtxt.get_height() // 2))
+
         # Panel layout (portrait)
         preview_rect = pygame.Rect(10, 80, 260, 260)
         tracker_rect = pygame.Rect(280, 80, WIDTH - 290, 260)
@@ -3498,8 +3717,14 @@ def main():
                 valid = True
             tracker_lines.append(f"gx/gy: {gx:.3f}, {gy:.3f}  valid: {bool(valid)}")
         if last_eye_data:
-            tracker_lines.append(f"lpv/rpv: {bool(last_eye_data.get('lpv'))}/{bool(last_eye_data.get('rpv'))}")
-            tracker_lines.append(f"pupil L/R: {last_eye_data.get('lpupild')} / {last_eye_data.get('rpupild')}")
+            lpv_raw = bool(last_eye_data.get("lpv"))
+            rpv_raw = bool(last_eye_data.get("rpv"))
+            lpupild_raw = last_eye_data.get("lpupild")
+            rpupild_raw = last_eye_data.get("rpupild")
+            left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
+            right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+            tracker_lines.append(f"eyes open L/R: {bool(left_open)}/{bool(right_open)}  (raw lpv/rpv={lpv_raw}/{rpv_raw})")
+            tracker_lines.append(f"pupil diam (m) raw L/R: {lpupild_raw} / {rpupild_raw}")
         if dist_cm is not None:
             tracker_lines.append(f"distance: {dist_cm:.1f} cm")
         if last_eye_data_time is not None:
@@ -3516,25 +3741,45 @@ def main():
         # Pipeline panel
         px2, py2 = _draw_panel(pipeline_rect, "Pipeline / state")
         rp2040_ok = (led_controller is not None and getattr(led_controller, "_serial", None) is not None)
+        rp2040_alive = bool(led_controller.is_alive(RP2040_HEARTBEAT_TIMEOUT_S)) if led_controller is not None else False
+        rp2040_age = led_controller.last_seen_age_s() if led_controller is not None else None
         running_now = using_led_calib or using_overlay_calib
         done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
-        total_t = (time.time() - session_t0) if session_t0 else None
-        ev_t = (time.time() - event_started_at) if (event_open and event_started_at is not None) else None
+        # Freeze timers once recording has ended (analysis started).
+        if session_t0:
+            if state in ("RECORDING", "STOP_RECORD"):
+                total_t = (time.time() - session_t0)
+            else:
+                total_t = recording_elapsed_frozen
+        else:
+            total_t = None
+
+        if event_open and event_started_at is not None:
+            if state in ("RECORDING", "STOP_RECORD"):
+                ev_t = (time.time() - event_started_at)
+            else:
+                ev_t = event_elapsed_frozen
+        else:
+            ev_t = None
+
         pipeline_step = "POSITIONING" if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION") else state
         msg_line = None
         if info_msg and time.time() < info_msg_until:
             msg_line = f"Info: {info_msg}"
+        _draw_pipeline_diagram(pipeline_rect, state, monitoring_active or state == "MONITORING")
         pipeline_lines = [
-            f"STEP: {pipeline_step}  OLED screen: {state}  Monitoring: {bool(monitoring_active)}",
-            f"RP2040: {bool(rp2040_ok)}  Port: {getattr(led_controller, 'serial_port', '') if led_controller else ''}",
+            f"STEP: {pipeline_step}  OLED: {state}",
+            f"RP2040: ok={bool(rp2040_ok)} alive={bool(rp2040_alive)} age={rp2040_age:.2f}s" if rp2040_age is not None else f"RP2040: ok={bool(rp2040_ok)} alive={bool(rp2040_alive)}",
+            f"RP2040 port: {getattr(led_controller, 'serial_port', '') if led_controller else ''}",
+            f"Tracker: connected={bool(gp.connected)} receiving={bool(gp.receiving)}",
             f"Calibration: running={bool(running_now)} done={bool(done_now)} quality={calib_quality} step={calib_step}",
-            f"Recording: {bool(state=='RECORDING')} total={_fmt_mmss(total_t) if total_t is not None else '--:--'}",
-            f"Event open: {bool(event_open)}  event_t={_fmt_mmss(ev_t) if ev_t is not None else '--:--'}  next={next_event_index}",
-            f"Inference: {analysis_values_done}/{analysis_total_values}",
+            f"Recording total: {_fmt_mmss(total_t) if total_t is not None else '--:--'}  (state={state})",
+            f"Event: open={bool(event_open)}  event_t={_fmt_mmss(ev_t) if ev_t is not None else '--:--'}  next={next_event_index}",
+            f"Inference: {analysis_values_done}/{analysis_total_values}  page={results_page_index+1 if results_pages else 0}/{len(results_pages) if results_pages else 0}",
             "Controls: RIGHT=advance, A=marker (recording), B(hold)=monitor, CENTER=reset",
             msg_line,
         ]
-        _draw_lines(px2, py2, pipeline_lines)
+        _draw_lines(px2, py2 + 58, pipeline_lines)
 
         # Events panel
         ex, ey = _draw_panel(events_rect, "Events / markers (latest)")
@@ -3879,8 +4124,13 @@ def extract_features(gaze_samples, events, session_t0, aff):
 def run_xgb_results(collected, aff=None, session_t0=None):
     """
     Run XGBoost inference on collected data.
-    Model outputs a vector: [global_score, score_1, score_2, ..., score_10]
-    Returns (per_event_dict, global_score) where per_event_dict maps "E1", "E2", etc. to scores.
+    Model outputs a vector of floats:
+      - first 4 values: global results (val1..val4)
+      - then 4 values per event slot (E1..E10), in order
+
+    Returns (per_event_vals, global_vals) where:
+      - global_vals is a list[float] of length 4
+      - per_event_vals maps "E1", "E2", ... to list[float] of length 4
     """
     global _xgb_model
     
@@ -3896,6 +4146,7 @@ def run_xgb_results(collected, aff=None, session_t0=None):
     features_2d = features.reshape(1, -1)
     
     per_event = {}
+    global_vals = [0.0, 0.0, 0.0, 0.0]
     
     # Get event indices from events
     event_ids = set()
@@ -3912,40 +4163,38 @@ def run_xgb_results(collected, aff=None, session_t0=None):
     # Predict using the single model that outputs a vector
     if _xgb_model is not None and _xgb_loaded:
         try:
-            # Model outputs: [global_score, score_1, score_2, ..., score_10]
+            # Model outputs: [G1,G2,G3,G4, E1_1..E1_4, E2_1..E2_4, ..., E10_1..E10_4]
             predictions = _xgb_model.predict(features_2d)[0]  # Get first (and only) prediction
             
-            # Verify output vector has expected length (11: 1 global + 10 event slots)
-            if len(predictions) < 11:
-                raise ValueError(f"Expected 11 outputs, got {len(predictions)}")
+            # Verify output vector has expected length (44: 4 global + (10*4) event values)
+            if len(predictions) < 44:
+                raise ValueError(f"Expected 44 outputs, got {len(predictions)}")
+
+            # Global values
+            global_vals = [float(max(0.0, min(1.0, v))) for v in predictions[0:4]]
             
-            # Parse the output vector
-            # predictions[0] = global_score
-            # predictions[1:] = [score_1, score_2, ..., score_10]
-            global_score = float(max(0.0, min(1.0, predictions[0])))  # Clamp to [0, 1]
-            
-            # Extract per-event scores for events that exist in events
+            # Extract per-event values for events that exist in the session
             for event_id in sorted(event_ids):
                 if event_id >= 1 and event_id <= 10:  # Valid event range
                     key = f"E{event_id}"
-                    # predictions[event_id] corresponds to former T{event_id} (since index 0 is global)
-                    event_score = float(max(0.0, min(1.0, predictions[event_id])))
-                    per_event[key] = event_score
+                    off = 4 + (event_id - 1) * 4
+                    ev = predictions[off : off + 4]
+                    per_event[key] = [float(max(0.0, min(1.0, v))) for v in ev]
         except Exception as e:
             print(f"Warning: Model prediction failed: {e}", file=sys.stderr)
             # Fallback to random values
             for event_id in sorted(event_ids):
                 key = f"E{event_id}"
-                per_event[key] = np.random.rand()
-            global_score = np.random.rand() if not per_event else float(np.mean(list(per_event.values())))
+                per_event[key] = [float(np.random.rand()) for _ in range(4)]
+            global_vals = [float(np.random.rand()) for _ in range(4)]
     else:
         # Fallback to random values if model not available
         for event_id in sorted(event_ids):
             key = f"E{event_id}"
-            per_event[key] = np.random.rand()
-        global_score = np.random.rand() if not per_event else float(np.mean(list(per_event.values())))
-    
-    return per_event, global_score
+            per_event[key] = [float(np.random.rand()) for _ in range(4)]
+        global_vals = [float(np.random.rand()) for _ in range(4)]
+
+    return per_event, global_vals
 
 
 if __name__ == "__main__":

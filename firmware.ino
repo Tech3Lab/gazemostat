@@ -18,7 +18,7 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1306.h>
-#include "ui/v3/generated_screens.h"
+#include "ui/v4/generated_screens.h"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -83,6 +83,18 @@ bool ui_connection_state = false;
 unsigned long boot_time;
 bool serial_connected = false;
 const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
+
+// RP2040 boot/reset detection + heartbeat (1 Hz).
+// BOOT:<boot_id>:<uptime_s> until host ACKs, then HB:<boot_id>:<uptime_s>.
+static uint32_t boot_id = 0;
+static bool boot_acked = false;
+static unsigned long last_hb_ms = 0;
+static const unsigned long HB_PERIOD_MS = 1000;
+
+static uint32_t genBootId() {
+  // Simple "random-ish" ID that should change across resets.
+  return (uint32_t)(micros() ^ (millis() << 1) ^ 0xA5A5A5A5UL);
+}
 
 static uint8_t readButtons() {
   uint8_t s = 0;
@@ -367,6 +379,9 @@ static bool oledIntegrityTest(String &failReason) {
 
 void setup() {
   boot_time = millis();
+  boot_id = genBootId();
+  boot_acked = false;
+  last_hb_ms = 0;
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
 
@@ -417,6 +432,24 @@ void loop() {
   // Poll buttons and update UI display
   pollButtonsAndUpdateDisplay();
 
+  // 1 Hz BOOT announce until ACK, then HB.
+  unsigned long now_ms = millis();
+  if (now_ms - last_hb_ms >= HB_PERIOD_MS) {
+    last_hb_ms = now_ms;
+    uint32_t uptime_s = (uint32_t)(now_ms / 1000UL);
+    if (!boot_acked) {
+      Serial.print("BOOT:");
+      Serial.print(boot_id);
+      Serial.print(":");
+      Serial.println(uptime_s);
+    } else {
+      Serial.print("HB:");
+      Serial.print(boot_id);
+      Serial.print(":");
+      Serial.println(uptime_s);
+    }
+  }
+
   // Send HELLO messages periodically for first few seconds after boot
   // This helps with auto-detection even if serial wasn't ready during setup()
   unsigned long elapsed = millis() - boot_time;
@@ -455,6 +488,17 @@ void loop() {
 }
 
 void processCommand(String cmd) {
+  // BOOT ACK from host: ACK:BOOT:<boot_id>
+  if (cmd.startsWith("ACK:BOOT:")) {
+    String idStr = cmd.substring(String("ACK:BOOT:").length());
+    idStr.trim();
+    uint32_t id = (uint32_t)idStr.toInt();
+    if (id != 0 && id == boot_id) {
+      boot_acked = true;
+    }
+    return;
+  }
+
   // Handle special commands first
   if (cmd == "PING" || cmd == "HELLO") {
     // Respond to ping/hello for connection testing

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """
 Generate an XGBoost model that returns a single vector output.
-First element: global score
-Remaining elements: scores for each task (T1, T2, ..., T10)
+
+Output structure (float values in [0..1]):
+- 4 values for global results: G_val1..G_val4
+- then 4 values per task slot: T1_val1..T1_val4, ..., T10_val1..T10_val4
 """
 import os
 import numpy as np
@@ -21,10 +23,11 @@ n_features = 20  # Number of features the model expects
 # Generate random features
 X_train = np.random.rand(n_samples, n_features).astype(np.float32)
 
-# Generate random targets (0-1 range) for multiple tasks + global score
-# Output vector format: [global_score, T1_score, T2_score, ..., T10_score]
+# Generate random targets (0-1 range) for multiple tasks + global results
 n_tasks = 10  # Support up to 10 tasks
-y_train = np.random.rand(n_samples, n_tasks + 1).astype(np.float32)  # +1 for global score
+n_values_per_page = 4
+n_outputs = (n_tasks + 1) * n_values_per_page  # 4 global + 4 per task slot
+y_train = np.random.rand(n_samples, n_outputs).astype(np.float32)
 
 # Create XGBoost model with MultiOutputRegressor to predict all outputs at once
 # Output vector: [global_score, T1, T2, ..., T10]
@@ -49,14 +52,18 @@ joblib.dump(model, "models/model.xgb")
 
 # Save metadata about the model
 import json
+output_structure = [f"G_val{i+1}" for i in range(n_values_per_page)]
+for t in range(1, n_tasks + 1):
+    output_structure += [f"T{t}_val{i+1}" for i in range(n_values_per_page)]
+
 metadata = {
     "n_features": n_features,
     "n_tasks": n_tasks,
     "output_format": "vector",
-    "output_structure": ["global_score", "T1", "T2", "T3", "T4", "T5", "T6", "T7", "T8", "T9", "T10"],
+    "output_structure": output_structure,
     # UI/inference timing hints for the app (used to display ETA/progress).
     "estimated_seconds_per_value": 3,
-    "n_values_per_page": 4,
+    "n_values_per_page": n_values_per_page,
     "feature_names": [
         "mean_gaze_x", "mean_gaze_y", "gaze_variance_x", "gaze_variance_y",
         "blink_count", "fixation_duration", "saccade_rate", "task_duration",
@@ -70,6 +77,6 @@ with open("models/model_metadata.json", "w") as f:
 
 print("Model generation complete!")
 print(f"Saved model to models/model.xgb")
-print(f"Output format: [global_score, T1, T2, ..., T10]")
-print(f"Total outputs: {n_tasks + 1} (1 global + {n_tasks} tasks)")
+print("Output format: [G_val1..G_val4, T1_val1..T1_val4, ..., T10_val1..T10_val4]")
+print(f"Total outputs: {n_outputs} (4 global + {n_tasks} tasks x 4)")
 
