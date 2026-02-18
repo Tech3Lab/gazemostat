@@ -99,10 +99,26 @@ The host owns the screen/state machine and drives both the OLED (via serial) and
 - `BOOT` → `FIND_POSITION` → (`MOVE_CLOSER`/`MOVE_FARTHER`/`IN_POSITION`) → `CALIBRATION` → `RECORD_CONFIRMATION` → `RECORDING` → `STOP_RECORD` → `INFERENCE_LOADING` → `RESULTS`
 - Modal: holding `BTN_B` enters `MONITORING` and releasing returns to previous screen.
 
+**Head positioning behavior (important):**
+- During the positioning step, the host **continuously re-evaluates** the user’s distance from eye data and updates the OLED hint screen at **200ms** intervals (`MOVE_CLOSER` / `MOVE_FARTHER` / `IN_POSITION`).
+- The app **must not auto-advance** from positioning into calibration. Advancing to `CALIBRATION` requires an explicit **RIGHT** button press *while currently in a good position*.
+
+**Reset behavior:**
+- `BTN_CENTER` (from the RP2040 button edges) resets the entire host app state back to `BOOT` (clears session/calibration/recording/inference state).
+
 Keyboard simulation mapping in `main.py`:
 - `W/A/S/D/X` → joystick up/left/center/right/down
 - `P` → `BTN_A` (event marker toggle while recording)
 - `L` (hold) → `BTN_B` (monitoring modal)
+ - `R` → reset app state (same behavior as `BTN_CENTER`)
+
+### Pygame UI (debug dashboard)
+
+The Pygame window is a **debugging dashboard** and no longer mirrors the OLED “screen-per-step” UI. It is designed to show, at the same time:
+
+- live eye tracker values (gaze, validity, eye distance/pupil values when available)
+- current pipeline step/state
+- recent button edge events from the RP2040 (press/release log)
 
 ### Dependencies
 

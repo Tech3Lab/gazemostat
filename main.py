@@ -1739,6 +1739,7 @@ def main():
     # Button events can come from:
     # - keyboard simulation (Pygame)
     # - RP2040 serial (BTN:PRESS/RELEASE)
+    # Queue items are (kind, btn, src) where src is "KB"|"RP2040".
     btn_event_q = queue.Queue()
 
     # Start GPIO button monitor for LattePanda Iota (if enabled)
@@ -1775,7 +1776,7 @@ def main():
             led_controller.start()
             # Forward RP2040 button edges into the main loop.
             try:
-                led_controller.set_button_callback(lambda kind, btn: btn_event_q.put((kind, btn)))
+                led_controller.set_button_callback(lambda kind, btn: btn_event_q.put((kind, btn, "RP2040")))
             except Exception:
                 pass
             print("NeoPixel controller initialized successfully")
@@ -1800,6 +1801,7 @@ def main():
     monitoring_active = False
     running = True
     clock = pygame.time.Clock()
+    position_next_eval = 0.0  # head positioning UI refresh (200ms)
 
     # Ensure OLED starts on BOOT screen (if RP2040 is connected)
     if led_controller is not None:
@@ -2269,6 +2271,12 @@ def main():
         nonlocal eye_view_active, last_eye_data, last_eye_data_time, calib_sequence, calib_led_animation_start
         nonlocal led_calib_last_point_key
         state = "BOOT"
+        # Ensure the OLED is immediately put back to BOOT even if the state was already BOOT.
+        if led_controller is not None:
+            try:
+                led_controller.oled_set_screen("BOOT")
+            except Exception:
+                pass
         calib_status = "red"
         receiving_hint = False
         aff = Affine2D()
@@ -2307,6 +2315,11 @@ def main():
         eye_view_active = False
         last_eye_data = None
         last_eye_data_time = None
+        # Force the next OLED sync to re-send dynamic vars (avoid stale cached values after reset).
+        try:
+            oled_last.clear()
+        except Exception:
+            pass
         set_info_msg("App state reset", dur=2.0)
 
     def _position_status_from_eye_data():
@@ -2349,6 +2362,15 @@ def main():
         kind = (kind or "").upper()
         btn = (btn or "").upper()
 
+        # Reset button (RP2040 BTN_CENTER / keyboard "S") resets the whole app state.
+        # This is intentionally handled before any modal/state gating.
+        if kind == "PRESS" and btn == "BTN_CENTER":
+            monitoring_active = False
+            prev_state = None
+            reset_app_state()
+            _set_screen("BOOT")
+            return
+
         # Modal monitoring (hold BTN_B)
         if btn == "BTN_B":
             if kind == "PRESS" and state != "MONITORING":
@@ -2372,25 +2394,17 @@ def main():
                 _set_screen("FIND_POSITION")
             return
 
-        if state == "FIND_POSITION":
+        # Head positioning: continuously re-evaluated elsewhere (every 200ms) and displayed
+        # as MOVE_CLOSER / MOVE_FARTHER / IN_POSITION. Advancement to calibration is NEVER
+        # automatic: user must press RIGHT while in a good position.
+        if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
             if btn == "BTN_RIGHT":
                 pos = _position_status_from_eye_data()
                 if pos == "Good":
-                    _set_screen("IN_POSITION")
-                elif pos == "Near":
-                    _set_screen("MOVE_FARTHER")
+                    _set_screen("CALIBRATION")
                 else:
-                    _set_screen("MOVE_CLOSER")
-            return
-
-        if state in ("MOVE_CLOSER", "MOVE_FARTHER"):
-            if btn == "BTN_RIGHT":
-                _set_screen("FIND_POSITION")
-            return
-
-        if state == "IN_POSITION":
-            if btn == "BTN_RIGHT":
-                _set_screen("CALIBRATION")
+                    # Keep user on positioning step; OLED/Pygame will update the hint screen.
+                    set_info_msg("Not in position yet", dur=1.0)
             return
 
         if state == "CALIBRATION":
@@ -2730,7 +2744,15 @@ def main():
                 y += surf.get_height() + 2
 
     last_calib_gaze = None
+    last_sample_raw = None  # latest full sample dict from the eye tracker
     key_log = []  # list of (time, label)
+    button_log = []  # list of (time, src, kind, btn)
+    app_t0 = time.time()
+
+    def log_button(kind: str, btn: str, src: str):
+        button_log.append((time.time(), src, kind, btn))
+        if len(button_log) > 40:
+            del button_log[: len(button_log) - 40]
 
     def log_key(label):
         if not SHOW_KEYS:
@@ -2840,7 +2862,7 @@ def main():
                     k = KEY_TO_BTN[ev.key]
                     if SHOW_KEYS:
                         log_key(k.replace("BTN_", ""))
-                    btn_event_q.put(("PRESS", k))
+                    btn_event_q.put(("PRESS", k, "KB"))
                 elif SIM_GAZE and ev.key == pygame.K_1:
                     log_key("1")
                     gp.sim_connect()
@@ -2856,16 +2878,28 @@ def main():
                     running = False
                 elif ev.key == pygame.K_r:
                     log_key("R")
-                    reset_app_state()
+                    # Keep reset behavior consistent with RP2040 reset button (BTN_CENTER).
+                    btn_event_q.put(("PRESS", "BTN_CENTER", "KB"))
             elif ev.type == pygame.KEYUP:
                 # Only BTN_B is hold-to-monitor in the FLOW.
                 if ev.key == pygame.K_l:
-                    btn_event_q.put(("RELEASE", "BTN_B"))
+                    btn_event_q.put(("RELEASE", "BTN_B", "KB"))
 
         # Apply all queued button events (keyboard + RP2040)
         try:
             while True:
-                kind, btn = btn_event_q.get_nowait()
+                item = btn_event_q.get_nowait()
+                if isinstance(item, tuple) and len(item) == 3:
+                    kind, btn, src = item
+                elif isinstance(item, tuple) and len(item) == 2:
+                    kind, btn = item
+                    src = "?"
+                else:
+                    continue
+                try:
+                    log_button(kind, btn, src)
+                except Exception:
+                    pass
                 handle_button(kind, btn)
         except queue.Empty:
             pass
@@ -2910,6 +2944,7 @@ def main():
                     "lpupild": s.get("lpupild") if lpv_val else None,  # Clear if invalid
                     "rpupild": s.get("rpupild") if rpv_val else None  # Clear if invalid
                 }
+                last_sample_raw = s
                 last_eye_data_time = time.time()  # Update timestamp when new data arrives
         except queue.Empty:
             pass
@@ -2920,6 +2955,21 @@ def main():
         if queue_size_before > 50:  # Threshold for warning
             print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
                   f"Processed {samples_processed} samples this frame.", file=sys.stderr)
+
+        # Head positioning: continuously re-evaluate and update the OLED/UI hint screen.
+        # Never auto-advance out of positioning; advancement is only on RIGHT press (see handle_button()).
+        if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
+            now = time.time()
+            if now >= position_next_eval:
+                pos = _position_status_from_eye_data()
+                if pos == "Good":
+                    desired = "IN_POSITION"
+                elif pos == "Near":
+                    desired = "MOVE_FARTHER"
+                else:
+                    desired = "MOVE_CLOSER"
+                _set_screen(desired)
+                position_next_eval = now + 0.2
 
         # Sync current screen variables to OLED
         oled_sync()
@@ -3369,125 +3419,149 @@ def main():
             if state != "CALIBRATION" or not using_led_calib:
                 led_controller.all_off()
 
-        # Screen-specific rendering (FLOW screens)
-        if state == "BOOT":
-            msg = info_msg if (info_msg and time.time() < info_msg_until) else "Press D to start"
-            txt = big.render(msg, True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-        elif state == "FIND_POSITION":
-            pos = _position_status_from_eye_data()
-            txt = big.render("Find position", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            st = font.render(f"Position: {pos}  (D to continue)", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, 110))
-            # Reuse gaze preview styling
-            draw_preview_and_markers()
-        elif state == "MOVE_CLOSER":
-            txt = big.render("Move closer", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-            st = font.render("Press D to re-check", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
-        elif state == "MOVE_FARTHER":
-            txt = big.render("Move farther", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-            st = font.render("Press D to re-check", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
-        elif state == "IN_POSITION":
-            txt = big.render("In position", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-            st = font.render("Press D for calibration", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
-        elif state == "CALIBRATION":
-            running_now = using_led_calib or using_overlay_calib
-            if running_now:
-                txt = big.render("Calibrating…", True, (255, 255, 255))
+        # -----------------------
+        # Debug dashboard (always-on)
+        # -----------------------
+        def _draw_panel(rect: pygame.Rect, title: str):
+            pygame.draw.rect(screen, (18, 18, 18), rect, border_radius=6)
+            pygame.draw.rect(screen, (60, 60, 60), rect, 2, border_radius=6)
+            t = small.render(title, True, (200, 200, 200))
+            screen.blit(t, (rect.left + 8, rect.top + 6))
+            return rect.left + 8, rect.top + 24
+
+        def _draw_lines(x: int, y: int, lines):
+            for line in lines:
+                if line is None:
+                    continue
+                s = small.render(str(line), True, (235, 235, 235))
+                screen.blit(s, (x, y))
+                y += s.get_height() + 2
+            return y
+
+        # Panel layout (portrait)
+        preview_rect = pygame.Rect(10, 80, 260, 260)
+        tracker_rect = pygame.Rect(280, 80, WIDTH - 290, 260)
+        pipeline_rect = pygame.Rect(10, 350, WIDTH - 20, 150)
+        events_rect = pygame.Rect(10, 510, WIDTH - 20, 140)
+        buttons_rect = pygame.Rect(10, 660, WIDTH - 20, 130)
+
+        # Preview panel (gaze)
+        px, py = _draw_panel(preview_rect, "Gaze preview (normalized)")
+        inner = preview_rect.inflate(-16, -36)
+        pygame.draw.rect(screen, (30, 30, 30), inner, border_radius=6)
+        pygame.draw.rect(screen, (60, 60, 60), inner, 2, border_radius=6)
+        # Crosshair
+        pygame.draw.line(screen, (60, 60, 60), (inner.centerx - 10, inner.centery), (inner.centerx + 10, inner.centery), 1)
+        pygame.draw.line(screen, (60, 60, 60), (inner.centerx, inner.centery - 10), (inner.centerx, inner.centery + 10), 1)
+        if last_calib_gaze is not None:
+            if len(last_calib_gaze) == 3:
+                gx, gy, valid = last_calib_gaze
             else:
-                if calib_quality in ("ok", "low"):
-                    txt = big.render("Calibration done", True, (255, 255, 255))
-                elif calib_quality == "failed":
-                    txt = big.render("Calibration failed", True, (255, 255, 255))
-                else:
-                    txt = big.render("Calibration", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            hint = font.render("D=start/next, A=redo (if done)", True, (180, 180, 180))
-            screen.blit(hint, (WIDTH // 2 - hint.get_width() // 2, 110))
-        elif state == "RECORD_CONFIRMATION":
-            txt = big.render("Ready to record?", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-            st = font.render("Press D to start", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
-        elif state == "RECORDING":
-            txt = big.render("Recording…", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            # Timers + current event label
-            total = _fmt_mmss(time.time() - session_t0) if session_t0 else "--:--"
-            if event_open and event_started_at is not None:
-                ev_t = _fmt_mmss(time.time() - event_started_at)
-                ev_name = f"START EVENT {next_event_index}"
+                gx, gy = last_calib_gaze
+                valid = True
+            if valid:
+                dx = inner.left + int(float(gx) * inner.width)
+                dy = inner.top + int(float(gy) * inner.height)
+                dx = max(inner.left, min(inner.right - 1, dx))
+                dy = max(inner.top, min(inner.bottom - 1, dy))
+                pygame.draw.circle(screen, (0, 200, 255), (dx, dy), 6)
+                pygame.draw.circle(screen, (0, 150, 200), (dx, dy), 8, 1)
             else:
-                ev_t = "--:--"
-                ev_name = f"STOP EVENT {next_event_index - 1}" if next_event_index > 1 else "START EVENT 1"
-            t1 = font.render(f"Total: {total}", True, (220, 220, 220))
-            t2 = font.render(f"Event:  {ev_t}", True, (220, 220, 220))
-            t3 = font.render(ev_name, True, (0, 0, 0))
-            screen.blit(t1, (WIDTH // 2 - t1.get_width() // 2, 100))
-            screen.blit(t2, (WIDTH // 2 - t2.get_width() // 2, 120))
-            # Highlight event name
-            bg = pygame.Rect(WIDTH // 2 - 140, 145, 280, 26)
-            pygame.draw.rect(screen, (230, 230, 230), bg, border_radius=6)
-            screen.blit(t3, (WIDTH // 2 - t3.get_width() // 2, 150))
-            draw_preview_and_markers()
-        elif state == "STOP_RECORD":
-            txt = big.render("End recording?", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 20))
-            st = font.render("A=No, D=Yes", True, (200, 200, 200))
-            screen.blit(st, (WIDTH // 2 - st.get_width() // 2, HEIGHT // 2 + 20))
-            if event_open:
-                warn = font.render(f"Event marker {next_event_index} will be closed automatically", True, (255, 200, 0))
-                screen.blit(warn, (WIDTH // 2 - warn.get_width() // 2, HEIGHT // 2 + 55))
-        elif state == "INFERENCE_LOADING":
-            txt = big.render("Analysing…", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, HEIGHT // 2 - 60))
-            bar_w, bar_h = int(WIDTH * 0.7), 18
-            bx = WIDTH // 2 - bar_w // 2
-            by = HEIGHT // 2
-            pygame.draw.rect(screen, (40, 40, 40), (bx, by, bar_w, bar_h), border_radius=6)
-            pr = 0.0
-            if analysis_total_values > 0:
-                pr = float(analysis_values_done) / float(analysis_total_values)
-            pr = max(0.0, min(1.0, pr))
-            pygame.draw.rect(screen, (80, 180, 80), (bx, by, int(bar_w * pr), bar_h), border_radius=6)
-            rem_s = (analysis_total_values - analysis_values_done) * float(analysis_seconds_per_value) if analysis_total_values > 0 else None
-            eta = font.render(f"ETA: {_fmt_mmss(rem_s)}", True, (200, 200, 200))
-            screen.blit(eta, (WIDTH // 2 - eta.get_width() // 2, by + 30))
-        elif state == "RESULTS":
-            txt = big.render("Results", True, (255, 255, 255))
-            screen.blit(txt, (WIDTH // 2 - txt.get_width() // 2, 70))
-            y0 = 120
-            page = results_pages[results_page_index] if (results_pages and 0 <= results_page_index < len(results_pages)) else {"title": "RESULTS", "vals": ["", "", "", ""]}
-            title = page.get("title", "RESULTS")
-            title_surf = font.render(title, True, (200, 200, 200))
-            screen.blit(title_surf, (WIDTH // 2 - title_surf.get_width() // 2, y0))
-            vals = (page.get("vals") or ["", "", "", ""])
-            for i in range(4):
-                line = vals[i] if i < len(vals) else ""
-                surf = font.render(line, True, (230, 230, 230))
-                screen.blit(surf, (WIDTH // 2 - surf.get_width() // 2, y0 + 30 + i * (font.get_height() + 6)))
-            nav = []
-            if results_pages and results_page_index > 0:
-                nav.append("<A Prev")
-            if results_pages and results_page_index < (len(results_pages) - 1):
-                nav.append("D Next>")
-            if nav:
-                nav_s = font.render("   ".join(nav), True, (180, 180, 180))
-                screen.blit(nav_s, (WIDTH // 2 - nav_s.get_width() // 2, HEIGHT - 60))
-        elif state == "MONITORING":
-            # Full-screen monitoring view (modal). Reuse existing eye view renderer.
-            draw_eye_view(screen, last_eye_data, last_eye_data_time, font, small, big)
-        
-        # Button feedback and key overlay drawn last
+                blink_rate = 0.5
+                if int(time.time() / blink_rate) % 2 == 0:
+                    pygame.draw.circle(screen, (255, 0, 0), (inner.centerx, inner.centery), 8)
+                    pygame.draw.circle(screen, (200, 0, 0), (inner.centerx, inner.centery), 10, 2)
+
+        # Tracker panel (latest values)
+        tx, ty = _draw_panel(tracker_rect, "Eye tracker (latest sample)")
+        pos = _position_status_from_eye_data()
+        dist_cm = None
+        if last_eye_data:
+            try:
+                leyez = last_eye_data.get("leyez")
+                reyez = last_eye_data.get("reyez")
+                z = leyez if leyez is not None else reyez
+                if z is not None:
+                    dist_cm = get_distance_cm(z)
+            except Exception:
+                dist_cm = None
+        tracker_lines = [
+            f"Connected: {bool(gp.connected)}  Receiving: {bool(gp.receiving)}",
+            f"Queue size: {gp.q.qsize()}",
+            f"Position eval: {pos}  (updates OLED @ 200ms)",
+        ]
+        if last_calib_gaze is not None:
+            if len(last_calib_gaze) == 3:
+                gx, gy, valid = last_calib_gaze
+            else:
+                gx, gy = last_calib_gaze
+                valid = True
+            tracker_lines.append(f"gx/gy: {gx:.3f}, {gy:.3f}  valid: {bool(valid)}")
+        if last_eye_data:
+            tracker_lines.append(f"lpv/rpv: {bool(last_eye_data.get('lpv'))}/{bool(last_eye_data.get('rpv'))}")
+            tracker_lines.append(f"pupil L/R: {last_eye_data.get('lpupild')} / {last_eye_data.get('rpupild')}")
+        if dist_cm is not None:
+            tracker_lines.append(f"distance: {dist_cm:.1f} cm")
+        if last_eye_data_time is not None:
+            tracker_lines.append(f"last eye data: {time.time() - last_eye_data_time:.2f}s ago")
+        if last_sample_raw:
+            try:
+                keys = sorted(list(last_sample_raw.keys()))
+                head = ", ".join(keys[:8]) + (" …" if len(keys) > 8 else "")
+                tracker_lines.append(f"sample keys({len(keys)}): {head}")
+            except Exception:
+                pass
+        _draw_lines(tx, ty, tracker_lines)
+
+        # Pipeline panel
+        px2, py2 = _draw_panel(pipeline_rect, "Pipeline / state")
+        rp2040_ok = (led_controller is not None and getattr(led_controller, "_serial", None) is not None)
+        running_now = using_led_calib or using_overlay_calib
+        done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
+        total_t = (time.time() - session_t0) if session_t0 else None
+        ev_t = (time.time() - event_started_at) if (event_open and event_started_at is not None) else None
+        pipeline_step = "POSITIONING" if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION") else state
+        msg_line = None
+        if info_msg and time.time() < info_msg_until:
+            msg_line = f"Info: {info_msg}"
+        pipeline_lines = [
+            f"STEP: {pipeline_step}  OLED screen: {state}  Monitoring: {bool(monitoring_active)}",
+            f"RP2040: {bool(rp2040_ok)}  Port: {getattr(led_controller, 'serial_port', '') if led_controller else ''}",
+            f"Calibration: running={bool(running_now)} done={bool(done_now)} quality={calib_quality} step={calib_step}",
+            f"Recording: {bool(state=='RECORDING')} total={_fmt_mmss(total_t) if total_t is not None else '--:--'}",
+            f"Event open: {bool(event_open)}  event_t={_fmt_mmss(ev_t) if ev_t is not None else '--:--'}  next={next_event_index}",
+            f"Inference: {analysis_values_done}/{analysis_total_values}",
+            "Controls: RIGHT=advance, A=marker (recording), B(hold)=monitor, CENTER=reset",
+            msg_line,
+        ]
+        _draw_lines(px2, py2, pipeline_lines)
+
+        # Events panel
+        ex, ey = _draw_panel(events_rect, "Events / markers (latest)")
+        if not events:
+            _draw_lines(ex, ey, ["(none)"])
+        else:
+            lines = []
+            for i in range(max(0, len(events) - 8), len(events)):
+                _, elapsed_str, _, label = events[i]
+                lines.append(f"{elapsed_str} {label}")
+            _draw_lines(ex, ey, lines)
+
+        # Buttons panel
+        bx2, by2 = _draw_panel(buttons_rect, "Buttons (latest edges)")
+        if not button_log:
+            _draw_lines(bx2, by2, ["(none yet)"])
+        else:
+            lines = []
+            for t_ev, src, kind, btn in button_log[-8:]:
+                dt = t_ev - app_t0
+                lines.append(f"{dt:6.1f}s {src:5s} {kind:7s} {btn}")
+            _draw_lines(bx2, by2, lines)
+
+        # Keep existing overlays (useful while debugging)
         draw_button_feedback()
         draw_key_overlay()
+
         pygame.display.flip()
         clock.tick(FPS)
 
