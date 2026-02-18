@@ -1047,6 +1047,10 @@ class Rp2040Controller:
         self._last_seen_wall_time = None
         self._last_boot_id = None
         self._last_uptime_s = None
+        # Serial/heartbeat log for UI (thread-safe, last N lines)
+        self._serial_log = []
+        self._serial_log_max = 80
+        self._serial_log_lock = threading.Lock()
         # Cache last sent state to avoid spamming the serial link every frame (reduces flicker/glitches)
         self._last_mode = None  # "off" | "single" | "all"
         self._last_led = None
@@ -1077,10 +1081,26 @@ class Rp2040Controller:
         except Exception:
             return None
 
+    def _append_serial_log(self, line: str):
+        """Append a line to the serial log (thread-safe)."""
+        if not line:
+            return
+        with self._serial_log_lock:
+            self._serial_log.append(line.strip())
+            if len(self._serial_log) > self._serial_log_max:
+                self._serial_log.pop(0)
+
+    def get_serial_log(self, max_entries: int = 40):
+        """Return the last max_entries serial log lines (newest last)."""
+        with self._serial_log_lock:
+            return list(self._serial_log[-max_entries:])
+
     def _handle_rx_line(self, line: str):
         if not line:
             return
         up = line.strip()
+        # Log all RX lines for heartbeat/serial panel
+        self._append_serial_log(up)
         # BOOT/HB (1 Hz):
         #   BOOT:<boot_id>:<uptime_s>
         #   HB:<boot_id>:<uptime_s>
@@ -1639,9 +1659,8 @@ def get_distance_color(eyez_value):
     
     Returns:
         Color tuple (R, G, B) based on distance zones:
-        - Green: 55-65 cm (optimal range)
-        - Yellow: 45-55 cm or 65-75 cm (acceptable)
-        - Red: < 45 cm (too close) or > 75 cm (too far)
+        - Red: < 55 cm (too close) or > 75 cm (too far)
+        - Green: 55-75 cm (good)
     """
     if eyez_value is None:
         return (128, 128, 128)  # Gray for no data
@@ -1650,20 +1669,11 @@ def get_distance_color(eyez_value):
     # LEYEZ/REYEZ are in meters according to API Section 5.11
     distance_cm = eyez_value * 100.0
     
-    # Distance zones:
-    # - < 45 cm: Red (too close)
-    # - 45-55 cm: Yellow (acceptable)
-    # - 55-65 cm: Green (optimal/good)
-    # - 65-75 cm: Yellow (acceptable)
-    # - > 75 cm: Red (too far)
-    if distance_cm < 45.0:
-        return (220, 50, 47)  # Red - Too Close (< 45 cm)
-    elif distance_cm < 55.0:
-        return (255, 200, 0)  # Yellow - Acceptable (45-55 cm)
-    elif distance_cm < 65.0:
-        return (0, 200, 0)  # Green - Good (55-65 cm)
-    elif distance_cm < 75.0:
-        return (255, 200, 0)  # Yellow - Acceptable (65-75 cm)
+    # Distance zones: < 55 = too close, 55-75 = good, > 75 = too far
+    if distance_cm < 55.0:
+        return (220, 50, 47)  # Red - Too Close (< 55 cm)
+    elif distance_cm <= 75.0:
+        return (0, 200, 0)   # Green - Good (55-75 cm)
     else:
         return (220, 50, 47)  # Red - Too Far (> 75 cm)
 
@@ -2456,7 +2466,7 @@ def main():
             dist_cm = get_distance_cm(reyez)
         if dist_cm is None:
             return "Far"
-        if dist_cm < 45.0:
+        if dist_cm < 55.0:
             return "Near"
         if dist_cm > 75.0:
             return "Far"
@@ -3600,11 +3610,15 @@ def main():
         # Debug dashboard (always-on)
         # -----------------------
         def _draw_panel(rect: pygame.Rect, title: str):
-            pygame.draw.rect(screen, (18, 18, 18), rect, border_radius=6)
-            pygame.draw.rect(screen, (60, 60, 60), rect, 2, border_radius=6)
-            t = small.render(title, True, (200, 200, 200))
-            screen.blit(t, (rect.left + 8, rect.top + 6))
-            return rect.left + 8, rect.top + 24
+            # Panel background and border
+            pygame.draw.rect(screen, (22, 22, 26), rect, border_radius=8)
+            pygame.draw.rect(screen, (55, 55, 60), rect, 2, border_radius=8)
+            # Title bar strip
+            title_rect = pygame.Rect(rect.left + 2, rect.top + 2, rect.width - 4, 22)
+            pygame.draw.rect(screen, (35, 35, 42), title_rect, border_radius=6)
+            t = small.render(title, True, (220, 220, 230))
+            screen.blit(t, (rect.left + 10, rect.top + 5))
+            return rect.left + 10, rect.top + 28
 
         def _draw_lines(x: int, y: int, lines):
             for line in lines:
@@ -3657,12 +3671,27 @@ def main():
                 mtxt = small.render("MONITOR", True, (15, 15, 15))
                 screen.blit(mtxt, (pill.centerx - mtxt.get_width() // 2, pill.centery - mtxt.get_height() // 2))
 
-        # Panel layout (portrait)
-        preview_rect = pygame.Rect(10, 80, 260, 260)
-        tracker_rect = pygame.Rect(280, 80, WIDTH - 290, 260)
-        pipeline_rect = pygame.Rect(10, 350, WIDTH - 20, 150)
-        events_rect = pygame.Rect(10, 510, WIDTH - 20, 140)
-        buttons_rect = pygame.Rect(10, 660, WIDTH - 20, 130)
+        # Panel layout: full width (no side limits), consistent margin
+        MARGIN = 16
+        GAP = 12
+        PANEL_W = max(200, WIDTH - 2 * MARGIN)
+        HALF_W = (PANEL_W - GAP) // 2
+        TOP_Y = 72
+        ROW_H1 = min(220, (HEIGHT - TOP_Y - 6 * MARGIN - 130 - 90 - 90) // 1)  # preview + tracker height
+        ROW_H_PIPELINE = 130
+        ROW_H = 90
+        remaining_h = max(100, HEIGHT - TOP_Y - ROW_H1 - ROW_H_PIPELINE - 2 * ROW_H - 6 * MARGIN - 50)
+
+        preview_rect = pygame.Rect(MARGIN, TOP_Y, HALF_W, ROW_H1)
+        tracker_rect = pygame.Rect(MARGIN + HALF_W + GAP, TOP_Y, HALF_W, ROW_H1)
+        y2 = TOP_Y + ROW_H1 + MARGIN
+        pipeline_rect = pygame.Rect(MARGIN, y2, PANEL_W, ROW_H_PIPELINE)
+        y3 = y2 + ROW_H_PIPELINE + MARGIN
+        events_rect = pygame.Rect(MARGIN, y3, PANEL_W, ROW_H)
+        y4 = y3 + ROW_H + MARGIN
+        buttons_rect = pygame.Rect(MARGIN, y4, PANEL_W, ROW_H)
+        y5 = y4 + ROW_H + MARGIN
+        serial_log_rect = pygame.Rect(MARGIN, y5, PANEL_W, remaining_h)
 
         # Preview panel (gaze)
         px, py = _draw_panel(preview_rect, "Gaze preview (normalized)")
@@ -3802,6 +3831,14 @@ def main():
                 dt = t_ev - app_t0
                 lines.append(f"{dt:6.1f}s {src:5s} {kind:7s} {btn}")
             _draw_lines(bx2, by2, lines)
+
+        # Heartbeat / Serial messages log
+        sx, sy = _draw_panel(serial_log_rect, "Heartbeat / Serial log")
+        serial_lines = led_controller.get_serial_log(25) if led_controller else []
+        if not serial_lines:
+            _draw_lines(sx, sy, ["(no RP2040 or no messages yet)"])
+        else:
+            _draw_lines(sx, sy, serial_lines[-25:])
 
         # Keep existing overlays (useful while debugging)
         draw_button_feedback()
