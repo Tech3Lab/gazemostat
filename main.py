@@ -1280,14 +1280,9 @@ class Rp2040Controller:
                     line = self._serial.readline().decode('utf-8', errors='ignore').strip()
                     if not line:
                         continue
+                    # Always parse/log the line so BOOT/HB never get dropped while waiting for ACK.
+                    self._handle_rx_line(line)
                     up = line.upper()
-                    # Forward button lines to callback, don't treat as ACK.
-                    if up.startswith("BTN:PRESS:") or up.startswith("BTN:RELEASE:"):
-                        self._handle_rx_line(line)
-                        continue
-                    # Ignore periodic boot/handshake messages
-                    if up.startswith("HELLO"):
-                        continue
                     if up.startswith("ACK") or up.startswith("ERROR"):
                         return line
                 else:
@@ -2648,13 +2643,10 @@ def main():
             _oled_set_str("ui_calib_start_btn", "Start calibration>" if (not running_now and calib_quality == "none") else "")
             _oled_set_str("ui_calib_redo_btn", "<Redo" if done_now else "")
             _oled_set_str("ui_calib_next_btn", "Next>" if (done_now and calib_quality in ("ok", "low")) else "")
-            # Calibration result as percentage
+            # Calibration result as raw average error
             if done_now and calib_quality in ("ok", "low") and calib_avg_error is not None:
                 try:
-                    pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
-                    pct = max(0.0, min(100.0, pct))
-                    # Truncate (not round) so "almost 100%" doesn't always show 100%.
-                    _oled_set_str("ui_calib_result", f"{int(pct)}%")
+                    _oled_set_str("ui_calib_result", f"{float(calib_avg_error):.3f}")
                 except Exception:
                     _oled_set_str("ui_calib_result", "")
             else:
@@ -2800,9 +2792,7 @@ def main():
         # Display calibration quality value if ok or low
         if calib_quality in ("ok", "low") and calib_avg_error is not None:
             try:
-                pct = 100.0 * (1.0 - (float(calib_avg_error) / float(CALIB_LOW_THRESHOLD)))
-                pct = max(0.0, min(100.0, pct))
-                error_str = f"{int(pct)}%"
+                error_str = f"{float(calib_avg_error):.3f}"
             except Exception:
                 error_str = ""
             lbl_error = small.render(error_str, True, (180, 180, 180))
@@ -3671,27 +3661,56 @@ def main():
                 mtxt = small.render("MONITOR", True, (15, 15, 15))
                 screen.blit(mtxt, (pill.centerx - mtxt.get_width() // 2, pill.centery - mtxt.get_height() // 2))
 
+        def _shortcuts_lines():
+            lines = [
+                "W/A/S/D/X -> UP/LEFT/CENTER/RIGHT/DOWN",
+                "P -> BTN_A marker (RECORDING)",
+                "L hold -> BTN_B monitoring modal",
+                "R -> reset app state, M -> quit",
+            ]
+            if SIM_GAZE:
+                lines.append("1/2/3 -> gaze connect/disconnect/stream")
+            if SHOW_KEYS and key_log:
+                last = [lbl for (_, lbl) in key_log[-8:]]
+                lines.append("Recent: " + " ".join(last))
+            return lines
+
         # Panel layout: full width (no side limits), consistent margin
         MARGIN = 16
         GAP = 12
         PANEL_W = max(200, WIDTH - 2 * MARGIN)
         HALF_W = (PANEL_W - GAP) // 2
         TOP_Y = 72
-        ROW_H1 = min(220, (HEIGHT - TOP_Y - 6 * MARGIN - 130 - 90 - 90) // 1)  # preview + tracker height
+        ROW_H1 = max(140, min(220, (HEIGHT - TOP_Y - 7 * MARGIN - 130 - 90 - 90 - 110) // 1))  # preview + tracker height
         ROW_H_PIPELINE = 130
-        ROW_H = 90
-        remaining_h = max(100, HEIGHT - TOP_Y - ROW_H1 - ROW_H_PIPELINE - 2 * ROW_H - 6 * MARGIN - 50)
+        ROW_H_EVENTS = 90
+        ROW_H_BUTTONS = 90
+        ROW_H_SHORTCUTS = 110
+        remaining_h = max(
+            100,
+            HEIGHT
+            - TOP_Y
+            - ROW_H1
+            - ROW_H_PIPELINE
+            - ROW_H_EVENTS
+            - ROW_H_BUTTONS
+            - ROW_H_SHORTCUTS
+            - 7 * MARGIN
+            - 50,
+        )
 
         preview_rect = pygame.Rect(MARGIN, TOP_Y, HALF_W, ROW_H1)
         tracker_rect = pygame.Rect(MARGIN + HALF_W + GAP, TOP_Y, HALF_W, ROW_H1)
         y2 = TOP_Y + ROW_H1 + MARGIN
         pipeline_rect = pygame.Rect(MARGIN, y2, PANEL_W, ROW_H_PIPELINE)
         y3 = y2 + ROW_H_PIPELINE + MARGIN
-        events_rect = pygame.Rect(MARGIN, y3, PANEL_W, ROW_H)
-        y4 = y3 + ROW_H + MARGIN
-        buttons_rect = pygame.Rect(MARGIN, y4, PANEL_W, ROW_H)
-        y5 = y4 + ROW_H + MARGIN
-        serial_log_rect = pygame.Rect(MARGIN, y5, PANEL_W, remaining_h)
+        events_rect = pygame.Rect(MARGIN, y3, PANEL_W, ROW_H_EVENTS)
+        y4 = y3 + ROW_H_EVENTS + MARGIN
+        buttons_rect = pygame.Rect(MARGIN, y4, PANEL_W, ROW_H_BUTTONS)
+        y5 = y4 + ROW_H_BUTTONS + MARGIN
+        shortcuts_rect = pygame.Rect(MARGIN, y5, PANEL_W, ROW_H_SHORTCUTS)
+        y6 = y5 + ROW_H_SHORTCUTS + MARGIN
+        serial_log_rect = pygame.Rect(MARGIN, y6, PANEL_W, remaining_h)
 
         # Preview panel (gaze)
         px, py = _draw_panel(preview_rect, "Gaze preview (normalized)")
@@ -3805,7 +3824,6 @@ def main():
             f"Recording total: {_fmt_mmss(total_t) if total_t is not None else '--:--'}  (state={state})",
             f"Event: open={bool(event_open)}  event_t={_fmt_mmss(ev_t) if ev_t is not None else '--:--'}  next={next_event_index}",
             f"Inference: {analysis_values_done}/{analysis_total_values}  page={results_page_index+1 if results_pages else 0}/{len(results_pages) if results_pages else 0}",
-            "Controls: RIGHT=advance, A=marker (recording), B(hold)=monitor, CENTER=reset",
             msg_line,
         ]
         _draw_lines(px2, py2 + 58, pipeline_lines)
@@ -3831,6 +3849,10 @@ def main():
                 dt = t_ev - app_t0
                 lines.append(f"{dt:6.1f}s {src:5s} {kind:7s} {btn}")
             _draw_lines(bx2, by2, lines)
+
+        # Keyboard shortcuts panel
+        kx2, ky2 = _draw_panel(shortcuts_rect, "Keyboard shortcuts")
+        _draw_lines(kx2, ky2, _shortcuts_lines())
 
         # Heartbeat / Serial messages log
         sx, sy = _draw_panel(serial_log_rect, "Heartbeat / Serial log")
