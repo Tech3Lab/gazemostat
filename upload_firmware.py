@@ -31,8 +31,9 @@ BOARD_FQBN = "rp2040:rp2040:rpipico"  # Raspberry Pi Pico / RP2040
 LIBRARY_NAME = "Adafruit NeoPixel"
 LIBRARY_VERSION = "1.11.2"  # Or latest
 
-# Additional libraries for OLED support (SSD1306 + GFX stack)
+# Additional libraries for OLED support (SSD1327 UI + SSD1306 integrity test + GFX stack)
 OLED_LIBRARIES = [
+    "Adafruit SSD1327",
     "Adafruit SSD1306",
     "Adafruit GFX Library",
     "Adafruit BusIO",
