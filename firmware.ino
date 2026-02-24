@@ -88,6 +88,7 @@ unsigned long last_ui_refresh_ms = 0;
 
 // UI screen state (CPU is the source of truth; firmware only renders).
 UiScreen ui_current_screen = UiScreen::BOOT;
+bool ui_dirty = true;
 
 // Backward-compatible v2-style state variables (used only by OLED:UI:STATE).
 bool ui_tracker_detected_state = false;
@@ -152,6 +153,7 @@ static void renderUi() {
   update_ui_dynamic_elements();
   draw_screen(display1327, ui_current_screen);
   display1327.display();
+  ui_dirty = false;
 }
 
 static void renderButtonFeedback(uint8_t buttons) {
@@ -191,8 +193,8 @@ static void pollButtonsAndUpdateDisplay() {
     }
   }
 
-  // 2) Refresh OLED UI at a throttled rate to avoid starving serial parsing / heartbeat.
-  if (now - last_ui_refresh_ms >= UI_REFRESH_MS) {
+  // 2) Refresh OLED UI at a throttled rate only when content changed.
+  if (ui_dirty && (now - last_ui_refresh_ms >= UI_REFRESH_MS)) {
     last_ui_refresh_ms = now;
     renderUi();
   }
@@ -877,7 +879,7 @@ void processCommand(String cmd) {
         if (tracker.length() > 0) ui_tracker_detected_state = (tracker == "1" || tracker == "ON" || tracker == "TRUE");
         if (led.length() > 0) ui_led_detected_state = (led == "1" || led == "ON" || led == "TRUE");
         if (conn.length() > 0) ui_connection_state = (conn == "1" || conn == "ON" || conn == "TRUE");
-        renderUi();
+        ui_dirty = true;
         Serial.println("OLED:UI:STATE:OK");
         return;
       }
@@ -891,7 +893,7 @@ void processCommand(String cmd) {
           return;
         }
         ui_current_screen = s;
-        renderUi();
+        ui_dirty = true;
         Serial.println("OLED:UI:SCREEN:OK");
         return;
       }
@@ -919,8 +921,7 @@ void processCommand(String cmd) {
           gaze.x = mapU8ToRange(ui_gaze_x_compat, 119);
           gaze.y = mapU8ToRange(ui_gaze_y_compat, 71);
           ui_set<UiGazePoint>(UiDynamicVar::UI_GAZE_POINT, gaze);
-          renderUi();
-          Serial.println("OLED:UI:SET:OK");
+          ui_dirty = true;
           return;
         }
 
@@ -938,8 +939,7 @@ void processCommand(String cmd) {
             return;
           }
           ui_set<bool>(var, v);
-          renderUi();
-          Serial.println("OLED:UI:SET:OK");
+          ui_dirty = true;
           return;
         }
 
@@ -953,8 +953,7 @@ void processCommand(String cmd) {
           } else {
             ui_set<uint8_t>(var, (uint8_t)n);
           }
-          renderUi();
-          Serial.println("OLED:UI:SET:OK");
+          ui_dirty = true;
           return;
         }
 
@@ -973,8 +972,7 @@ void processCommand(String cmd) {
           // Unescape common sequences from host (so host can send multi-line strings safely).
           value.replace("\\n", "\n");
           ui_set<String>(var, value);
-          renderUi();
-          Serial.println("OLED:UI:SET:OK");
+          ui_dirty = true;
           return;
         }
 

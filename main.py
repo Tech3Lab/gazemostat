@@ -1185,6 +1185,10 @@ class Rp2040Controller:
         """Append a line to the serial log (thread-safe)."""
         if not line:
             return
+        up = line.strip().upper()
+        # Drop high-frequency noise lines to keep debug panel responsive.
+        if up in ("ACK", "OLED:UI:SET:OK"):
+            return
         with self._serial_log_lock:
             self._serial_log.append(line.strip())
             if len(self._serial_log) > self._serial_log_max:
@@ -2029,6 +2033,7 @@ def main():
     calib_sequence = []  # Sequence of LED indices for calibration
     calib_led_animation_start = {}  # Track animation start time for each LED index
     led_calib_last_point_key = None  # (pt, started_at) to detect Gazepoint point transitions
+    calib_latched_logical_step = None  # Stable logical step for current CALIB_START_PT
     using_led_calib = False  # Flag for LED-based calibration active
     using_overlay_calib = False  # Flag for overlay calibration active
     # CALIB_DELAY and CALIB_DWELL are loaded from config.yaml in load_config()
@@ -2142,6 +2147,7 @@ def main():
     def start_calibration(override=None):
         nonlocal state, calib_status, calib_step, calib_step_start, calib_points, target_points, calib_quality, aff, current_calib_override, calib_avg_error
         nonlocal using_led_calib, using_overlay_calib, calib_sequence, calib_led_animation_start, led_calib_last_point_key
+        nonlocal calib_latched_logical_step
         nonlocal calib_debug_events, calib_debug_t0, calib_debug_saved_for_t0
         nonlocal calib_debug_last_point_key, calib_debug_last_point_end_key, calib_debug_last_result_sig
         if not gp.connected:
@@ -2174,6 +2180,7 @@ def main():
         # Reset animation + point tracking
         calib_led_animation_start.clear()
         led_calib_last_point_key = None
+        calib_latched_logical_step = None
         if not SIM_GAZE:
             gp.reset_calibration_point_progress()
         
@@ -2488,7 +2495,7 @@ def main():
         nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
         nonlocal info_msg, info_msg_until, last_calib_gaze, using_led_calib, using_overlay_calib
         nonlocal eye_view_active, last_eye_data, last_eye_data_time, calib_sequence, calib_led_animation_start
-        nonlocal led_calib_last_point_key
+        nonlocal led_calib_last_point_key, calib_latched_logical_step
         state = "BOOT"
         # Ensure the OLED is immediately put back to BOOT even if the state was already BOOT.
         if led_controller is not None:
@@ -2506,6 +2513,7 @@ def main():
         calib_sequence = []
         calib_led_animation_start.clear()
         led_calib_last_point_key = None
+        calib_latched_logical_step = None
         calib_collect_start = 0.0
         calib_quality = "none"
         calib_avg_error = None
@@ -2539,6 +2547,7 @@ def main():
         # Force the next OLED sync to re-send dynamic vars (avoid stale cached values after reset).
         try:
             oled_last.clear()
+            oled_last_ts.clear()
         except Exception:
             pass
         set_info_msg("App state reset", dur=2.0)
@@ -2683,6 +2692,7 @@ def main():
     # OLED v3 sync (cached)
     # -----------------------
     oled_last = {}
+    oled_last_ts = {}
 
     def _oled_set_bool(var_name: str, value: bool):
         if led_controller is None:
@@ -2702,9 +2712,21 @@ def main():
             return
         key = ("U8", var_name)
         v = int(max(0, min(255, int(value))))
-        if oled_last.get(key) == v:
+        now = time.time()
+        prev = oled_last.get(key)
+        prev_ts = oled_last_ts.get(key)
+        # High-rate gaze values: rate-limit + deadband to reduce serial/OLED load.
+        if var_name in ("ui_gaze_x", "ui_gaze_y") and prev is not None and prev_ts is not None:
+            dt = now - prev_ts
+            dv = abs(v - int(prev))
+            if dt < 0.10 and dv < 8:
+                return
+            if dt < 0.05:
+                return
+        if prev == v:
             return
         oled_last[key] = v
+        oled_last_ts[key] = now
         try:
             led_controller.oled_set_u8(var_name, v)
         except Exception:
@@ -2715,9 +2737,16 @@ def main():
             return
         key = ("S", var_name)
         v = "" if value is None else str(value)
+        now = time.time()
+        prev_ts = oled_last_ts.get(key)
+        # Timer-like text fields do not need high update rates.
+        if var_name in ("ui_recording_timer", "ui_event_time", "ui_inference_timer"):
+            if prev_ts is not None and (now - prev_ts) < 0.25:
+                return
         if oled_last.get(key) == v:
             return
         oled_last[key] = v
+        oled_last_ts[key] = now
         try:
             led_controller.oled_set_str(var_name, v)
         except Exception:
@@ -3190,6 +3219,7 @@ def main():
                     # Case B: keep current pipeline; force OLED resync.
                     try:
                         oled_last.clear()
+                        oled_last_ts.clear()
                     except Exception:
                         pass
 
@@ -3422,6 +3452,7 @@ def main():
                 # If we haven't received CALIB_START_PT yet, keep LEDs off (Gazepoint will send it).
                 if pt is None or pt_started_at is None:
                     calib_step = -1
+                    calib_latched_logical_step = None
                     if led_controller is not None:
                         led_controller.all_off()
                 else:
@@ -3431,6 +3462,36 @@ def main():
                     if is_new_point:
                         led_calib_last_point_key = point_key
                         calib_led_animation_start.clear()
+                        # Latch logical step on point start so transient CALX/CALY jitter
+                        # cannot briefly switch to the wrong LED.
+                        latched_step = -1
+                        try:
+                            pt_int = int(pt) if pt is not None else None
+                        except Exception:
+                            pt_int = None
+                        if pt_int is not None:
+                            pt_map = {1: 0, 2: 1, 3: 2, 4: 3, 5: 4}
+                            latched_step = pt_map.get(pt_int, -1)
+                        if latched_step < 0 and calx is not None and caly is not None:
+                            try:
+                                cx = float(calx)
+                                cy = float(caly)
+                                if abs(cx - 0.5) <= 0.15 and abs(cy - 0.5) <= 0.15:
+                                    latched_step = 4
+                                else:
+                                    right = cx >= 0.5
+                                    bottom = cy >= 0.5
+                                    if right and bottom:
+                                        latched_step = 0
+                                    elif (not right) and bottom:
+                                        latched_step = 1
+                                    elif (not right) and (not bottom):
+                                        latched_step = 2
+                                    else:
+                                        latched_step = 3
+                            except Exception:
+                                latched_step = -1
+                        calib_latched_logical_step = latched_step
                         # Debug log: new point started (from CALIB_START_PT)
                         if calib_debug_last_point_key != point_key:
                             calib_debug_last_point_key = point_key
@@ -3461,35 +3522,8 @@ def main():
                     phase_elapsed = max(0.0, now - pt_started_at)
                     in_delay_phase = phase_elapsed < GP_CALIBRATE_DELAY
 
-                    # Map Gazepoint's current calibration target to the correct physical LED(s).
-                    # Prefer CALX/CALY (most reliable); fall back to PT ordering if CALX/CALY unavailable.
-                    logical_step = -1  # 0..3 for corners, 4 for center
-                    if calx is not None and caly is not None:
-                        try:
-                            cx = float(calx)
-                            cy = float(caly)
-                            # Center point is typically at (0.5, 0.5)
-                            if abs(cx - 0.5) <= 0.15 and abs(cy - 0.5) <= 0.15:
-                                logical_step = 4
-                            else:
-                                right = cx >= 0.5
-                                bottom = cy >= 0.5
-                                if right and bottom:
-                                    logical_step = 0  # low_right
-                                elif (not right) and bottom:
-                                    logical_step = 1  # low_left
-                                elif (not right) and (not bottom):
-                                    logical_step = 2  # high_left
-                                else:
-                                    logical_step = 3  # high_right
-                        except Exception:
-                            logical_step = -1
-                    else:
-                        # Fallback PT ordering (only used if CALX/CALY are missing).
-                        # When using CALIBRATE_CLEAR + CALIBRATE_ADDPOINT, PT numbering follows the internal point list order.
-                        # Our imposed order is: PT1=low_right, PT2=low_left, PT3=high_left, PT4=high_right
-                        pt_map = {1: 0, 2: 1, 3: 2, 4: 3}
-                        logical_step = pt_map.get(int(pt), -1)
+                    # Use the point-start latched mapping for stability throughout the point.
+                    logical_step = calib_latched_logical_step if calib_latched_logical_step is not None else -1
 
                     if logical_step == 4:
                         # Center step: light all LEDs.
