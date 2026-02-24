@@ -80,7 +80,10 @@ OledModel oled_model = OledModel::NONE;
 // bit0..bit6 = UP,DOWN,LEFT,RIGHT,CENTER,A,B
 uint8_t buttons_prev = 0;
 unsigned long last_button_poll_ms = 0;
-const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz
+const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz button polling
+// OLED full-frame refresh is expensive over I2C. Keep it responsive but avoid starving serial RX/HB.
+const unsigned long UI_REFRESH_MS = 100;  // 10 Hz UI refresh
+unsigned long last_ui_refresh_ms = 0;
 
 // UI screen state (CPU is the source of truth; firmware only renders).
 UiScreen ui_current_screen = UiScreen::BOOT;
@@ -158,34 +161,39 @@ static void renderButtonFeedback(uint8_t buttons) {
 static void pollButtonsAndUpdateDisplay() {
   if (!oled_available) return;
   unsigned long now = millis();
-  if (now - last_button_poll_ms < BUTTON_POLL_MS) return;
-  last_button_poll_ms = now;
+  // 1) Poll buttons at 50 Hz (edges only).
+  if (now - last_button_poll_ms >= BUTTON_POLL_MS) {
+    last_button_poll_ms = now;
 
-  uint8_t cur = readButtons();
-  uint8_t changed = cur ^ buttons_prev;
-  
-  if (changed != 0) {
-    // Emit press/release edges to the CPU (needed for BTN_B hold-to-monitor).
-    for (uint8_t i = 0; i < 7; i++) {
-      uint8_t mask = (1 << i);
-      if (changed & mask) {
-        bool prevPressed = (buttons_prev & mask) != 0;
-        bool curPressed = (cur & mask) != 0;
-        if (!prevPressed && curPressed) {
-          Serial.print("BTN:PRESS:");
-          Serial.println(buttonNameFromBit(i));
-        } else if (prevPressed && !curPressed) {
-          Serial.print("BTN:RELEASE:");
-          Serial.println(buttonNameFromBit(i));
+    uint8_t cur = readButtons();
+    uint8_t changed = cur ^ buttons_prev;
+
+    if (changed != 0) {
+      // Emit press/release edges to the CPU (needed for BTN_B hold-to-monitor).
+      for (uint8_t i = 0; i < 7; i++) {
+        uint8_t mask = (1 << i);
+        if (changed & mask) {
+          bool prevPressed = (buttons_prev & mask) != 0;
+          bool curPressed = (cur & mask) != 0;
+          if (!prevPressed && curPressed) {
+            Serial.print("BTN:PRESS:");
+            Serial.println(buttonNameFromBit(i));
+          } else if (prevPressed && !curPressed) {
+            Serial.print("BTN:RELEASE:");
+            Serial.println(buttonNameFromBit(i));
+          }
         }
       }
+
+      buttons_prev = cur;
     }
-    
-    buttons_prev = cur;
   }
-  
-  // Refresh UI even without input (dynamic elements may change via serial)
-  renderUi();
+
+  // 2) Refresh OLED UI at a throttled rate to avoid starving serial parsing / heartbeat.
+  if (now - last_ui_refresh_ms >= UI_REFRESH_MS) {
+    last_ui_refresh_ms = now;
+    renderUi();
+  }
 }
 
 static bool parseBool01(const String &s, bool &out) {
@@ -633,20 +641,43 @@ void loop() {
     serial_connected = true;
   }
   
-  // Check for incoming serial commands
-  if (Serial.available() > 0) {
+  // Check for incoming serial commands (non-blocking, drains all pending RX).
+  // Avoids readStringUntil() blocking and reduces risk of serial backlog starving HB.
+  static char rx_line[256];
+  static size_t rx_len = 0;
+
+  while (Serial.available() > 0) {
     // Mark serial as connected when we receive data
     if (!serial_connected) {
       serial_connected = true;
       // Send HELLO when we first detect serial activity
       Serial.println("HELLO NEOPIXEL");
     }
-    
-    String command = Serial.readStringUntil('\n');
-    command.trim();  // Remove whitespace
-    
-    if (command.length() > 0) {
-      processCommand(command);
+
+    int b = Serial.read();
+    if (b < 0) break;
+    char c = (char)b;
+
+    if (c == '\r') continue;
+    if (c == '\n') {
+      rx_line[rx_len] = '\0';
+      if (rx_len > 0) {
+        String command = String(rx_line);
+        command.trim();
+        if (command.length() > 0) {
+          processCommand(command);
+        }
+      }
+      rx_len = 0;
+      continue;
+    }
+
+    // Accumulate, but if a sender floods without newlines or sends a too-long line,
+    // drop it to keep the firmware responsive.
+    if (rx_len < (sizeof(rx_line) - 1)) {
+      rx_line[rx_len++] = c;
+    } else {
+      rx_len = 0;  // overflow: drop current line
     }
   }
 }
