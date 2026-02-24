@@ -823,14 +823,18 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       i++;
     }
   }
-  display.drawCircle(7, 11, 5, SSD1327_WHITE);
-  if (ui_led_up_left) display.fillCircle(7, 11, 2, SSD1327_WHITE);
-  display.drawCircle(119, 11, 5, SSD1327_WHITE);
-  if (ui_led_up_right) display.fillCircle(119, 11, 2, SSD1327_WHITE);
-  display.drawCircle(120, 77, 5, SSD1327_WHITE);
-  if (ui_led_bottom_right) display.fillCircle(120, 77, 2, SSD1327_WHITE);
-  display.drawCircle(8, 77, 5, SSD1327_WHITE);
-  if (ui_led_bottom_left) display.fillCircle(8, 77, 2, SSD1327_WHITE);
+  if (ui_led_up_left) {
+    display.drawCircle(7, 11, 5, SSD1327_WHITE);
+  }
+  if (ui_led_up_right) {
+    display.drawCircle(119, 11, 5, SSD1327_WHITE);
+  }
+  if (ui_led_bottom_right) {
+    display.drawCircle(120, 77, 5, SSD1327_WHITE);
+  }
+  if (ui_led_bottom_left) {
+    display.drawCircle(8, 77, 5, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -1652,9 +1656,9 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
   }
   display.drawRect(4, 21, 120, 72, SSD1327_WHITE);
   {
-    const int gx = max(0, min(119, (int)ui_gaze_point.x));
-    const int gy = max(0, min(71, (int)ui_gaze_point.y));
-    display.fillRect(4 + gx, 21 + gy, 1, 1, SSD1327_WHITE);
+    const int gx = max(1, min(118, (int)ui_gaze_point.x));
+    const int gy = max(1, min(70, (int)ui_gaze_point.y));
+    display.fillRect(4 + gx - 1, 21 + gy - 1, 3, 3, SSD1327_WHITE);
   }
 }
 
