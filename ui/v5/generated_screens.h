@@ -823,18 +823,14 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       i++;
     }
   }
-  if (ui_led_up_left) {
-    display.drawCircle(7, 11, 5, SSD1327_WHITE);
-  }
-  if (ui_led_up_right) {
-    display.drawCircle(119, 11, 5, SSD1327_WHITE);
-  }
-  if (ui_led_bottom_right) {
-    display.drawCircle(120, 77, 5, SSD1327_WHITE);
-  }
-  if (ui_led_bottom_left) {
-    display.drawCircle(8, 77, 5, SSD1327_WHITE);
-  }
+  display.drawCircle(7, 11, 5, SSD1327_WHITE);
+  if (ui_led_up_left) display.fillCircle(7, 11, 2, SSD1327_WHITE);
+  display.drawCircle(119, 11, 5, SSD1327_WHITE);
+  if (ui_led_up_right) display.fillCircle(119, 11, 2, SSD1327_WHITE);
+  display.drawCircle(120, 77, 5, SSD1327_WHITE);
+  if (ui_led_bottom_right) display.fillCircle(120, 77, 2, SSD1327_WHITE);
+  display.drawCircle(8, 77, 5, SSD1327_WHITE);
+  if (ui_led_bottom_left) display.fillCircle(8, 77, 2, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);

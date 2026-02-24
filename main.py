@@ -2618,10 +2618,22 @@ def main():
                 _set_screen("FIND_POSITION")
             return
 
-        # Head positioning: continuously re-evaluated elsewhere (every UI_REFRESH_MS) and displayed
-        # as MOVE_CLOSER / MOVE_FARTHER / IN_POSITION. Advancement to calibration is NEVER
-        # automatic: user must press RIGHT while in a good position.
-        if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
+        # FIND_POSITION is an explicit "ready" step.
+        # Stay on it until RIGHT is pressed, then choose a positioning hint screen.
+        if state == "FIND_POSITION":
+            if btn == "BTN_RIGHT":
+                pos = _position_status_from_eye_data()
+                if pos == "Good":
+                    _set_screen("IN_POSITION")
+                elif pos == "Near":
+                    _set_screen("MOVE_FARTHER")
+                else:
+                    _set_screen("MOVE_CLOSER")
+            return
+
+        # On hint screens, advancement to calibration is NEVER automatic:
+        # user must press RIGHT while in a good position.
+        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
             if btn == "BTN_RIGHT":
                 pos = _position_status_from_eye_data()
                 if pos == "Good":
@@ -3262,9 +3274,9 @@ def main():
             print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
                   f"Processed {samples_processed} samples this frame.", file=sys.stderr)
 
-        # Head positioning: continuously re-evaluate and update the OLED/UI hint screen.
-        # Never auto-advance out of positioning; advancement is only on RIGHT press (see handle_button()).
-        if state in ("FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
+        # Positioning hint screens (not FIND_POSITION): continuously re-evaluate and
+        # update the OLED/UI hint screen. Advancement to CALIBRATION stays RIGHT-press only.
+        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
             now = time.time()
             if now >= position_next_eval:
                 pos = _position_status_from_eye_data()
