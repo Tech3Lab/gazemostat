@@ -442,6 +442,11 @@ class GazeClient:
         with self.calib_result_lock:
             return self.calib_result
 
+    def get_calibration_result_summary(self):
+        """Get the latest CALIBRATE_RESULT_SUMMARY (progress/diagnostics)."""
+        with self.calib_result_lock:
+            return self.calib_result_summary
+
     def get_calibration_point_progress(self):
         """Get latest calibration point progress from CAL messages.
 
@@ -612,7 +617,7 @@ class GazeClient:
                                                     with self.calib_result_lock:
                                                         success = 1 if (num_points is not None and num_points >= 4) else 0
                                                         self.calib_result_summary = {
-                                                            'average_error': avg_error if avg_error is not None else 0.0,
+                                                            'average_error': avg_error,
                                                             'num_points': num_points if num_points is not None else 0,
                                                             'success': success,
                                                             'source': 'CALIBRATE_RESULT_SUMMARY',
@@ -639,6 +644,9 @@ class GazeClient:
                                             
                                             if cal_id == "CALIB_RESULT":
                                                 # Parse final calibration result
+                                                avg_error_direct = get_attr(line_str, 'AVE_ERROR', None)
+                                                if avg_error_direct is None:
+                                                    avg_error_direct = get_attr(line_str, 'AVG_ERROR', None)
                                                 
                                                 # Extract calibration data for all points
                                                 # Format: CALX1, CALY1, LX1, LY1, LV1, RX1, RY1, RV1, CALX2, CALY2, ...
@@ -691,7 +699,8 @@ class GazeClient:
                                                             total_error += error
                                                             error_count += 1
                                                 
-                                                avg_error = total_error / error_count if error_count > 0 else 0.0
+                                                avg_error_calc = (total_error / error_count) if error_count > 0 else None
+                                                avg_error = avg_error_direct if avg_error_direct is not None else avg_error_calc
                                                 success = 1 if valid_points >= 4 else 0
                                                 
                                                 # Store calibration result
@@ -1147,6 +1156,7 @@ class Rp2040Controller:
         self._last_seen_wall_time = None
         self._last_boot_id = None
         self._last_uptime_s = None
+        self._pending_boot_event = None  # (kind, boot_id, uptime_s) seen before callback registration
         # Serial/heartbeat log for UI (thread-safe, last N lines)
         self._serial_log = []
         self._serial_log_max = 500
@@ -1163,6 +1173,18 @@ class Rp2040Controller:
     def set_boot_callback(self, cb):
         """Set callback(kind, boot_id, uptime_s) for BOOT/HB parsing."""
         self._boot_callback = cb
+        # BOOT/HB may be received before callback registration; replay the latest event once.
+        if self._boot_callback:
+            event = self._pending_boot_event
+            if event is None and self._last_boot_id is not None:
+                event = ("BOOT", int(self._last_boot_id), int(self._last_uptime_s or 0))
+            if event is not None:
+                try:
+                    kind, boot_id, uptime_s = event
+                    self._boot_callback(kind, int(boot_id), int(uptime_s))
+                    self._pending_boot_event = None
+                except Exception:
+                    pass
 
     def is_alive(self, timeout_s: float = 3.0) -> bool:
         """True if we saw BOOT/HB recently."""
@@ -1214,13 +1236,26 @@ class Rp2040Controller:
                 kind = parts[0].strip().upper()  # BOOT or HB
                 boot_id = int(parts[1].strip()) if len(parts) > 1 else None
                 uptime_s = int(parts[2].strip()) if len(parts) > 2 else None
+                prev_boot_id = self._last_boot_id
+                prev_uptime_s = self._last_uptime_s
                 self._last_seen_wall_time = time.time()
                 self._last_uptime_s = uptime_s
-                # Treat HB with a changed boot_id as a reboot (robustness).
-                if boot_id is not None and (self._last_boot_id is None or boot_id != self._last_boot_id):
-                    self._last_boot_id = boot_id
+                # Detect reboot robustly:
+                # 1) boot_id changed (normal case), or
+                # 2) uptime moved backwards (manual reset case if boot_id repeats).
+                boot_id_changed = (
+                    boot_id is not None and (prev_boot_id is None or boot_id != prev_boot_id)
+                )
+                uptime_rolled_back = (
+                    uptime_s is not None and prev_uptime_s is not None and (uptime_s + 1) < prev_uptime_s
+                )
+                if boot_id_changed or uptime_rolled_back:
+                    event_boot_id = boot_id if boot_id is not None else (prev_boot_id if prev_boot_id is not None else -1)
+                    self._last_boot_id = event_boot_id
+                    self._pending_boot_event = ("BOOT", event_boot_id, uptime_s if uptime_s is not None else 0)
                     if self._boot_callback:
-                        self._boot_callback("BOOT", boot_id, uptime_s if uptime_s is not None else 0)
+                        self._boot_callback("BOOT", event_boot_id, uptime_s if uptime_s is not None else 0)
+                        self._pending_boot_event = None
             except Exception:
                 pass
             return
@@ -1808,25 +1843,21 @@ def draw_eye_view(screen, eye_data, eye_data_time, font, small, big):
     # Extract values
     leyez = eye_data.get("leyez")
     reyez = eye_data.get("reyez")
-    # NOTE: Gazepoint validity fields are reported as LPV/RPV, but the physical
-    # "left/right" can appear swapped depending on tracker coordinate conventions.
-    # The UI uses user-facing left/right, so we map as:
-    #   left_open  <- rpv
-    #   right_open <- lpv
+    # LPV/RPV are mapped directly: LPV -> left eye, RPV -> right eye.
     lpv_raw = bool(eye_data.get("lpv", False))
     rpv_raw = bool(eye_data.get("rpv", False))
-    # Prefer diameter presence to decide "open" when available, otherwise validity.
     lpupild_raw = eye_data.get("lpupild")  # meters
     rpupild_raw = eye_data.get("rpupild")  # meters
 
-    left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
-    right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+    # Eye open state should follow validity flags directly.
+    left_open = bool(lpv_raw)
+    right_open = bool(rpv_raw)
 
     # For display values, keep physical mapping consistent with open/closed mapping.
     lpv = left_open
     rpv = right_open
-    lpupild = rpupild_raw
-    rpupild = lpupild_raw
+    lpupild = lpupild_raw
+    rpupild = rpupild_raw
     
     # Eye positions (centered horizontally, spaced vertically)
     eye_radius = 40
@@ -1970,6 +2001,7 @@ def main():
     
     # Start NeoPixel controller for calibration LEDs (if enabled)
     led_controller = None
+    rp2040_retry_interval_s = 1.0
     if GPIO_LED_CALIBRATION_ENABLE:
         try:
             led_controller = Rp2040Controller(
@@ -1978,8 +2010,6 @@ def main():
                 num_pixels=NEOPIXEL_COUNT,
                 brightness=NEOPIXEL_BRIGHTNESS
             )
-            # start() will raise error if library unavailable or initialization fails
-            led_controller.start()
             # Forward RP2040 button edges into the main loop.
             try:
                 led_controller.set_button_callback(lambda kind, btn: btn_event_q.put((kind, btn, "RP2040")))
@@ -1990,6 +2020,14 @@ def main():
                 led_controller.set_boot_callback(lambda kind, boot_id, uptime_s: rp2040_evt_q.put((kind, boot_id, uptime_s)))
             except Exception:
                 pass
+            # Keep retrying until RP2040 connection succeeds (requested behavior).
+            while True:
+                try:
+                    led_controller.start()  # raises on failure
+                    break
+                except Exception as e:
+                    print(f"Warning: RP2040 not connected yet ({e}). Retrying in {rp2040_retry_interval_s:.1f}s...", file=sys.stderr)
+                    time.sleep(rp2040_retry_interval_s)
             print("NeoPixel controller initialized successfully")
         except Exception as e:
             print(f"Warning: Failed to initialize NeoPixel controller: {e}", file=sys.stderr)
@@ -2013,6 +2051,8 @@ def main():
     running = True
     clock = pygame.time.Clock()
     position_next_eval = 0.0  # head positioning UI refresh cadence (UI_REFRESH_MS)
+    rp2040_next_reconnect_try = 0.0
+    rp2040_reconnect_in_progress = False
 
     # Ensure OLED starts on BOOT screen (if RP2040 is connected)
     if led_controller is not None:
@@ -2859,8 +2899,8 @@ def main():
                 rpv_raw = bool(last_eye_data.get("rpv"))
                 lpupild_raw = last_eye_data.get("lpupild")
                 rpupild_raw = last_eye_data.get("rpupild")
-                left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
-                right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+                left_open = bool(lpv_raw)
+                right_open = bool(rpv_raw)
             else:
                 left_open = False
                 right_open = False
@@ -3123,6 +3163,30 @@ def main():
             label_y = icon_y + icon_size + 4
             screen.blit(label, (label_x, label_y))
 
+    def _spawn_rp2040_reconnect():
+        """Reconnect RP2040 in background so UI loop never blocks on serial probing."""
+        nonlocal rp2040_reconnect_in_progress, rp2040_next_reconnect_try
+        if led_controller is None or rp2040_reconnect_in_progress:
+            return
+        rp2040_reconnect_in_progress = True
+
+        def _worker():
+            nonlocal rp2040_reconnect_in_progress, rp2040_next_reconnect_try
+            try:
+                led_controller.start()
+                rp2040_next_reconnect_try = time.time() + rp2040_retry_interval_s
+                try:
+                    set_info_msg("RP2040 reconnected", dur=1.5)
+                except Exception:
+                    pass
+            except Exception as e:
+                print(f"Warning: RP2040 reconnect failed ({e}). Retrying...", file=sys.stderr)
+                rp2040_next_reconnect_try = time.time() + rp2040_retry_interval_s
+            finally:
+                rp2040_reconnect_in_progress = False
+
+        threading.Thread(target=_worker, daemon=True).start()
+
     while running:
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
@@ -3183,6 +3247,13 @@ def main():
                             # Re-enable autoscroll when user returns to newest line.
                             if serial_log_scroll_offset == 0:
                                 serial_log_autoscroll = True
+
+        # Keep trying to reconnect RP2040 at runtime if link drops.
+        if GPIO_LED_CALIBRATION_ENABLE and led_controller is not None:
+            serial_ok = bool(getattr(led_controller, "_initialized", False) and getattr(led_controller, "_serial", None) is not None)
+            now_rt = time.time()
+            if not serial_ok and now_rt >= rp2040_next_reconnect_try:
+                _spawn_rp2040_reconnect()
 
         # Apply all queued button events (keyboard + RP2040)
         try:
@@ -3344,19 +3415,21 @@ def main():
                         avg_error = calib_result.get('average_error')
                         num_points = calib_result.get('num_points')
                         success = calib_result.get('success')
+                        if avg_error is None:
+                            summary = gp.get_calibration_result_summary()
+                            if isinstance(summary, dict):
+                                avg_error = summary.get('average_error')
                         
                         # Handle None values to prevent TypeError
                         if num_points is None:
                             num_points = 0
                         if success is None:
                             success = 0
-                        if avg_error is None:
-                            avg_error = 0.0
                         
                         # Debug: print calibration result for troubleshooting
-                        print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error:.4f}")
+                        print(f"Calibration result: success={success}, num_points={num_points}, avg_error={avg_error if avg_error is not None else 'N/A'}")
                         
-                        if success and num_points >= 4:
+                        if success and num_points >= 4 and avg_error is not None:
                             if avg_error < CALIB_OK_THRESHOLD:
                                 calib_status = "green"
                                 calib_quality = "ok"
@@ -3376,7 +3449,7 @@ def main():
                             calib_status = "red"
                             calib_quality = "failed"
                             calib_avg_error = None
-                            fail_reason = f"success={success}, points={num_points}"
+                            fail_reason = f"success={success}, points={num_points}, avg_error={avg_error if avg_error is not None else 'N/A'}"
                             set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
                     
                     # Hide calibration window
@@ -3612,19 +3685,21 @@ def main():
                         avg_error = calib_result.get('average_error')
                         num_points = calib_result.get('num_points')
                         success = calib_result.get('success')
+                        if avg_error is None:
+                            summary = gp.get_calibration_result_summary()
+                            if isinstance(summary, dict):
+                                avg_error = summary.get('average_error')
                         
                         # Handle None values to prevent TypeError
                         if num_points is None:
                             num_points = 0
                         if success is None:
                             success = 0
-                        if avg_error is None:
-                            avg_error = 0.0
                         
                         # Debug: print calibration result for troubleshooting
-                        print(f"LED calibration result: success={success}, num_points={num_points}, avg_error={avg_error:.4f}")
+                        print(f"LED calibration result: success={success}, num_points={num_points}, avg_error={avg_error if avg_error is not None else 'N/A'}")
                         
-                        if success and num_points >= 4:
+                        if success and num_points >= 4 and avg_error is not None:
                             if avg_error < CALIB_OK_THRESHOLD:
                                 calib_status = "green"
                                 calib_quality = "ok"
@@ -3644,7 +3719,7 @@ def main():
                             calib_status = "red"
                             calib_quality = "failed"
                             calib_avg_error = None
-                            fail_reason = f"success={success}, points={num_points}"
+                            fail_reason = f"success={success}, points={num_points}, avg_error={avg_error if avg_error is not None else 'N/A'}"
                             set_info_msg(f"Calibration failed ({fail_reason}), try again", dur=3.0)
                     
                     # Hide calibration window (should already be hidden, but ensure it)
@@ -3959,8 +4034,8 @@ def main():
         rpupild_raw_u = sample.get("rpupild")
         lcm = get_distance_cm(leyez_raw) if leyez_raw is not None else None
         rcm = get_distance_cm(reyez_raw) if reyez_raw is not None else None
-        left_open_u = None if (rpv_raw_u is None and rpupild_raw_u is None) else (bool(rpv_raw_u) if rpupild_raw_u is None else (rpupild_raw_u is not None))
-        right_open_u = None if (lpv_raw_u is None and lpupild_raw_u is None) else (bool(lpv_raw_u) if lpupild_raw_u is None else (lpupild_raw_u is not None))
+        left_open_u = None if lpv_raw_u is None else bool(lpv_raw_u)
+        right_open_u = None if rpv_raw_u is None else bool(rpv_raw_u)
         tracker_lines.extend(
             [
                 f"Gaze gx/gy: {_fmt_unknown(gx_raw)} / {_fmt_unknown(gy_raw)}",
@@ -3984,8 +4059,8 @@ def main():
             rpv_raw = bool(last_eye_data.get("rpv"))
             lpupild_raw = last_eye_data.get("lpupild")
             rpupild_raw = last_eye_data.get("rpupild")
-            left_open = bool(rpv_raw) if rpupild_raw is None else (rpupild_raw is not None)
-            right_open = bool(lpv_raw) if lpupild_raw is None else (lpupild_raw is not None)
+            left_open = bool(lpv_raw)
+            right_open = bool(rpv_raw)
             tracker_lines.append(f"eyes open L/R: {bool(left_open)}/{bool(right_open)}  (raw lpv/rpv={lpv_raw}/{rpv_raw})")
             tracker_lines.append(f"pupil diam (m) raw L/R: {lpupild_raw} / {rpupild_raw}")
         if dist_cm is not None:
