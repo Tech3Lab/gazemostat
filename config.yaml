@@ -171,7 +171,7 @@ neopixel_serial_port: ""
 #   - Must match microcontroller's baud rate setting
 #   - Only used when gpio_led_calibration_enable is true
 #   Default: 115200
-neopixel_serial_baud: 115200
+neopixel_serial_baud: 230400
 
 # Serial Protocol (RP2040/microcontroller must implement):
 #   PC→RP2040 commands (newline-terminated):
@@ -335,8 +335,8 @@ ui_refresh_ms: 100
 rp2040_boot_reinit_app_state: true
 #
 # rp2040_heartbeat_timeout_s:
-# Heartbeat health timeout in seconds. With 1 Hz BOOT/HB messages, recommended >= 3.0.
-rp2040_heartbeat_timeout_s: 3.0
+# Heartbeat health timeout in seconds. With BOOT/HB every 3s, recommended >= 7.0.
+rp2040_heartbeat_timeout_s: 7.0
 
 # ----------------------------------------------------------------------------
 # Gazepoint Eye Tracker Settings

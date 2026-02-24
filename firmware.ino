@@ -26,7 +26,7 @@
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
 #define NEOPIXEL_COUNT  4       // Number of NeoPixels in chain
-#define SERIAL_BAUD     115200  // Serial communication baud rate
+#define SERIAL_BAUD     230400  // Serial communication baud rate
 
 // OLED over I2C (STEMMA QT / Qwiic)
 // User wiring:
@@ -102,12 +102,12 @@ bool serial_connected = false;
 const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
 const unsigned long HELLO_INTERVAL_MS = 1000;  // Lower chatter during boot window
 
-// RP2040 boot/reset detection + heartbeat (1 Hz).
+// RP2040 boot/reset detection + heartbeat (every 3 seconds).
 // BOOT:<boot_id>:<uptime_s> until host ACKs, then HB:<boot_id>:<uptime_s>.
 static uint32_t boot_id = 0;
 static bool boot_acked = false;
 static unsigned long last_hb_ms = 0;
-static const unsigned long HB_PERIOD_MS = 1000;
+static const unsigned long HB_PERIOD_MS = 3000;
 
 static uint32_t genBootId() {
   // Simple "random-ish" ID that should change across resets.
@@ -606,7 +606,7 @@ void loop() {
   // Poll buttons and update UI display
   pollButtonsAndUpdateDisplay();
 
-  // 1 Hz BOOT announce until ACK, then HB.
+  // BOOT announce until ACK, then HB, every 3 seconds.
   unsigned long now_ms = millis();
   if (now_ms - last_hb_ms >= HB_PERIOD_MS) {
     last_hb_ms = now_ms;

@@ -77,7 +77,7 @@ LED_BLINK_DUTY = 0.5           # Duty cycle (0..1): fraction of period LEDs are 
 
 # RP2040 boot/reset handling
 RP2040_BOOT_REINIT_APP_STATE = True
-RP2040_HEARTBEAT_TIMEOUT_S = 3.0
+RP2040_HEARTBEAT_TIMEOUT_S = 7.0
 
 # Eye tracker raw fields expected from Gazepoint REC frames.
 EYE_TRACKER_RAW_FIELDS = [
@@ -182,7 +182,7 @@ def load_config():
                     try:
                         RP2040_HEARTBEAT_TIMEOUT_S = float(RP2040_HEARTBEAT_TIMEOUT_S)
                     except Exception:
-                        RP2040_HEARTBEAT_TIMEOUT_S = 3.0
+                        RP2040_HEARTBEAT_TIMEOUT_S = 7.0
                     # Oscillation/blinking animation has been removed for reliability.
                     # Validate LED_ORDER: must be exactly 4 integers (corners only).
                     # Center is NOT configured here; it is detected from Gazepoint CALX/CALY and lights all LEDs.
@@ -1201,7 +1201,7 @@ class Rp2040Controller:
         up = line.strip()
         # Log all RX lines for heartbeat/serial panel
         self._append_serial_log(up)
-        # BOOT/HB (1 Hz):
+        # BOOT/HB (every 3 seconds):
         #   BOOT:<boot_id>:<uptime_s>
         #   HB:<boot_id>:<uptime_s>
         if up.startswith("BOOT:") or up.startswith("HB:"):
