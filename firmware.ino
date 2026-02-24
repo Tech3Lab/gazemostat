@@ -8,6 +8,7 @@
 //   - NeoPixels:
 //       INIT:<count>:<brightness>
 //       PIXEL:<idx>:<r>:<g>:<b>
+//       ONE:<idx>:<r>:<g>:<b>   (atomic: clears others, sets one, single show)
 //       ALL:ON:<r>:<g>:<b>
 //       ALL:OFF
 //       BRIGHTNESS:<value>
@@ -63,7 +64,7 @@ Adafruit_SSD1327 display1327(OLED1327_WIDTH, OLED1327_HEIGHT, &Wire, -1);
 Adafruit_SSD1306 display1306(OLED1306_WIDTH, OLED1306_HEIGHT, &Wire, -1);
 
 // Global brightness (0-255)
-uint8_t global_brightness = 76;  // Default: 30% (76/255)
+uint8_t global_brightness = 64;  // Default: ~25% (64/255)
 
 // OLED state
 bool oled_available = false;
@@ -99,6 +100,7 @@ uint8_t ui_gaze_y_compat = 128;  // Host sends 0..255
 unsigned long boot_time;
 bool serial_connected = false;
 const unsigned long HELLO_PERIOD_MS = 5000;  // Send HELLO for 5 seconds after boot
+const unsigned long HELLO_INTERVAL_MS = 1000;  // Lower chatter during boot window
 
 // RP2040 boot/reset detection + heartbeat (1 Hz).
 // BOOT:<boot_id>:<uptime_s> until host ACKs, then HB:<boot_id>:<uptime_s>.
@@ -626,9 +628,9 @@ void loop() {
   // This helps with auto-detection even if serial wasn't ready during setup()
   unsigned long elapsed = millis() - boot_time;
   if (elapsed < HELLO_PERIOD_MS) {
-    // Send HELLO every 500ms during the first 5 seconds
+    // Send HELLO periodically during the first seconds after boot.
     static unsigned long last_hello = 0;
-    if (millis() - last_hello >= 500) {
+    if (millis() - last_hello >= HELLO_INTERVAL_MS) {
       Serial.println("HELLO NEOPIXEL");
       Serial.println("HELLO OLED");
       serial_connected = true;
@@ -744,6 +746,26 @@ void processCommand(String cmd) {
       Serial.println("ERROR:Invalid parameters");
     }
     
+  } else if (command == "ONE") {
+    // ONE:<idx>:<r>:<g>:<b>
+    // Atomic single-LED update: clear all and light only one LED in one show().
+    int idx = getParam(params, 0).toInt();
+    int r = getParam(params, 1).toInt();
+    int g = getParam(params, 2).toInt();
+    int b = getParam(params, 3).toInt();
+
+    if (idx >= 0 && idx < NEOPIXEL_COUNT &&
+        r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
+      for (int i = 0; i < NEOPIXEL_COUNT; i++) {
+        strip.setPixelColor(i, 0);
+      }
+      strip.setPixelColor(idx, strip.Color(r, g, b));
+      strip.show();
+      Serial.println("ACK");
+    } else {
+      Serial.println("ERROR:Invalid parameters");
+    }
+
   } else if (command == "ALL") {
     // ALL:ON:<r>:<g>:<b> or ALL:OFF
     if (params == "OFF") {

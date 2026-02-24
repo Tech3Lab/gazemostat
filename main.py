@@ -28,7 +28,7 @@ GPIO_LED_CALIBRATION_ENABLE = True  # Enable hardware NeoPixel LEDs for calibrat
 NEOPIXEL_SERIAL_PORT = ""  # Serial port (empty = auto-detect)
 NEOPIXEL_SERIAL_BAUD = 115200  # Serial baud rate
 NEOPIXEL_COUNT = 4  # Number of NeoPixels in chain
-NEOPIXEL_BRIGHTNESS = 0.3  # Brightness level 0.0-1.0 (sent to microcontroller)
+NEOPIXEL_BRIGHTNESS = 0.25  # Brightness level 0.0-1.0 (sent to microcontroller)
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Keep key history for debug panels (keyboard HUD is hidden)
@@ -1628,11 +1628,8 @@ class Rp2040Controller:
         if self._last_mode == "single" and self._last_led == led_index and self._last_rgb == (r, g, b):
             return
         
-        # Turn off all pixels first, then set the active one
-        # Only do ALL:OFF when switching into single-pixel mode or changing the active pixel
-        if self._last_mode != "single" or self._last_led != led_index:
-            self._send_command("ALL:OFF", expect_ack=True)
-        self._send_command(f"PIXEL:{led_index}:{r}:{g}:{b}", expect_ack=True)
+        # Atomic single-LED update to avoid brief wrong-LED flashes between ALL:OFF and PIXEL.
+        self._send_command(f"ONE:{led_index}:{r}:{g}:{b}", expect_ack=True)
         
         self._current_led = led_index
         self._last_mode = "single"

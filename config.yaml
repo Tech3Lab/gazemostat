@@ -210,10 +210,10 @@ neopixel_count: 4
 # neopixel_brightness: Brightness level for NeoPixels
 #   - Brightness value from 0.0 (off) to 1.0 (full brightness)
 #   - Lower values reduce power consumption
-#   - Recommended: 0.3 (30%) for calibration visibility without excessive power draw
+#   - Recommended: 0.25 (25%) for calibration visibility without excessive power draw
 #   - Only used when gpio_led_calibration_enable is true
-#   Default: 0.3
-neopixel_brightness: 0.3
+#   Default: 0.25
+neopixel_brightness: 0.25
 
 # neopixel_color_order: Color order for NeoPixel protocol
 #   - Color channel order: "RGB", "GRB", "RGBW", etc.
