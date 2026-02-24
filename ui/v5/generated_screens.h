@@ -79,7 +79,7 @@ static UiGazePoint ui_gaze_point = {23, 11};
 // Helper for dynamic text: interpret literal \n / \r sequences as newlines.
 // This is useful when values come from JSON/serial protocols that escape newlines.
 static inline String ui_normalize_dynamic_text(const String &s) {
-  if (s.indexOf('\\') < 0) return s;
+  if (s.length() == 0) return s;
   String out;
   out.reserve(s.length());
   for (size_t i = 0; i < s.length(); i++) {
@@ -87,7 +87,13 @@ static inline String ui_normalize_dynamic_text(const String &s) {
     if (ch == '\\' && (i + 1) < s.length()) {
       const char n = s[i + 1];
       if (n == 'n') { out += '\n'; i++; continue; }
-      if (n == 'r') { out += '\r'; i++; continue; }
+      if (n == 'r') { out += '\n'; i++; continue; }
+    }
+    // Normalize CRLF / CR to LF so line breaks are preserved consistently.
+    if (ch == '\r') {
+      if ((i + 1) < s.length() && s[i + 1] == '\n') i++;
+      out += '\n';
+      continue;
     }
     out += ch;
   }
@@ -256,21 +262,22 @@ inline void draw_loading_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_loading_data);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_loading_data.length(); i++) {
-      const char ch = ui_loading_data[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 114;
     size_t i = 0;
-    while (i <= ui_loading_data.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_loading_data.length()) {
-        const char ch = ui_loading_data[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -279,15 +286,15 @@ inline void draw_loading_screen(Adafruit_SSD1327 &display) {
       const int x0 = 34;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_loading_data.length()) {
-        const char ch = ui_loading_data[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_loading_data.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_loading_data[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -346,21 +353,22 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_loading_data);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_loading_data.length(); i++) {
-      const char ch = ui_loading_data[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 96;
     size_t i = 0;
-    while (i <= ui_loading_data.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_loading_data.length()) {
-        const char ch = ui_loading_data[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -369,15 +377,15 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
       const int x0 = 40;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_loading_data.length()) {
-        const char ch = ui_loading_data[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_loading_data.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_loading_data[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -742,21 +750,22 @@ inline void draw_in_position_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_start_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_calib_start_btn.length(); i++) {
-      const char ch = ui_calib_start_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 119;
     size_t i = 0;
-    while (i <= ui_calib_start_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_calib_start_btn.length()) {
-        const char ch = ui_calib_start_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -765,15 +774,15 @@ inline void draw_in_position_screen(Adafruit_SSD1327 &display) {
       const int x0 = 55;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_calib_start_btn.length()) {
-        const char ch = ui_calib_start_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_calib_start_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_calib_start_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -787,21 +796,22 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_start_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_calib_start_btn.length(); i++) {
-      const char ch = ui_calib_start_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 119;
     size_t i = 0;
-    while (i <= ui_calib_start_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_calib_start_btn.length()) {
-        const char ch = ui_calib_start_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -810,50 +820,55 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       const int x0 = 18;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_calib_start_btn.length()) {
-        const char ch = ui_calib_start_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_calib_start_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_calib_start_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
   }
+  display.drawCircle(7, 11, 5, SSD1327_WHITE);
   if (ui_led_up_left) {
-    display.drawCircle(7, 11, 5, SSD1327_WHITE);
+    display.fillCircle(7, 11, 4, SSD1327_WHITE);
   }
+  display.drawCircle(119, 11, 5, SSD1327_WHITE);
   if (ui_led_up_right) {
-    display.drawCircle(119, 11, 5, SSD1327_WHITE);
+    display.fillCircle(119, 11, 4, SSD1327_WHITE);
   }
+  display.drawCircle(120, 77, 5, SSD1327_WHITE);
   if (ui_led_bottom_right) {
-    display.drawCircle(120, 77, 5, SSD1327_WHITE);
+    display.fillCircle(120, 77, 4, SSD1327_WHITE);
   }
+  display.drawCircle(8, 77, 5, SSD1327_WHITE);
   if (ui_led_bottom_left) {
-    display.drawCircle(8, 77, 5, SSD1327_WHITE);
+    display.fillCircle(8, 77, 4, SSD1327_WHITE);
   }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_next_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_calib_next_btn.length(); i++) {
-      const char ch = ui_calib_next_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 119;
     size_t i = 0;
-    while (i <= ui_calib_next_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_calib_next_btn.length()) {
-        const char ch = ui_calib_next_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -862,15 +877,15 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       const int x0 = 96;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_calib_next_btn.length()) {
-        const char ch = ui_calib_next_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_calib_next_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_calib_next_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -879,21 +894,22 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_redo_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_calib_redo_btn.length(); i++) {
-      const char ch = ui_calib_redo_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 119;
     size_t i = 0;
-    while (i <= ui_calib_redo_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_calib_redo_btn.length()) {
-        const char ch = ui_calib_redo_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -902,15 +918,15 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       const int x0 = 2;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_calib_redo_btn.length()) {
-        const char ch = ui_calib_redo_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_calib_redo_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_calib_redo_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -919,22 +935,23 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_result);
     const int line_h = 8 * 2;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_calib_result.length(); i++) {
-      const char ch = ui_calib_result[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (21 - (lines_n * line_h)) / 2);
     int cy = 30 + oy;
     size_t i = 0;
-    while (i <= ui_calib_result.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_calib_result.length()) {
-        const char ch = ui_calib_result[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -943,15 +960,15 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       const int x0 = 25 + max(0, (77 - (cols * 6 * 2)) / 2);
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_calib_result.length()) {
-        const char ch = ui_calib_result[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_calib_result.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_calib_result[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -991,21 +1008,22 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_recording_timer);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_recording_timer.length(); i++) {
-      const char ch = ui_recording_timer[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 47;
     size_t i = 0;
-    while (i <= ui_recording_timer.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_recording_timer.length()) {
-        const char ch = ui_recording_timer[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1014,15 +1032,15 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
       const int x0 = 89;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_recording_timer.length()) {
-        const char ch = ui_recording_timer[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_recording_timer.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_recording_timer[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1041,21 +1059,22 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_event_time);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_event_time.length(); i++) {
-      const char ch = ui_event_time[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 59;
     size_t i = 0;
-    while (i <= ui_event_time.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_event_time.length()) {
-        const char ch = ui_event_time[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1064,15 +1083,15 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
       const int x0 = 89;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_event_time.length()) {
-        const char ch = ui_event_time[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_event_time.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_event_time[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1081,21 +1100,22 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_event_name);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_event_name.length(); i++) {
-      const char ch = ui_event_name[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 89;
     size_t i = 0;
-    while (i <= ui_event_name.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_event_name.length()) {
-        const char ch = ui_event_name[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1104,15 +1124,15 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
       const int x0 = 34;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_event_name.length()) {
-        const char ch = ui_event_name[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_event_name.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_event_name[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1154,22 +1174,23 @@ inline void draw_stop_record_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_close_event_warning);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_close_event_warning.length(); i++) {
-      const char ch = ui_close_event_warning[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (30 - (lines_n * line_h)) / 2);
     int cy = 68 + oy;
     size_t i = 0;
-    while (i <= ui_close_event_warning.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_close_event_warning.length()) {
-        const char ch = ui_close_event_warning[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1178,15 +1199,15 @@ inline void draw_stop_record_screen(Adafruit_SSD1327 &display) {
       const int x0 = 0 + max(0, (128 - (cols * 6 * 1)) / 2);
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_close_event_warning.length()) {
-        const char ch = ui_close_event_warning[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_close_event_warning.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_close_event_warning[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1207,22 +1228,23 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_loading_data);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_loading_data.length(); i++) {
-      const char ch = ui_loading_data[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (9 - (lines_n * line_h)) / 2);
     int cy = 103 + oy;
     size_t i = 0;
-    while (i <= ui_loading_data.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_loading_data.length()) {
-        const char ch = ui_loading_data[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1231,15 +1253,15 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
       const int x0 = 34 + max(0, (60 - (cols * 6 * 1)) / 2);
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_loading_data.length()) {
-        const char ch = ui_loading_data[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_loading_data.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_loading_data[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1248,21 +1270,22 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_inference_timer);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_inference_timer.length(); i++) {
-      const char ch = ui_inference_timer[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 70;
     size_t i = 0;
-    while (i <= ui_inference_timer.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_inference_timer.length()) {
-        const char ch = ui_inference_timer[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1271,15 +1294,15 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
       const int x0 = 89;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_inference_timer.length()) {
-        const char ch = ui_inference_timer[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_inference_timer.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_inference_timer[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1300,22 +1323,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_results_title);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_results_title.length(); i++) {
-      const char ch = ui_results_title[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (9 - (lines_n * line_h)) / 2);
     int cy = 3 + oy;
     size_t i = 0;
-    while (i <= ui_results_title.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_results_title.length()) {
-        const char ch = ui_results_title[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1324,15 +1348,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 3 + max(0, (85 - (cols * 6 * 1)) / 2);
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_results_title.length()) {
-        const char ch = ui_results_title[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_results_title.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_results_title[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1341,21 +1365,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_results_next_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_results_next_btn.length(); i++) {
-      const char ch = ui_results_next_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 118;
     size_t i = 0;
-    while (i <= ui_results_next_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_results_next_btn.length()) {
-        const char ch = ui_results_next_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1364,15 +1389,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 97;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_results_next_btn.length()) {
-        const char ch = ui_results_next_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_results_next_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_results_next_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1381,21 +1406,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_result_1);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_result_1.length(); i++) {
-      const char ch = ui_result_1[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 26;
     size_t i = 0;
-    while (i <= ui_result_1.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_result_1.length()) {
-        const char ch = ui_result_1[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1404,15 +1430,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 3;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_result_1.length()) {
-        const char ch = ui_result_1[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_result_1.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_result_1[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1421,21 +1447,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_result_2);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_result_2.length(); i++) {
-      const char ch = ui_result_2[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 48;
     size_t i = 0;
-    while (i <= ui_result_2.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_result_2.length()) {
-        const char ch = ui_result_2[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1444,15 +1471,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 3;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_result_2.length()) {
-        const char ch = ui_result_2[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_result_2.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_result_2[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1461,21 +1488,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_result_3);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_result_3.length(); i++) {
-      const char ch = ui_result_3[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 71;
     size_t i = 0;
-    while (i <= ui_result_3.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_result_3.length()) {
-        const char ch = ui_result_3[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1484,15 +1512,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 3;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_result_3.length()) {
-        const char ch = ui_result_3[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_result_3.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_result_3[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1501,21 +1529,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_result_4);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_result_4.length(); i++) {
-      const char ch = ui_result_4[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 95;
     size_t i = 0;
-    while (i <= ui_result_4.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_result_4.length()) {
-        const char ch = ui_result_4[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1524,15 +1553,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 3;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_result_4.length()) {
-        const char ch = ui_result_4[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_result_4.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_result_4[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1541,21 +1570,22 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_results_prev_btn);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_results_prev_btn.length(); i++) {
-      const char ch = ui_results_prev_btn[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     int cy = 117;
     size_t i = 0;
-    while (i <= ui_results_prev_btn.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_results_prev_btn.length()) {
-        const char ch = ui_results_prev_btn[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1564,15 +1594,15 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
       const int x0 = 2;
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_results_prev_btn.length()) {
-        const char ch = ui_results_prev_btn[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_results_prev_btn.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_results_prev_btn[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
@@ -1617,22 +1647,23 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_text_el_269);
     const int line_h = 8 * 1;
     int lines_n = 1;
-    for (size_t i = 0; i < ui_text_el_269.length(); i++) {
-      const char ch = ui_text_el_269[i];
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (8 - (lines_n * line_h)) / 2);
     int cy = 117 + oy;
     size_t i = 0;
-    while (i <= ui_text_el_269.length()) {
+    while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
       int cols = 0;
       size_t j = i;
-      while (j < ui_text_el_269.length()) {
-        const char ch = ui_text_el_269[j];
+      while (j < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
         cols++;
@@ -1641,15 +1672,15 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
       const int x0 = 69 + max(0, (51 - (cols * 6 * 1)) / 2);
       display.setCursor(x0, cy);
       // Write this line.
-      while (i < j && i < ui_text_el_269.length()) {
-        const char ch = ui_text_el_269[i];
+      while (i < j && i < ui_dyn_text.length()) {
+        const char ch = ui_dyn_text[i];
         if (ch != '\r') display.write(ch);
         i++;
       }
       // End of string.
-      if (i >= ui_text_el_269.length()) break;
+      if (i >= ui_dyn_text.length()) break;
       // Newline.
-      if (ui_text_el_269[i] == '\n') { i++; cy += line_h; continue; }
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }

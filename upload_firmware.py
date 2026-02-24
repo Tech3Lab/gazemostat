@@ -131,6 +131,21 @@ def run_arduino_cli(cli_path, args, check=True):
         return False, "", ""
 
 
+def sync_ui_directory(script_dir: Path, temp_sketch_dir: Path):
+    """Force-sync the local ui/ tree into the temporary sketch directory."""
+    ui_source = script_dir / "ui"
+    ui_dest = temp_sketch_dir / "ui"
+
+    if not ui_source.exists() or not ui_source.is_dir():
+        return
+
+    if ui_dest.exists():
+        shutil.rmtree(ui_dest)
+
+    shutil.copytree(ui_source, ui_dest)
+    print_info("Synced local ui/ directory to sketch directory")
+
+
 def setup_arduino_cli(cli_path):
     """Initialize Arduino CLI and install board support"""
     print_step("Setting up Arduino CLI")
@@ -297,31 +312,11 @@ def compile_firmware(cli_path, firmware_path):
         print_info(f"Creating temporary sketch directory: {temp_sketch_dir}")
         temp_sketch_dir.mkdir(exist_ok=True)
         # Copy the .ino file to the temp directory
-        import shutil
         shutil.copy2(firmware_path, temp_sketch_dir / firmware_path.name)
         print_info(f"Copied {firmware_path.name} to sketch directory")
     
-    # Always check and copy ui/ directory if it exists (for generated_screens.h)
-    # This ensures ui files are up to date even if only .ino changed
-    ui_source = script_dir / "ui"
-    ui_dest = temp_sketch_dir / "ui"
-    if ui_source.exists() and ui_source.is_dir():
-        import shutil
-        # Check if ui directory needs updating
-        ui_needs_copy = True
-        if ui_dest.exists():
-            # Check if any file in ui/ is newer
-            ui_source_files = list(ui_source.rglob("*"))
-            ui_dest_files = list(ui_dest.rglob("*"))
-            if ui_dest_files:
-                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
-                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
-                ui_needs_copy = source_mtime > dest_mtime
-            if ui_needs_copy:
-                shutil.rmtree(ui_dest)
-        if ui_needs_copy:
-            shutil.copytree(ui_source, ui_dest)
-            print_info(f"Copied ui/ directory to sketch directory")
+    # Force-sync UI assets so local generated_screens.h changes are always used.
+    sync_ui_directory(script_dir, temp_sketch_dir)
     
     print_info(f"Compiling {firmware_path.name} from sketch directory {temp_sketch_dir}...")
     
@@ -385,29 +380,11 @@ def upload_via_uf2(firmware_path):
     temp_sketch_dir.mkdir(exist_ok=True)
     temp_ino = temp_sketch_dir / firmware_path.name
     if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
-        import shutil
         shutil.copy2(firmware_path, temp_ino)
         print_info(f"Copied {firmware_path.name} to sketch directory for compilation")
     
-    # Always check and copy ui/ directory if it exists (for generated_screens.h)
-    ui_source = script_dir / "ui"
-    ui_dest = temp_sketch_dir / "ui"
-    if ui_source.exists() and ui_source.is_dir():
-        import shutil
-        ui_needs_copy = True
-        if ui_dest.exists():
-            # Check if any file in ui/ is newer
-            ui_source_files = list(ui_source.rglob("*"))
-            ui_dest_files = list(ui_dest.rglob("*"))
-            if ui_dest_files:
-                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
-                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
-                ui_needs_copy = source_mtime > dest_mtime
-            if ui_needs_copy:
-                shutil.rmtree(ui_dest)
-        if ui_needs_copy:
-            shutil.copytree(ui_source, ui_dest)
-            print_info(f"Copied ui/ directory to sketch directory")
+    # Force-sync UI assets so local generated_screens.h changes are always used.
+    sync_ui_directory(script_dir, temp_sketch_dir)
     
     print_info(f"Compiling {firmware_path.name} for UF2 generation...")
     
@@ -515,24 +492,8 @@ def upload_firmware(cli_path, firmware_path, port=None):
     if not temp_ino.exists() or temp_ino.stat().st_mtime < firmware_path.stat().st_mtime:
         shutil.copy2(firmware_path, temp_ino)
     
-    # Always check and copy ui/ directory if it exists (for generated_screens.h)
-    ui_source = script_dir / "ui"
-    ui_dest = temp_sketch_dir / "ui"
-    if ui_source.exists() and ui_source.is_dir():
-        ui_needs_copy = True
-        if ui_dest.exists():
-            # Check if any file in ui/ is newer
-            ui_source_files = list(ui_source.rglob("*"))
-            ui_dest_files = list(ui_dest.rglob("*"))
-            if ui_dest_files:
-                source_mtime = max(f.stat().st_mtime for f in ui_source_files if f.is_file())
-                dest_mtime = max(f.stat().st_mtime for f in ui_dest_files if f.is_file())
-                ui_needs_copy = source_mtime > dest_mtime
-            if ui_needs_copy:
-                shutil.rmtree(ui_dest)
-        if ui_needs_copy:
-            shutil.copytree(ui_source, ui_dest)
-            print_info(f"Copied ui/ directory to sketch directory")
+    # Force-sync UI assets so local generated_screens.h changes are always used.
+    sync_ui_directory(script_dir, temp_sketch_dir)
     
     # Pass the sketch directory to arduino-cli
     cmd = [

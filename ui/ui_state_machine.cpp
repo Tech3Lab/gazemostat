@@ -9,10 +9,16 @@ static UiScreen g_screen = UiScreen::BOOT;
 
 static UiScreen next_in_main_flow(UiScreen s) {
     switch (s) {
-        case UiScreen::BOOT: return UiScreen::POSITION;
-        case UiScreen::POSITION: return UiScreen::CALIBRATION;
-        case UiScreen::CALIBRATION: return UiScreen::RECORDING;
-        case UiScreen::RECORDING: return UiScreen::RESULTS;
+        case UiScreen::BOOT: return UiScreen::FIND_POSITION;
+        case UiScreen::FIND_POSITION: return UiScreen::MOVE_CLOSER;
+        case UiScreen::MOVE_CLOSER: return UiScreen::MOVE_FARTHER;
+        case UiScreen::MOVE_FARTHER: return UiScreen::IN_POSITION;
+        case UiScreen::IN_POSITION: return UiScreen::CALIBRATION;
+        case UiScreen::CALIBRATION: return UiScreen::RECORD_CONFIRMATION;
+        case UiScreen::RECORD_CONFIRMATION: return UiScreen::RECORDING;
+        case UiScreen::RECORDING: return UiScreen::STOP_RECORD;
+        case UiScreen::STOP_RECORD: return UiScreen::INFERENCE_LOADING;
+        case UiScreen::INFERENCE_LOADING: return UiScreen::RESULTS;
         default: return s;
     }
 }
@@ -27,10 +33,10 @@ void ui_sm_on_button(Button btn) {
             g_screen = next_in_main_flow(g_screen);
             break;
         case Button::BTN_A:
-            g_screen = UiScreen::MONITOR_POS;
+            g_screen = UiScreen::FIND_POSITION;
             break;
         case Button::BTN_B:
-            g_screen = UiScreen::MONITOR_GAZE;
+            g_screen = UiScreen::MONITORING;
             break;
         default:
             // TODO: add behavior for other buttons (UP/DOWN/LEFT/CENTER).
