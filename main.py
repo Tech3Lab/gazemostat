@@ -1599,7 +1599,7 @@ class Rp2040Controller:
 
     def oled_set_str(self, var_name: str, value: str):
         # Avoid sending raw newlines (protocol is line-based). Firmware unescapes \\n -> newline.
-        safe = (value or "").replace("\n", "\\n")
+        safe = (value or "").replace("\r\n", "\n").replace("\r", "\n").replace("\n", "\\n")
         self._send_command(f"OLED:UI:SET:STR:{var_name}:{safe}", expect_ack=False)
     
     def set_led(self, led_index, color=(255, 255, 255), animation_brightness=1.0):
@@ -2836,7 +2836,10 @@ def main():
         # STOP_RECORD warning
         if state == "STOP_RECORD":
             if event_open:
-                _oled_set_str("ui_close_event_warning", f"Event marker {next_event_index} will be closed automatically")
+                _oled_set_str(
+                    "ui_close_event_warning",
+                    f"Event marker {next_event_index} will\nbe closed\nautomatically",
+                )
             else:
                 _oled_set_str("ui_close_event_warning", "")
 

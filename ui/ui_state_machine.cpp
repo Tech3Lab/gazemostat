@@ -2,7 +2,7 @@
 // UI navigation/state machine only (no setup/loop, no hardware init).
 
 #include "ui_state_machine.h"
-#include "generated_screens.h"
+#include "v5/generated_screens.h"
 
 // The current screen (required by integration API).
 static UiScreen g_screen = UiScreen::BOOT;

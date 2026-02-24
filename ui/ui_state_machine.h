@@ -5,7 +5,7 @@
 
 #include <stdint.h>
 
-// Forward declaration (definition lives in generated_screens.h).
+// Forward declaration (definition lives in v5/generated_screens.h).
 enum class UiScreen : uint8_t;
 
 // IMPORTANT: must match the gazepoint firmware button names exactly.

@@ -970,7 +970,9 @@ void processCommand(String cmd) {
             value = getParam(params, 4);
           }
           // Unescape common sequences from host (so host can send multi-line strings safely).
+          value.replace("\\r\\n", "\n");
           value.replace("\\n", "\n");
+          value.replace("\\r", "\n");
           ui_set<String>(var, value);
           ui_dirty = true;
           return;
