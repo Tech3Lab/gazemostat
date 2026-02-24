@@ -1,6 +1,7 @@
 // RP2040 Co-Processor Firmware for LattePanda Iota
 // - NeoPixel controller (WS2812/SK6812)
-// - OLED controller/test for Adafruit 128x64 OLED Bonnet (SSD1306 over I2C)
+// - OLED controller/test for Adafruit SSD1327 (128x128 over I2C)
+//   with legacy SSD1306 (128x64) integrity test support.
 //
 // Serial protocol (line-based):
 //   - PING / HELLO -> replies with HELLO messages
@@ -17,8 +18,9 @@
 #include <Adafruit_NeoPixel.h>
 #include <Wire.h>
 #include <Adafruit_GFX.h>
+#include <Adafruit_SSD1327.h>
 #include <Adafruit_SSD1306.h>
-#include "ui/v4/generated_screens.h"
+#include "ui/v5/generated_screens.h"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -31,10 +33,12 @@
 //   SCL = GP5 (yellow)
 #define OLED_SDA_PIN 4
 #define OLED_SCL_PIN 5
-#define OLED_WIDTH   128
-#define OLED_HEIGHT  64
-#define OLED_ADDR_0  0x3C
-#define OLED_ADDR_1  0x3D
+#define OLED1327_WIDTH   128
+#define OLED1327_HEIGHT  128
+#define OLED1306_WIDTH   128
+#define OLED1306_HEIGHT  64
+#define OLED_ADDR_PRIMARY   0x3D
+#define OLED_ADDR_FALLBACK  0x3C
 
 // OLED Bonnet joystick + buttons (GPIO)
 //
@@ -54,16 +58,23 @@
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
-// Create OLED object (I2C, no reset pin)
-Adafruit_SSD1306 display(OLED_WIDTH, OLED_HEIGHT, &Wire, -1);
+// OLED objects (I2C, no reset pin)
+Adafruit_SSD1327 display1327(OLED1327_WIDTH, OLED1327_HEIGHT, &Wire, -1);
+Adafruit_SSD1306 display1306(OLED1306_WIDTH, OLED1306_HEIGHT, &Wire, -1);
 
 // Global brightness (0-255)
 uint8_t global_brightness = 76;  // Default: 30% (76/255)
 
 // OLED state
 bool oled_available = false;
-uint8_t oled_addr = OLED_ADDR_0;
+uint8_t oled_addr = OLED_ADDR_PRIMARY;
 bool oled_input_feedback_enabled = false;  // Disabled - using UI instead
+enum class OledModel : uint8_t {
+  NONE = 0,
+  SSD1327_128X128 = 1,
+  SSD1306_128X64 = 2,
+};
+OledModel oled_model = OledModel::NONE;
 
 // Button state (bitmask)
 // bit0..bit6 = UP,DOWN,LEFT,RIGHT,CENTER,A,B
@@ -78,6 +89,8 @@ UiScreen ui_current_screen = UiScreen::BOOT;
 bool ui_tracker_detected_state = false;
 bool ui_led_detected_state = false;
 bool ui_connection_state = false;
+uint8_t ui_gaze_x_compat = 128;  // Host sends 0..255
+uint8_t ui_gaze_y_compat = 128;  // Host sends 0..255
 
 // Track if we've sent initial HELLO messages and when to stop
 unsigned long boot_time;
@@ -108,26 +121,6 @@ static uint8_t readButtons() {
   return s;
 }
 
-static void drawKeyBox(int16_t x, int16_t y, int16_t w, int16_t h, const char *label, bool pressed) {
-  if (pressed) {
-    display.fillRect(x, y, w, h, SSD1306_WHITE);
-    display.drawRect(x, y, w, h, SSD1306_BLACK);
-    display.setTextColor(SSD1306_BLACK, SSD1306_WHITE);
-  } else {
-    display.drawRect(x, y, w, h, SSD1306_WHITE);
-    display.setTextColor(SSD1306_WHITE, SSD1306_BLACK);
-  }
-
-  // Center label
-  int16_t x1, y1;
-  uint16_t tw, th;
-  display.getTextBounds(label, 0, 0, &x1, &y1, &tw, &th);
-  int16_t tx = x + (w - (int16_t)tw) / 2;
-  int16_t ty = y + (h - (int16_t)th) / 2;
-  display.setCursor(tx, ty);
-  display.print(label);
-}
-
 static const char *buttonNameFromBit(uint8_t button_bit) {
   switch (button_bit) {
     case 0: return "BTN_UP";
@@ -150,10 +143,10 @@ static void update_ui_dynamic_elements() {
 }
 
 static void renderUi() {
-  if (!oled_available) return;
+  if (!oled_available || oled_model != OledModel::SSD1327_128X128) return;
   update_ui_dynamic_elements();
-  draw_screen(display, ui_current_screen);
-  display.display();
+  draw_screen(display1327, ui_current_screen);
+  display1327.display();
 }
 
 static void renderButtonFeedback(uint8_t buttons) {
@@ -234,6 +227,7 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
   if (varName == "ui_tracker_detected") { out = UiDynamicVar::UI_TRACKER_DETECTED; return true; }
   if (varName == "ui_led_detected") { out = UiDynamicVar::UI_LED_DETECTED; return true; }
   if (varName == "ui_connection") { out = UiDynamicVar::UI_CONNECTION; return true; }
+  if (varName == "ui_position_head") { out = UiDynamicVar::UI_POSITION_HEAD; return true; }
   if (varName == "ui_calib_start_btn") { out = UiDynamicVar::UI_CALIB_START_BTN; return true; }
   if (varName == "ui_calib_next_btn") { out = UiDynamicVar::UI_CALIB_NEXT_BTN; return true; }
   if (varName == "ui_calib_redo_btn") { out = UiDynamicVar::UI_CALIB_REDO_BTN; return true; }
@@ -257,10 +251,14 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
   if (varName == "ui_result_4") { out = UiDynamicVar::UI_RESULT_4; return true; }
   if (varName == "ui_left_eye") { out = UiDynamicVar::UI_LEFT_EYE; return true; }
   if (varName == "ui_right_eye") { out = UiDynamicVar::UI_RIGHT_EYE; return true; }
-  if (varName == "ui_gaze_x") { out = UiDynamicVar::UI_GAZE_X; return true; }
-  if (varName == "ui_gaze_y") { out = UiDynamicVar::UI_GAZE_Y; return true; }
+  if (varName == "ui_gaze_point") { out = UiDynamicVar::UI_GAZE_POINT; return true; }
   if (varName == "ui_position_status" || varName == "ui_text_el_269") { out = UiDynamicVar::UI_TEXT_EL_269; return true; }
   return false;
+}
+
+static int16_t mapU8ToRange(uint8_t value, int16_t max_inclusive) {
+  // Integer mapping: 0..255 -> 0..max_inclusive
+  return (int16_t)((uint32_t(value) * uint32_t(max_inclusive)) / 255U);
 }
 
 static bool i2cProbe(uint8_t addr) {
@@ -269,43 +267,236 @@ static bool i2cProbe(uint8_t addr) {
   return err == 0;
 }
 
-static bool oledInit() {
-  // Configure I2C pins explicitly for RP2040
+static void oledI2cInit() {
   Wire.setSDA(OLED_SDA_PIN);
   Wire.setSCL(OLED_SCL_PIN);
   Wire.begin();
+}
 
-  // Prefer 0x3C, but accept 0x3D if that's what is strapped on the board
-  if (i2cProbe(OLED_ADDR_0)) {
-    oled_addr = OLED_ADDR_0;
-  } else if (i2cProbe(OLED_ADDR_1)) {
-    oled_addr = OLED_ADDR_1;
-  } else {
-    oled_available = false;
+static const char *oledModelName(OledModel model) {
+  switch (model) {
+    case OledModel::SSD1327_128X128: return "SSD1327";
+    case OledModel::SSD1306_128X64: return "SSD1306";
+    default: return "NONE";
+  }
+}
+
+static bool findOledAddress(uint8_t &addr_out) {
+  const uint8_t candidates[] = {OLED_ADDR_PRIMARY, OLED_ADDR_FALLBACK};
+  for (uint8_t i = 0; i < (sizeof(candidates) / sizeof(candidates[0])); i++) {
+    if (i2cProbe(candidates[i])) {
+      addr_out = candidates[i];
+      return true;
+    }
+  }
+  return false;
+}
+
+static bool initSsd1327UiAt(uint8_t addr, bool showReadyScreen) {
+  if (!display1327.begin(addr)) {
     return false;
   }
 
-  // SSD1306 init (returns false if allocation or device init fails)
-  if (!display.begin(SSD1306_SWITCHCAPVCC, oled_addr)) {
-    oled_available = false;
-    return false;
+  if (showReadyScreen) {
+    display1327.clearDisplay();
+    display1327.setTextSize(1);
+    display1327.setTextColor(SSD1327_WHITE);
+    display1327.setCursor(0, 0);
+    display1327.println("OLED READY");
+    display1327.println("MODEL SSD1327");
+    display1327.print("ADDR 0x");
+    display1327.println(addr, HEX);
+    display1327.display();
   }
 
-  display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextColor(SSD1306_WHITE);
-  display.setCursor(0, 0);
-  display.println("OLED READY");
-  display.print("ADDR 0x");
-  display.println(oled_addr, HEX);
-  display.display();
-
+  oled_addr = addr;
+  oled_model = OledModel::SSD1327_128X128;
   oled_available = true;
   return true;
 }
 
-static bool oledIntegrityTest(String &failReason) {
-  // Ensure initialized
+static bool initSsd1306At(uint8_t addr, bool showReadyScreen) {
+  if (!display1306.begin(SSD1306_SWITCHCAPVCC, addr)) {
+    return false;
+  }
+
+  if (showReadyScreen) {
+    display1306.clearDisplay();
+    display1306.setTextSize(1);
+    display1306.setTextColor(SSD1306_WHITE);
+    display1306.setCursor(0, 0);
+    display1306.println("OLED READY");
+    display1306.println("MODEL SSD1306");
+    display1306.print("ADDR 0x");
+    display1306.println(addr, HEX);
+    display1306.display();
+  }
+
+  oled_addr = addr;
+  oled_model = OledModel::SSD1306_128X64;
+  oled_available = true;
+  return true;
+}
+
+static bool oledInit() {
+  oledI2cInit();
+
+  oled_available = false;
+  oled_model = OledModel::NONE;
+
+  // Try addresses in priority order: 0x3D first, then 0x3C.
+  const uint8_t candidates[] = {OLED_ADDR_PRIMARY, OLED_ADDR_FALLBACK};
+  for (uint8_t i = 0; i < (sizeof(candidates) / sizeof(candidates[0])); i++) {
+    const uint8_t addr = candidates[i];
+    if (!i2cProbe(addr)) continue;
+
+    // Primary runtime display/UI target.
+    if (initSsd1327UiAt(addr, true)) {
+      return true;
+    }
+    // Legacy fallback detection path.
+    if (initSsd1306At(addr, true)) {
+      return true;
+    }
+  }
+
+  oled_available = false;
+  oled_model = OledModel::NONE;
+  return false;
+}
+
+static bool oledIntegrityTestSsd1327(String &failReason, uint8_t addr) {
+  if (!display1327.begin(addr)) {
+    failReason = "SSD1327 init failed";
+    return false;
+  }
+
+  Serial.println("OLED:TEST:START:SSD1327:128x128");
+  Serial.print("OLED:ADDR:0x");
+  Serial.println(addr, HEX);
+
+  // Frame 1: Border + text.
+  display1327.clearDisplay();
+  display1327.drawRect(0, 0, OLED1327_WIDTH, OLED1327_HEIGHT, SSD1327_WHITE);
+  display1327.setTextSize(1);
+  display1327.setTextColor(SSD1327_WHITE);
+  display1327.setCursor(10, 16);
+  display1327.println("SSD1327 INTEGRITY");
+  display1327.setCursor(10, 30);
+  display1327.println("TEST RUNNING...");
+  display1327.setCursor(10, 44);
+  display1327.print("SDA GP");
+  display1327.print(OLED_SDA_PIN);
+  display1327.print(" SCL GP");
+  display1327.println(OLED_SCL_PIN);
+  display1327.display();
+  delay(700);
+
+  // Frame 2: 4-bit grayscale checkerboard.
+  display1327.clearDisplay();
+  for (int y = 0; y < OLED1327_HEIGHT; y += 8) {
+    for (int x = 0; x < OLED1327_WIDTH; x += 8) {
+      const bool even = (((x + y) / 8) % 2) == 0;
+      display1327.fillRect(x, y, 8, 8, even ? SSD1327_WHITE : 0x7);
+    }
+  }
+  display1327.display();
+  delay(600);
+
+  // Frame 3: Invert toggle.
+  display1327.invertDisplay(true);
+  delay(250);
+  display1327.invertDisplay(false);
+  delay(250);
+
+  // Frame 4: Clear and show OK.
+  display1327.clearDisplay();
+  display1327.setTextSize(2);
+  display1327.setTextColor(SSD1327_WHITE);
+  display1327.setCursor(18, 48);
+  display1327.println("OLED OK");
+  display1327.setTextSize(1);
+  display1327.setCursor(0, 116);
+  display1327.print("ADDR 0x");
+  display1327.print(addr, HEX);
+  display1327.display();
+
+  if (!i2cProbe(addr)) {
+    failReason = "Device stopped ACKing";
+    Serial.println("OLED:TEST:FAIL:I2C_NACK");
+    return false;
+  }
+
+  Serial.println("OLED:TEST:OK:SSD1327");
+  return true;
+}
+
+static bool oledIntegrityTestSsd1306(String &failReason, uint8_t addr) {
+  if (!display1306.begin(SSD1306_SWITCHCAPVCC, addr)) {
+    failReason = "SSD1306 init failed";
+    return false;
+  }
+
+  Serial.println("OLED:TEST:START:SSD1306:128x64");
+  Serial.print("OLED:ADDR:0x");
+  Serial.println(addr, HEX);
+
+  // Frame 1: Border + text.
+  display1306.clearDisplay();
+  display1306.drawRect(0, 0, OLED1306_WIDTH, OLED1306_HEIGHT, SSD1306_WHITE);
+  display1306.setCursor(8, 10);
+  display1306.setTextSize(1);
+  display1306.println("SSD1306 INTEGRITY");
+  display1306.setCursor(8, 24);
+  display1306.println("TEST RUNNING...");
+  display1306.setCursor(8, 38);
+  display1306.print("SDA GP");
+  display1306.print(OLED_SDA_PIN);
+  display1306.print(" SCL GP");
+  display1306.println(OLED_SCL_PIN);
+  display1306.display();
+  delay(700);
+
+  // Frame 2: Checkerboard.
+  display1306.clearDisplay();
+  for (int y = 0; y < OLED1306_HEIGHT; y += 8) {
+    for (int x = 0; x < OLED1306_WIDTH; x += 8) {
+      if ((((x + y) / 8) % 2) == 0) {
+        display1306.fillRect(x, y, 8, 8, SSD1306_WHITE);
+      }
+    }
+  }
+  display1306.display();
+  delay(600);
+
+  // Frame 3: Invert toggle.
+  display1306.invertDisplay(true);
+  delay(250);
+  display1306.invertDisplay(false);
+  delay(250);
+
+  // Frame 4: Clear and show OK.
+  display1306.clearDisplay();
+  display1306.setTextSize(2);
+  display1306.setCursor(18, 18);
+  display1306.println("OLED OK");
+  display1306.setTextSize(1);
+  display1306.setCursor(0, 52);
+  display1306.print("ADDR 0x");
+  display1306.print(addr, HEX);
+  display1306.display();
+
+  if (!i2cProbe(addr)) {
+    failReason = "Device stopped ACKing";
+    Serial.println("OLED:TEST:FAIL:I2C_NACK");
+    return false;
+  }
+
+  Serial.println("OLED:TEST:OK:SSD1306");
+  return true;
+}
+
+static bool oledIntegrityTestAuto(String &failReason) {
   if (!oled_available) {
     if (!oledInit()) {
       failReason = "I2C device not found / init failed";
@@ -313,68 +504,41 @@ static bool oledIntegrityTest(String &failReason) {
     }
   }
 
-  // Basic visual + bus integrity test.
-  // Note: SSD1306 is effectively write-only; we can't read pixels back.
-  // So "integrity" here means: device ACKs on I2C and display init succeeds,
-  // then we successfully push several full-frame updates without I2C errors.
-  Serial.println("OLED:TEST:START");
-  Serial.print("OLED:ADDR:0x");
-  Serial.println(oled_addr, HEX);
-
-  // Frame 1: Border + text
-  display.clearDisplay();
-  display.drawRect(0, 0, OLED_WIDTH, OLED_HEIGHT, SSD1306_WHITE);
-  display.setCursor(8, 10);
-  display.setTextSize(1);
-  display.println("OLED INTEGRITY");
-  display.setCursor(8, 24);
-  display.println("TEST RUNNING...");
-  display.setCursor(8, 38);
-  display.print("SDA GP");
-  display.print(OLED_SDA_PIN);
-  display.print(" SCL GP");
-  display.println(OLED_SCL_PIN);
-  display.display();
-  delay(700);
-
-  // Frame 2: Checkerboard-ish pattern
-  display.clearDisplay();
-  for (int y = 0; y < OLED_HEIGHT; y += 8) {
-    for (int x = 0; x < OLED_WIDTH; x += 8) {
-      if (((x + y) / 8) % 2 == 0) {
-        display.fillRect(x, y, 8, 8, SSD1306_WHITE);
-      }
-    }
+  if (oled_model == OledModel::SSD1327_128X128) {
+    return oledIntegrityTestSsd1327(failReason, oled_addr);
   }
-  display.display();
-  delay(600);
+  if (oled_model == OledModel::SSD1306_128X64) {
+    return oledIntegrityTestSsd1306(failReason, oled_addr);
+  }
 
-  // Frame 3: Invert toggle
-  display.invertDisplay(true);
-  delay(250);
-  display.invertDisplay(false);
-  delay(250);
+  failReason = "No OLED model active";
+  return false;
+}
 
-  // Frame 4: Clear and show OK
-  display.clearDisplay();
-  display.setTextSize(2);
-  display.setCursor(18, 18);
-  display.println("OLED OK");
-  display.setTextSize(1);
-  display.setCursor(0, 52);
-  display.print("ADDR 0x");
-  display.print(oled_addr, HEX);
-  display.display();
+static bool oledIntegrityTestForTarget(String target, String &failReason) {
+  oledI2cInit();
+  target.trim();
+  target.toUpperCase();
 
-  // Quick I2C re-probe to confirm device still responds
-  if (!i2cProbe(oled_addr)) {
-    failReason = "Device stopped ACKing";
-    Serial.println("OLED:TEST:FAIL:I2C_NACK");
+  if (target.length() == 0 || target == "AUTO") {
+    return oledIntegrityTestAuto(failReason);
+  }
+
+  uint8_t addr = 0;
+  if (!findOledAddress(addr)) {
+    failReason = "I2C device not found";
     return false;
   }
 
-  Serial.println("OLED:TEST:OK");
-  return true;
+  if (target == "SSD1327" || target == "1327" || target == "128X128") {
+    return oledIntegrityTestSsd1327(failReason, addr);
+  }
+  if (target == "SSD1306" || target == "1306" || target == "128X64") {
+    return oledIntegrityTestSsd1306(failReason, addr);
+  }
+
+  failReason = "Unknown OLED test target";
+  return false;
 }
 
 void setup() {
@@ -588,7 +752,7 @@ void processCommand(String cmd) {
     }
     
   } else if (command == "OLED") {
-    // OLED:INIT or OLED:TEST
+    // OLED:INIT or OLED:TEST[:SSD1327|SSD1306|AUTO]
     String sub = getParam(params, 0);
     sub.toUpperCase();
 
@@ -596,6 +760,8 @@ void processCommand(String cmd) {
       if (oledInit()) {
         Serial.print("OLED:OK:ADDR:0x");
         Serial.println(oled_addr, HEX);
+        Serial.print("OLED:MODEL:");
+        Serial.println(oledModelName(oled_model));
       } else {
         Serial.println("OLED:FAIL:NOT_FOUND");
       }
@@ -603,8 +769,9 @@ void processCommand(String cmd) {
     }
 
     if (sub == "TEST") {
+      String target = getParam(params, 1);
       String reason = "";
-      bool ok = oledIntegrityTest(reason);
+      bool ok = oledIntegrityTestForTarget(target, reason);
       if (ok) {
         Serial.println("OLED:OK");
       } else {
@@ -679,6 +846,31 @@ void processCommand(String cmd) {
         String type = getParam(params, 2);
         type.toUpperCase();
         String varName = getParam(params, 3);
+        String varNameKey = varName;
+        varNameKey.trim();
+        varNameKey.toLowerCase();
+
+        // Compatibility aliases for host app values that remained in main.py.
+        if (type == "U8" && (varNameKey == "ui_gaze_x" || varNameKey == "ui_gaze_y")) {
+          String raw = getParam(params, 4);
+          int n = raw.toInt();
+          if (n < 0) n = 0;
+          if (n > 255) n = 255;
+          if (varNameKey == "ui_gaze_x") {
+            ui_gaze_x_compat = (uint8_t)n;
+          } else {
+            ui_gaze_y_compat = (uint8_t)n;
+          }
+
+          UiGazePoint gaze;
+          gaze.x = mapU8ToRange(ui_gaze_x_compat, 119);
+          gaze.y = mapU8ToRange(ui_gaze_y_compat, 71);
+          ui_set<UiGazePoint>(UiDynamicVar::UI_GAZE_POINT, gaze);
+          renderUi();
+          Serial.println("OLED:UI:SET:OK");
+          return;
+        }
+
         UiDynamicVar var;
         if (!dynamicVarFromString(varName, var)) {
           Serial.println("ERROR:Invalid var name");
@@ -703,7 +895,11 @@ void processCommand(String cmd) {
           int n = raw.toInt();
           if (n < 0) n = 0;
           if (n > 255) n = 255;
-          ui_set<uint8_t>(var, (uint8_t)n);
+          if (var == UiDynamicVar::UI_INFERENCE_PROG_BAR) {
+            ui_set<int16_t>(var, (int16_t)n);
+          } else {
+            ui_set<uint8_t>(var, (uint8_t)n);
+          }
           renderUi();
           Serial.println("OLED:UI:SET:OK");
           return;
