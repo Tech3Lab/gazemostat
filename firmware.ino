@@ -90,10 +90,9 @@ unsigned long last_ui_refresh_ms = 0;
 UiScreen ui_current_screen = UiScreen::BOOT;
 bool ui_dirty = true;
 
-// Backward-compatible v2-style state variables (used only by OLED:UI:STATE).
-bool ui_tracker_detected_state = false;
-bool ui_led_detected_state = false;
-bool ui_connection_state = false;
+// Backward-compatible state variables (used only by OLED:UI:STATE).
+bool ui_gp_connected_state = false;
+bool ui_gp_gaze_data_state = false;
 uint8_t ui_gaze_x_compat = 128;  // Host sends 0..255
 uint8_t ui_gaze_y_compat = 128;  // Host sends 0..255
 
@@ -141,11 +140,8 @@ static const char *buttonNameFromBit(uint8_t button_bit) {
 }
 
 static void update_ui_dynamic_elements() {
-  // Backward-compatible bridge for OLED:UI:STATE (v2-style command).
-  // New protocol should prefer OLED:UI:SET:* commands which directly set UiDynamicVar values.
-  ui_tracker_detected = ui_tracker_detected_state;
-  ui_led_detected = ui_led_detected_state;
-  ui_connection = ui_connection_state;
+  // Legacy no-op: modern host flow uses OLED:UI:SET:* for dynamic variables.
+  // OLED:UI:STATE remains supported and updates variables in its command handler.
 }
 
 static void renderUi() {
@@ -236,9 +232,14 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
   varName.toLowerCase();
   // v3 generated vars
   if (varName == "ui_loading_data") { out = UiDynamicVar::UI_LOADING_DATA; return true; }
-  if (varName == "ui_tracker_detected") { out = UiDynamicVar::UI_TRACKER_DETECTED; return true; }
-  if (varName == "ui_led_detected") { out = UiDynamicVar::UI_LED_DETECTED; return true; }
-  if (varName == "ui_connection") { out = UiDynamicVar::UI_CONNECTION; return true; }
+  if (varName == "ui_gp_connected" || varName == "ui_tracker_detected") {
+    out = UiDynamicVar::UI_GP_CONNECTED;
+    return true;
+  }
+  if (varName == "ui_gp_gaze_data" || varName == "ui_led_detected" || varName == "ui_connection") {
+    out = UiDynamicVar::UI_GP_GAZE_DATA;
+    return true;
+  }
   if (varName == "ui_position_head") { out = UiDynamicVar::UI_POSITION_HEAD; return true; }
   if (varName == "ui_calib_start_btn") { out = UiDynamicVar::UI_CALIB_START_BTN; return true; }
   if (varName == "ui_calib_next_btn") { out = UiDynamicVar::UI_CALIB_NEXT_BTN; return true; }
@@ -864,7 +865,7 @@ void processCommand(String cmd) {
     }
 
     if (sub == "UI") {
-      // OLED:UI:STATE:<tracker>:<led>:<connection>:<calib> (legacy/back-compat; calib ignored in v3)
+      // OLED:UI:STATE:<gp_connected>:<gp_gaze_data>[:legacy_connection[:legacy_calib]]
       // OLED:UI:SCREEN:<screen_name>
       // OLED:UI:SET:BOOL:<var_name>:<0|1>
       // OLED:UI:SET:U8:<var_name>:<0..255>
@@ -872,13 +873,17 @@ void processCommand(String cmd) {
       String arg = getParam(params, 1);
       arg.toUpperCase();
       if (arg == "STATE") {
-        // Update UI state variables
-        String tracker = getParam(params, 2);
-        String led = getParam(params, 3);
-        String conn = getParam(params, 4);
-        if (tracker.length() > 0) ui_tracker_detected_state = (tracker == "1" || tracker == "ON" || tracker == "TRUE");
-        if (led.length() > 0) ui_led_detected_state = (led == "1" || led == "ON" || led == "TRUE");
-        if (conn.length() > 0) ui_connection_state = (conn == "1" || conn == "ON" || conn == "TRUE");
+        // Backward-compatible status bridge.
+        String gpConnected = getParam(params, 2);
+        String gpGazeData = getParam(params, 3);
+        if (gpConnected.length() > 0) {
+          ui_gp_connected_state = (gpConnected == "1" || gpConnected == "ON" || gpConnected == "TRUE");
+          ui_set<bool>(UiDynamicVar::UI_GP_CONNECTED, ui_gp_connected_state);
+        }
+        if (gpGazeData.length() > 0) {
+          ui_gp_gaze_data_state = (gpGazeData == "1" || gpGazeData == "ON" || gpGazeData == "TRUE");
+          ui_set<bool>(UiDynamicVar::UI_GP_GAZE_DATA, ui_gp_gaze_data_state);
+        }
         ui_dirty = true;
         Serial.println("OLED:UI:STATE:OK");
         return;
@@ -937,6 +942,11 @@ void processCommand(String cmd) {
           if (!parseBool01(raw, v)) {
             Serial.println("ERROR:Invalid BOOL value");
             return;
+          }
+          if (var == UiDynamicVar::UI_GP_CONNECTED) {
+            ui_gp_connected_state = v;
+          } else if (var == UiDynamicVar::UI_GP_GAZE_DATA) {
+            ui_gp_gaze_data_state = v;
           }
           ui_set<bool>(var, v);
           ui_dirty = true;

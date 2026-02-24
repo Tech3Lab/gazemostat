@@ -2761,17 +2761,13 @@ def main():
         return f"{m:02d}:{ss:02d}"
 
     def oled_sync():
-        """Push current state + dynamic vars to the OLED (ui/v4)."""
-        rp2040_ok = (led_controller is not None and getattr(led_controller, "_serial", None) is not None)
-        rp2040_alive = bool(led_controller.is_alive(RP2040_HEARTBEAT_TIMEOUT_S)) if led_controller is not None else False
+        """Push current state + dynamic vars to the OLED (ui/v5)."""
         # BOOT screen status
         if state == "BOOT":
-            # Eye tracker checkbox must reflect tracker connection.
-            _oled_set_bool("ui_tracker_detected", bool(gp.connected))
-            # LED checkbox reflects whether the RP2040 co-processor is connected.
-            _oled_set_bool("ui_led_detected", bool(rp2040_ok and rp2040_alive))
-            # Connection reflects whether we're actually receiving gaze data.
-            _oled_set_bool("ui_connection", bool(gp.receiving))
+            # GP connection checkbox reflects tracker connection state.
+            _oled_set_bool("ui_gp_connected", bool(gp.connected))
+            # Gaze data checkbox reflects whether gaze samples are being received.
+            _oled_set_bool("ui_gp_gaze_data", bool(gp.receiving))
             _oled_set_str("ui_loading_data", "")
 
         # CALIBRATION screen vars

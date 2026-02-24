@@ -46,9 +46,8 @@ struct UiGazePoint {
 // Dynamic element variables (auto-generated).
 // Update these values at runtime before calling draw_*_screen() / draw_screen().
 static String ui_loading_data = "{Metadata}";
-static bool ui_tracker_detected = false;
-static bool ui_led_detected = true;
-static bool ui_connection = true;
+static bool ui_gp_connected = false;
+static bool ui_gp_gaze_data = true;
 static bool ui_position_head = true;
 static String ui_calib_start_btn = "Calibration>";
 static bool ui_led_up_left = true;
@@ -103,9 +102,8 @@ static inline String ui_normalize_dynamic_text(const String &s) {
 // Dynamic variables (auto-generated).
 enum class UiDynamicVar : uint8_t {
   UI_LOADING_DATA,
-  UI_TRACKER_DETECTED,
-  UI_LED_DETECTED,
-  UI_CONNECTION,
+  UI_GP_CONNECTED,
+  UI_GP_GAZE_DATA,
   UI_POSITION_HEAD,
   UI_CALIB_START_BTN,
   UI_LED_UP_LEFT,
@@ -140,9 +138,8 @@ template <typename T> inline void ui_set(UiDynamicVar, const T &) {}
 
 template <> inline bool ui_get<bool>(UiDynamicVar var) {
   switch (var) {
-    case UiDynamicVar::UI_TRACKER_DETECTED: return ui_tracker_detected;
-    case UiDynamicVar::UI_LED_DETECTED: return ui_led_detected;
-    case UiDynamicVar::UI_CONNECTION: return ui_connection;
+    case UiDynamicVar::UI_GP_CONNECTED: return ui_gp_connected;
+    case UiDynamicVar::UI_GP_GAZE_DATA: return ui_gp_gaze_data;
     case UiDynamicVar::UI_POSITION_HEAD: return ui_position_head;
     case UiDynamicVar::UI_LED_UP_LEFT: return ui_led_up_left;
     case UiDynamicVar::UI_LED_UP_RIGHT: return ui_led_up_right;
@@ -155,9 +152,8 @@ template <> inline bool ui_get<bool>(UiDynamicVar var) {
 }
 template <> inline void ui_set<bool>(UiDynamicVar var, const bool &value) {
   switch (var) {
-    case UiDynamicVar::UI_TRACKER_DETECTED: ui_tracker_detected = value; break;
-    case UiDynamicVar::UI_LED_DETECTED: ui_led_detected = value; break;
-    case UiDynamicVar::UI_CONNECTION: ui_connection = value; break;
+    case UiDynamicVar::UI_GP_CONNECTED: ui_gp_connected = value; break;
+    case UiDynamicVar::UI_GP_GAZE_DATA: ui_gp_gaze_data = value; break;
     case UiDynamicVar::UI_POSITION_HEAD: ui_position_head = value; break;
     case UiDynamicVar::UI_LED_UP_LEFT: ui_led_up_left = value; break;
     case UiDynamicVar::UI_LED_UP_RIGHT: ui_led_up_right = value; break;
@@ -312,19 +308,14 @@ inline void draw_loading_screen(Adafruit_SSD1327 &display) {
 inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.clearDisplay();
   display.drawRect(8, 40, 8, 8, SSD1327_WHITE);
-  if (ui_tracker_detected) {
+  if (ui_gp_connected) {
     display.drawLine(10, 44, 10, 45, SSD1327_WHITE);
     display.drawLine(10, 45, 13, 42, SSD1327_WHITE);
   }
   display.drawRect(8, 56, 8, 8, SSD1327_WHITE);
-  if (ui_led_detected) {
+  if (ui_gp_gaze_data) {
     display.drawLine(10, 60, 10, 61, SSD1327_WHITE);
     display.drawLine(10, 61, 13, 58, SSD1327_WHITE);
-  }
-  display.drawRect(8, 72, 8, 8, SSD1327_WHITE);
-  if (ui_connection) {
-    display.drawLine(10, 76, 10, 77, SSD1327_WHITE);
-    display.drawLine(10, 77, 13, 74, SSD1327_WHITE);
   }
   // PLACEHOLDER region: x=28, y=95, w=10, h=10
   // TODO: add custom drawing code here
@@ -333,17 +324,12 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   display.setCursor(21, 40);
-  display.print(F("Tracker detected"));
+  display.print(F("GP connected"));
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   display.setCursor(21, 57);
-  display.print(F("LED present"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(21, 73);
-  display.print(F("Connection"));
+  display.print(F("Gaze data"));
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -1621,8 +1607,14 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
   if (ui_right_eye) {
     display.drawLine(74, 104, 77, 108, SSD1327_WHITE);
     display.drawLine(77, 108, 83, 100, SSD1327_WHITE);
+  } else {
+    display.drawLine(74, 99, 83, 108, SSD1327_WHITE);
+    display.drawLine(83, 99, 74, 108, SSD1327_WHITE);
   }
   if (ui_left_eye) {
+    display.drawLine(43, 104, 46, 108, SSD1327_WHITE);
+    display.drawLine(46, 108, 52, 100, SSD1327_WHITE);
+  } else {
     display.drawLine(43, 99, 52, 108, SSD1327_WHITE);
     display.drawLine(52, 99, 43, 108, SSD1327_WHITE);
   }
