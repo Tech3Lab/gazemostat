@@ -46,10 +46,9 @@ struct UiGazePoint {
 // Dynamic element variables (auto-generated).
 // Update these values at runtime before calling draw_*_screen() / draw_screen().
 static String ui_loading_data = "{Metadata}";
-static bool ui_gp_connected = false;
+static bool ui_gp_connected = true;
 static bool ui_gp_gaze_data = true;
 static bool ui_position_head = true;
-static String ui_calib_start_btn = "Calibration>";
 static bool ui_led_up_left = true;
 static bool ui_led_up_right = true;
 static bool ui_led_bottom_right = true;
@@ -105,7 +104,6 @@ enum class UiDynamicVar : uint8_t {
   UI_GP_CONNECTED,
   UI_GP_GAZE_DATA,
   UI_POSITION_HEAD,
-  UI_CALIB_START_BTN,
   UI_LED_UP_LEFT,
   UI_LED_UP_RIGHT,
   UI_LED_BOTTOM_RIGHT,
@@ -194,7 +192,6 @@ template <> inline void ui_set<UiGazePoint>(UiDynamicVar var, const UiGazePoint 
 template <> inline String ui_get<String>(UiDynamicVar var) {
   switch (var) {
     case UiDynamicVar::UI_LOADING_DATA: return ui_loading_data;
-    case UiDynamicVar::UI_CALIB_START_BTN: return ui_calib_start_btn;
     case UiDynamicVar::UI_CALIB_NEXT_BTN: return ui_calib_next_btn;
     case UiDynamicVar::UI_CALIB_REDO_BTN: return ui_calib_redo_btn;
     case UiDynamicVar::UI_CALIB_RESULT: return ui_calib_result;
@@ -217,7 +214,6 @@ template <> inline String ui_get<String>(UiDynamicVar var) {
 template <> inline void ui_set<String>(UiDynamicVar var, const String &value) {
   switch (var) {
     case UiDynamicVar::UI_LOADING_DATA: ui_loading_data = ui_normalize_dynamic_text(value); break;
-    case UiDynamicVar::UI_CALIB_START_BTN: ui_calib_start_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_NEXT_BTN: ui_calib_next_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_REDO_BTN: ui_calib_redo_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_RESULT: ui_calib_result = ui_normalize_dynamic_text(value); break;
@@ -329,7 +325,7 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   display.setCursor(21, 57);
-  display.print(F("Gaze data"));
+  display.print(F("GP gaze data"));
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -735,44 +731,8 @@ inline void draw_in_position_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  {
-    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_start_btn);
-    const int line_h = 8 * 1;
-    int lines_n = 1;
-    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
-      const char ch = ui_dyn_text[i];
-      if (ch == '\r') continue;
-      if (ch == '\n') { lines_n++; }
-    }
-    int cy = 119;
-    size_t i = 0;
-    while (i <= ui_dyn_text.length()) {
-      // Count characters in this line (excluding \r).
-      int cols = 0;
-      size_t j = i;
-      while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
-        if (ch == '\r') { j++; continue; }
-        if (ch == '\n') break;
-        cols++;
-        j++;
-      }
-      const int x0 = 55;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
-      // End of string.
-      if (i >= ui_dyn_text.length()) break;
-      // Newline.
-      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
-      // Safety: advance to avoid infinite loop.
-      i++;
-    }
-  }
+  display.setCursor(55, 119);
+  display.print(F("Calibration>"));
 }
 
 // Screen 6: calibration
@@ -781,44 +741,8 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  {
-    const String ui_dyn_text = ui_normalize_dynamic_text(ui_calib_start_btn);
-    const int line_h = 8 * 1;
-    int lines_n = 1;
-    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
-      const char ch = ui_dyn_text[i];
-      if (ch == '\r') continue;
-      if (ch == '\n') { lines_n++; }
-    }
-    int cy = 119;
-    size_t i = 0;
-    while (i <= ui_dyn_text.length()) {
-      // Count characters in this line (excluding \r).
-      int cols = 0;
-      size_t j = i;
-      while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
-        if (ch == '\r') { j++; continue; }
-        if (ch == '\n') break;
-        cols++;
-        j++;
-      }
-      const int x0 = 18;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
-      // End of string.
-      if (i >= ui_dyn_text.length()) break;
-      // Newline.
-      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
-      // Safety: advance to avoid infinite loop.
-      i++;
-    }
-  }
+  display.setCursor(18, 119);
+  display.print(F("Start calibration>"));
   display.drawCircle(7, 11, 5, SSD1327_WHITE);
   if (ui_led_up_left) {
     display.fillCircle(7, 11, 4, SSD1327_WHITE);
@@ -1618,7 +1542,7 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
     display.drawLine(43, 99, 52, 108, SSD1327_WHITE);
     display.drawLine(52, 99, 43, 108, SSD1327_WHITE);
   }
-  display.drawCircle(48, 104, 8, SSD1327_WHITE);
+  display.drawCircle(48, 93, 8, SSD1327_WHITE);
   display.drawCircle(79, 104, 8, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);

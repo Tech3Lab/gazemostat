@@ -2814,7 +2814,6 @@ def main():
         if state == "CALIBRATION":
             running_now = using_led_calib or using_overlay_calib
             done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
-            _oled_set_str("ui_calib_start_btn", "Start calibration>" if (not running_now and calib_quality == "none") else "")
             _oled_set_str("ui_calib_redo_btn", "<Redo" if done_now else "")
             _oled_set_str("ui_calib_next_btn", "Next>" if (done_now and calib_quality in ("ok", "low")) else "")
             # Calibration result as raw average error

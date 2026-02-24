@@ -241,7 +241,6 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
     return true;
   }
   if (varName == "ui_position_head") { out = UiDynamicVar::UI_POSITION_HEAD; return true; }
-  if (varName == "ui_calib_start_btn") { out = UiDynamicVar::UI_CALIB_START_BTN; return true; }
   if (varName == "ui_calib_next_btn") { out = UiDynamicVar::UI_CALIB_NEXT_BTN; return true; }
   if (varName == "ui_calib_redo_btn") { out = UiDynamicVar::UI_CALIB_REDO_BTN; return true; }
   if (varName == "ui_calib_result") { out = UiDynamicVar::UI_CALIB_RESULT; return true; }
