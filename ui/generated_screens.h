@@ -46,8 +46,8 @@ struct UiGazePoint {
 // Dynamic element variables (auto-generated).
 // Update these values at runtime before calling draw_*_screen() / draw_screen().
 static String ui_loading_data = "{Metadata}";
-static bool ui_gp_connected = true;
-static bool ui_gp_gaze_data = true;
+static bool ui_gp_connected = false;
+static bool ui_gp_gaze_data = false;
 static bool ui_position_head = true;
 static String ui_calib_start_btn = "Start calibration>";
 static bool ui_led_up_left = true;
