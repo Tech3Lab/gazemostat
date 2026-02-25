@@ -21,7 +21,7 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_SSD1327.h>
 #include <Adafruit_SSD1306.h>
-#include "ui/v5/generated_screens.h"
+#include "ui/generated_screens.h"
 
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
@@ -241,6 +241,7 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
     return true;
   }
   if (varName == "ui_position_head") { out = UiDynamicVar::UI_POSITION_HEAD; return true; }
+  if (varName == "ui_calib_start_btn") { out = UiDynamicVar::UI_CALIB_START_BTN; return true; }
   if (varName == "ui_calib_next_btn") { out = UiDynamicVar::UI_CALIB_NEXT_BTN; return true; }
   if (varName == "ui_calib_redo_btn") { out = UiDynamicVar::UI_CALIB_REDO_BTN; return true; }
   if (varName == "ui_calib_result") { out = UiDynamicVar::UI_CALIB_RESULT; return true; }
