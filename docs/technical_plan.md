@@ -7,7 +7,7 @@ This document describes the current architecture, workflows, dependencies, and i
 `gazemostat` is a gaze-tracking application (host-side Python) paired with an RP2040 co-processor firmware (Arduino sketch) used for:
 
 - **NeoPixel control** (WS2812/SK6812 timing handled on RP2040; host sends high-level serial commands)
-- **OLED UI rendering** on a 128×64 SSD1306 over I2C, plus **button/joystick input** read on RP2040 GPIO
+- **OLED UI rendering** on a 128×128 SSD1327 over I2C (with 128×64 SSD1306 as legacy fallback), plus **button/joystick input** read on RP2040 GPIO
 
 The host app also connects to the **Gazepoint** eye tracker API over TCP and may run ML inference (XGBoost) depending on configuration.
 
@@ -15,7 +15,7 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 
 - **Firmware**
   - `firmware.ino`: RP2040 co-processor firmware (NeoPixels + OLED UI + serial protocol)
-  - `ui/v4/generated_screens.h`: header-only OLED UI (v4); contains `UiScreen`, `UiDynamicVar`, `ui_get/ui_set`, and `draw_screen(...)`
+  - `ui/generated_screens.h`: header-only OLED UI; contains `UiScreen`, `UiDynamicVar`, `ui_get`/`ui_set`, and `draw_screen(...)` (SSD1327 128×128)
   - `upload_firmware.py`: Windows helper to install Arduino CLI + compile + upload
 - **Host application**
   - `main.py`: primary Python application (UI, simulation toggles, Gazepoint TCP client, serial I/O)
@@ -33,28 +33,24 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
   - Count: `NEOPIXEL_COUNT` (default 4)
   - Brightness: `global_brightness` (0–255, set by serial command)
 - **OLED**
-  - Library: `Adafruit_SSD1306` + `Adafruit_GFX` over `Wire` (I2C)
+  - Library: `Adafruit_SSD1327` (primary) + `Adafruit_SSD1306` (legacy fallback) + `Adafruit_GFX` over `Wire` (I2C)
   - I2C pins: SDA `OLED_SDA_PIN` (default GP4), SCL `OLED_SCL_PIN` (default GP5)
-  - Address: probed at `0x3C` then `0x3D`
+  - Address: probed at `0x3D` then `0x3C`
 - **Buttons / joystick**
   - Wired as switches to GND, read with `INPUT_PULLUP`
   - Pins default to GP6..GP12 (`BTN_*_PIN`)
   - `readButtons()` returns a **bitmask where bit=1 means pressed**
 
-### OLED UI rendering (v4)
+### OLED UI rendering
 
-- The OLED UI drawing code is in `ui/v4/generated_screens.h`.
+- The OLED UI drawing code is in `ui/generated_screens.h` (auto-generated for SSD1327 128×128).
 - **Important invariant**: `draw_*_screen()` / `draw_screen()` do **not** call `display.display()`.
   - Firmware must call `display.display()` once per frame after drawing.
-- Dynamic UI variables are simple globals in `ui/v4/generated_screens.h`.
-  - Auto-generated vars cover core strings/bools (boot, calibration, recording, results).
-  - **Post-generation additions** (kept in-repo because the UI designer project source is not present):
-    - **Calibration corner indicators**: `ui_led_up_left`, `ui_led_up_right`, `ui_led_bottom_left`, `ui_led_bottom_right` (bool)
-    - **Monitoring eye state**: `ui_left_eye`, `ui_right_eye` (bool)
-    - **Monitoring gaze dot**: `ui_gaze_x`, `ui_gaze_y` (u8 0..255)
-    - **Inference progress**: `ui_inference_prog_bar` (u8; host uses 0..100)
+- Dynamic UI variables are simple globals in `ui/generated_screens.h`.
+  - Auto-generated vars cover boot (e.g. `ui_gp_connected`, `ui_gp_gaze_data`), calibration (`ui_led_up_left`, etc., `ui_calib_*`), recording (`ui_recording_timer`, `ui_event_time`, `ui_event_name`), stop-record warning (`ui_close_event_warning`), inference (`ui_inference_prog_bar`, `ui_inference_timer`), results (`ui_result_1`–`ui_result_4`, `ui_results_*`), and monitoring (`ui_left_eye`, `ui_right_eye`, `ui_gaze_point`, `ui_text_el_269` for position status).
+  - Host drives screen and vars via `OLED:UI:SCREEN:<name>` and `OLED:UI:SET:BOOL|U8|STR:<var>:<value>`.
 
-**Note on v4 header edits**: the repo does not include the UI designer project source; `ui/v4/generated_screens.h` is edited in-place to add a few missing dynamic variables and drawing behaviors (calibration corner indicators, inference progress bar, monitoring eye/gaze inputs). These edits must be preserved when regenerating UI.
+**Note on regenerating UI**: If the UI designer regenerates `ui/generated_screens.h`, ensure the firmware’s `dynamicVarFromString()` in `firmware.ino` still recognizes any vars used by the host (aliases like `ui_close_event_warning` / `ui_closed_event_warning`, `ui_text_el_269` / `ui_position_status`, and `ui_gaze_x`/`ui_gaze_y` mapped to `ui_gaze_point` are handled there).
 
 ### Serial protocol (firmware)
 
@@ -155,7 +151,8 @@ On Windows, use `upload_firmware.py` which:
 
 ## Recent changes (this update)
 
-- Firmware OLED UI now uses **v4 UI** from `ui/v4/generated_screens.h` and no longer contains a demo/navigation state machine.
+- Docs and comments aligned with **`ui/generated_screens.h`**: technical plan and main.py now reference the active UI header path and SSD1327 128×128; removed obsolete v4/v5 references.
+- Firmware OLED UI now uses **`ui/generated_screens.h`** (SSD1327 128×128) and no longer contains a demo/navigation state machine.
 - RP2040 now forwards button edge events to the host: `BTN:PRESS:*` / `BTN:RELEASE:*`.
 - Host (`main.py`) now owns the FLOW pipeline state machine and drives OLED screens/vars via `OLED:UI:*` commands.
 - Host terminology is now **events** (not tasks) and recording shows both **recording timer** and **event timer**.

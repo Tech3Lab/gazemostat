@@ -333,8 +333,8 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(43, 12);
-  display.print(F("LOADING"));
+  display.setCursor(34, 12);
+  display.print(F("LOADING..."));
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);

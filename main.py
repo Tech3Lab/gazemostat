@@ -2801,7 +2801,7 @@ def main():
         return f"{m:02d}:{ss:02d}"
 
     def oled_sync():
-        """Push current state + dynamic vars to the OLED (ui/v5)."""
+        """Push current state + dynamic vars to the OLED (ui/generated_screens.h)."""
         # BOOT screen status
         if state == "BOOT":
             # GP connection checkbox reflects tracker connection state.
@@ -2907,7 +2907,7 @@ def main():
             _oled_set_bool("ui_left_eye", bool(left_open))
             _oled_set_bool("ui_right_eye", bool(right_open))
             pos = _position_status_from_eye_data()
-            # v4 UI uses ui_text_el_269 for position status.
+            # generated_screens.h uses ui_text_el_269 for monitoring position status.
             _oled_set_str("ui_text_el_269", pos)
             if last_calib_gaze and len(last_calib_gaze) >= 2:
                 gx = max(0.0, min(1.0, float(last_calib_gaze[0])))
