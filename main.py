@@ -33,8 +33,10 @@ SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Keep key history for debug panels (keyboard HUD is hidden)
 # Windowed fullscreen (borderless), not exclusive fullscreen.
-# If False, runs in a fixed-size frameless window (WIDTH x HEIGHT).
-FULLSCREEN = True
+# If False, runs in a fixed-size frameless window (WINDOW_WIDTH x WINDOW_HEIGHT).
+FULLSCREEN = False
+# Default window size when fullscreen is False; overridden by config.yaml window_width/window_height.
+WINDOW_WIDTH, WINDOW_HEIGHT = 480, 800
 
 WIDTH, HEIGHT = 480, 800
 FPS = 60  # Increased from 30 to reduce display latency
@@ -99,7 +101,7 @@ def load_config():
     global GP_CALIBRATION_METHOD
     global GPIO_LED_CALIBRATION_ENABLE
     global NEOPIXEL_SERIAL_PORT, NEOPIXEL_SERIAL_BAUD, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
-    global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS, UI_REFRESH_MS
+    global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, WINDOW_WIDTH, WINDOW_HEIGHT, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS, UI_REFRESH_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GP_CALIBRATE_DELAY, GP_CALIBRATE_TIMEOUT
     global GPIO_CHIP, GPIO_BTN_MARKER_DEBOUNCE
@@ -142,6 +144,8 @@ def load_config():
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
                     SHOW_KEYS = config.get('dev_show_keys', SHOW_KEYS)
                     FULLSCREEN = config.get('fullscreen', FULLSCREEN)
+                    WINDOW_WIDTH = config.get('window_width', WINDOW_WIDTH)
+                    WINDOW_HEIGHT = config.get('window_height', WINDOW_HEIGHT)
                     GP_HOST = config.get('gp_host', GP_HOST)
                     GP_PORT = config.get('gp_port', GP_PORT)
                     MODEL_PATH = config.get('model_path', MODEL_PATH)
@@ -1943,6 +1947,7 @@ def main():
         WIDTH, HEIGHT = int(info.current_w), int(info.current_h)
         screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
     else:
+        WIDTH, HEIGHT = max(400, WINDOW_WIDTH), max(400, WINDOW_HEIGHT)
         screen = pygame.display.set_mode((WIDTH, HEIGHT), display_flags)
     pygame.display.set_caption("Gaze App")
     font = pygame.font.SysFont(None, 26)
@@ -2049,6 +2054,10 @@ def main():
     prev_state = None  # for MONITORING modal
     monitoring_active = False
     running = True
+    # Manual window resize (windowed mode only): drag bottom-right grip
+    resizing = False
+    resize_start_xy = (0, 0)
+    resize_start_wh = (0, 0)
     clock = pygame.time.Clock()
     position_next_eval = 0.0  # head positioning UI refresh cadence (UI_REFRESH_MS)
     rp2040_next_reconnect_try = 0.0
@@ -3188,9 +3197,42 @@ def main():
         threading.Thread(target=_worker, daemon=True).start()
 
     while running:
+        # Resize grip rect (windowed mode): bottom-right 24x24 for drag-to-resize
+        resize_grip_rect = pygame.Rect(WIDTH - 24, HEIGHT - 24, 24, 24) if not FULLSCREEN else None
+        # Resize cursor when hovering the grip
+        if resize_grip_rect is not None:
+            try:
+                if resize_grip_rect.collidepoint(pygame.mouse.get_pos()) or resizing:
+                    pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_SIZENWSE)
+                else:
+                    pygame.mouse.set_cursor(pygame.SYSTEM_CURSOR_ARROW)
+            except Exception:
+                pass
+
         for ev in pygame.event.get():
             if ev.type == pygame.QUIT:
                 running = False
+            elif ev.type == pygame.MOUSEBUTTONDOWN:
+                if ev.button == 1 and resize_grip_rect is not None and resize_grip_rect.collidepoint(ev.pos):
+                    resizing = True
+                    resize_start_xy = ev.pos
+                    resize_start_wh = (WIDTH, HEIGHT)
+            elif ev.type == pygame.MOUSEBUTTONUP:
+                if ev.button == 1:
+                    resizing = False
+            elif ev.type == pygame.MOUSEMOTION:
+                if resizing and resize_start_wh:
+                    try:
+                        info = pygame.display.Info()
+                        max_w, max_h = info.current_w, info.current_h
+                    except Exception:
+                        max_w, max_h = 4096, 2160
+                    new_w = resize_start_wh[0] + (ev.pos[0] - resize_start_xy[0])
+                    new_h = resize_start_wh[1] + (ev.pos[1] - resize_start_xy[1])
+                    new_w = max(400, min(max_w, int(new_w)))
+                    new_h = max(400, min(max_h, int(new_h)))
+                    screen = pygame.display.set_mode((new_w, new_h), display_flags)
+                    WIDTH, HEIGHT = new_w, new_h
             elif ev.type == pygame.KEYDOWN:
                 # Keyboard -> simulated button edges (FLOW)
                 KEY_TO_BTN = {
@@ -4208,6 +4250,16 @@ def main():
 
         # Keep existing overlays (useful while debugging)
         draw_button_feedback()
+
+        # Resize grip (windowed mode): bottom-right corner so user can drag to resize
+        if not FULLSCREEN and resize_grip_rect is not None:
+            pygame.draw.rect(screen, (50, 50, 55), resize_grip_rect)
+            pygame.draw.rect(screen, (90, 90, 95), resize_grip_rect, 1)
+            # Diagonal lines to suggest resize
+            x, y = resize_grip_rect.bottomright
+            pygame.draw.line(screen, (140, 140, 150), (x - 18, y), (x, y - 18), 1)
+            pygame.draw.line(screen, (140, 140, 150), (x - 12, y), (x, y - 12), 1)
+            pygame.draw.line(screen, (140, 140, 150), (x - 6, y), (x, y - 6), 1)
 
         pygame.display.flip()
         clock.tick(FPS)

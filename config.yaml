@@ -312,10 +312,20 @@ dev_show_keys: true
 # fullscreen: Run application in fullscreen mode
 #   - true:  Run in fullscreen mode (recommended for production use)
 #            The app window is always frameless (no title bar or borders)
-#   - false: Run in windowed mode (frameless window at 480x800 resolution)
+#   - false: Run in windowed mode (frameless window at window_width x window_height)
 #            Useful for development and testing
-#   Default: true
-fullscreen: true
+#   Default: false
+fullscreen: false
+
+# window_width: Width of Pygame debug UI window in pixels (when fullscreen is false)
+#   - Minimum effective width is limited by panel layout (e.g. 400)
+#   Default: 480
+window_width: 480
+
+# window_height: Height of Pygame debug UI window in pixels (when fullscreen is false)
+#   - Minimum effective height is limited by panel layout (e.g. 600)
+#   Default: 800
+window_height: 800
 
 # ui_refresh_ms: UI refresh cadence in milliseconds for positioning/OLED updates
 #   - Lower values update more frequently but increase serial/UI activity
