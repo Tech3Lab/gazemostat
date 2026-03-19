@@ -70,8 +70,8 @@ static String ui_result_2 = "TEXT";
 static String ui_result_3 = "TEXT";
 static String ui_result_4 = "TEXT";
 static String ui_results_prev_btn = "<Previous";
-static bool ui_right_eye = true;
 static bool ui_left_eye = true;
+static bool ui_right_eye = true;
 static String ui_text_el_269 = "Good";
 static UiGazePoint ui_gaze_point = {23, 11};
 
@@ -126,8 +126,8 @@ enum class UiDynamicVar : uint8_t {
   UI_RESULT_3,
   UI_RESULT_4,
   UI_RESULTS_PREV_BTN,
-  UI_RIGHT_EYE,
   UI_LEFT_EYE,
+  UI_RIGHT_EYE,
   UI_TEXT_EL_269,
   UI_GAZE_POINT,
 };
@@ -145,8 +145,8 @@ template <> inline bool ui_get<bool>(UiDynamicVar var) {
     case UiDynamicVar::UI_LED_UP_RIGHT: return ui_led_up_right;
     case UiDynamicVar::UI_LED_BOTTOM_RIGHT: return ui_led_bottom_right;
     case UiDynamicVar::UI_LED_BOTTOM_LEFT: return ui_led_bottom_left;
-    case UiDynamicVar::UI_RIGHT_EYE: return ui_right_eye;
     case UiDynamicVar::UI_LEFT_EYE: return ui_left_eye;
+    case UiDynamicVar::UI_RIGHT_EYE: return ui_right_eye;
     default: return false;
   }
 }
@@ -159,8 +159,8 @@ template <> inline void ui_set<bool>(UiDynamicVar var, const bool &value) {
     case UiDynamicVar::UI_LED_UP_RIGHT: ui_led_up_right = value; break;
     case UiDynamicVar::UI_LED_BOTTOM_RIGHT: ui_led_bottom_right = value; break;
     case UiDynamicVar::UI_LED_BOTTOM_LEFT: ui_led_bottom_left = value; break;
-    case UiDynamicVar::UI_RIGHT_EYE: ui_right_eye = value; break;
     case UiDynamicVar::UI_LEFT_EYE: ui_left_eye = value; break;
+    case UiDynamicVar::UI_RIGHT_EYE: ui_right_eye = value; break;
     default: break;
   }
 }
@@ -1568,22 +1568,14 @@ inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
   display.setTextColor(SSD1327_WHITE);
   display.setCursor(4, 3);
   display.print(F("MONITORING"));
-  if (ui_right_eye) {
-    display.drawLine(74, 104, 77, 108, SSD1327_WHITE);
-    display.drawLine(77, 108, 83, 100, SSD1327_WHITE);
-  } else {
-    display.drawLine(74, 99, 83, 108, SSD1327_WHITE);
-    display.drawLine(83, 99, 74, 108, SSD1327_WHITE);
-  }
+  display.drawCircle(50, 104, 8, SSD1327_WHITE);
   if (ui_left_eye) {
-    display.drawLine(43, 104, 46, 108, SSD1327_WHITE);
-    display.drawLine(46, 108, 52, 100, SSD1327_WHITE);
-  } else {
-    display.drawLine(43, 99, 52, 108, SSD1327_WHITE);
-    display.drawLine(52, 99, 43, 108, SSD1327_WHITE);
+    display.fillCircle(50, 104, 7, SSD1327_WHITE);
   }
-  display.drawCircle(48, 104, 8, SSD1327_WHITE);
   display.drawCircle(79, 104, 8, SSD1327_WHITE);
+  if (ui_right_eye) {
+    display.fillCircle(79, 104, 7, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
