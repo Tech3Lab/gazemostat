@@ -194,6 +194,8 @@ class Recording1State(State):
                 self.manager.transition_to("RECORDING_2_FARTHER")
             else:
                 self.manager.transition_to("RECORDING_2_CLOSER")
+        elif btn == "BTN_RIGHT":
+            self.manager.transition_to("STOP_RECORD")
 
 
 class Recording2InPosState(State):
@@ -271,8 +273,6 @@ class Recording3State(State):
                 self.manager.transition_to("RECORDING_2_FARTHER")
             else:
                 self.manager.transition_to("RECORDING_2_CLOSER")
-        elif btn == "BTN_RIGHT":
-            self.manager.transition_to("STOP_RECORD")
 
 
 class StopRecordState(State):

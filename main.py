@@ -2921,18 +2921,22 @@ def main():
             led_controller.set_status_led(1, (0, 0, 0))
             
         # LED 3 (Index 2): Calibration status
-        running_now = using_led_calib or using_overlay_calib
-        if calib_quality in ("ok", "low"):
-            led_controller.set_status_led(2, (255, 255, 255))
-        elif calib_quality == "failed":
-            led_controller.set_status_led(2, (255, 255, 0))
-        elif calib_quality == "none" or running_now:
-            if blink_on:
+        pre_calib_states = {"BOOT", "FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"}
+        if state in pre_calib_states:
+            led_controller.set_status_led(2, (0, 0, 0))
+        else:
+            running_now = using_led_calib or using_overlay_calib
+            if calib_quality in ("ok", "low"):
                 led_controller.set_status_led(2, (255, 255, 255))
+            elif calib_quality == "failed":
+                led_controller.set_status_led(2, (255, 255, 0))
+            elif calib_quality == "none" or running_now:
+                if blink_on:
+                    led_controller.set_status_led(2, (255, 255, 255))
+                else:
+                    led_controller.set_status_led(2, (0, 0, 0))
             else:
                 led_controller.set_status_led(2, (0, 0, 0))
-        else:
-            led_controller.set_status_led(2, (0, 0, 0))
             
         # LED 4 (Index 3): Processing status
         if state == "INFERENCE_LOADING":
