@@ -30,6 +30,9 @@ NEOPIXEL_SERIAL_PORT = ""  # Serial port (empty = auto-detect)
 NEOPIXEL_SERIAL_BAUD = 115200  # Serial baud rate
 NEOPIXEL_COUNT = 4  # Number of NeoPixels in chain
 NEOPIXEL_BRIGHTNESS = 0.25  # Brightness level 0.0-1.0 (sent to microcontroller)
+STATUS_NEOPIXEL_PIN = 2
+STATUS_NEOPIXEL_COUNT = 4
+STATUS_NEOPIXEL_BRIGHTNESS = 0.25
 SIM_GAZE = True      # Keyboard + synthetic gaze stream
 SIM_XGB  = True      # Fake XGBoost results
 SHOW_KEYS = True     # Keep key history for debug panels (keyboard HUD is hidden)
@@ -102,6 +105,7 @@ def load_config():
     global GP_CALIBRATION_METHOD
     global GPIO_LED_CALIBRATION_ENABLE
     global NEOPIXEL_SERIAL_PORT, NEOPIXEL_SERIAL_BAUD, NEOPIXEL_COUNT, NEOPIXEL_BRIGHTNESS
+    global STATUS_NEOPIXEL_PIN, STATUS_NEOPIXEL_COUNT, STATUS_NEOPIXEL_BRIGHTNESS
     global SIM_GAZE, SIM_XGB, SHOW_KEYS, FULLSCREEN, WINDOW_WIDTH, WINDOW_HEIGHT, GP_HOST, GP_PORT, MODEL_PATH, FEATURE_WINDOW_MS, UI_REFRESH_MS
     global CALIB_OK_THRESHOLD, CALIB_LOW_THRESHOLD, CALIB_DELAY, CALIB_DWELL
     global GP_CALIBRATE_DELAY, GP_CALIBRATE_TIMEOUT
@@ -140,6 +144,10 @@ def load_config():
                     NEOPIXEL_SERIAL_BAUD = config.get('neopixel_serial_baud', NEOPIXEL_SERIAL_BAUD)
                     NEOPIXEL_COUNT = config.get('neopixel_count', NEOPIXEL_COUNT)
                     NEOPIXEL_BRIGHTNESS = config.get('neopixel_brightness', NEOPIXEL_BRIGHTNESS)
+                    # Status strip configuration
+                    STATUS_NEOPIXEL_PIN = config.get('status_neopixel_pin', STATUS_NEOPIXEL_PIN)
+                    STATUS_NEOPIXEL_COUNT = config.get('status_neopixel_count', STATUS_NEOPIXEL_COUNT)
+                    STATUS_NEOPIXEL_BRIGHTNESS = config.get('status_neopixel_brightness', STATUS_NEOPIXEL_BRIGHTNESS)
                     # Other configuration
                     SIM_GAZE = config.get('sim_gaze', SIM_GAZE)
                     SIM_XGB = config.get('developpement_xg_boost', SIM_XGB)
@@ -1145,11 +1153,13 @@ class Rp2040Controller:
     - Receive button edge events (BTN:PRESS/RELEASE:BTN_*) and forward to callback
     """
 
-    def __init__(self, serial_port="", serial_baud=115200, num_pixels=4, brightness=0.3):
+    def __init__(self, serial_port="", serial_baud=115200, num_pixels=4, brightness=0.3, status_num_pixels=4, status_brightness=0.3):
         self.serial_port = serial_port
         self.serial_baud = serial_baud
         self.num_pixels = num_pixels
         self.brightness = brightness
+        self.status_num_pixels = status_num_pixels
+        self.status_brightness = status_brightness
         self._serial = None
         self._initialized = False
         self._current_led = -1  # Currently active LED (-1 = all off)
@@ -1170,6 +1180,11 @@ class Rp2040Controller:
         self._last_mode = None  # "off" | "single" | "all"
         self._last_led = None
         self._last_rgb = None  # (r,g,b) after brightness applied
+        
+        # Status LED cache
+        self._status_last_mode = None
+        self._status_last_led = None
+        self._status_last_rgb = None
 
     def set_button_callback(self, cb):
         """Set callback(kind, btn_name) where kind is 'PRESS'|'RELEASE'."""
@@ -1290,6 +1305,9 @@ class Rp2040Controller:
             brightness_int = int(255 * self.brightness)
             self._send_command(f"INIT:{self.num_pixels}:{brightness_int}", expect_ack=True, timeout_s=0.5)
             self.all_off()
+            status_brightness_int = int(255 * self.status_brightness)
+            self._send_command(f"SINIT:{self.status_num_pixels}:{status_brightness_int}", expect_ack=True, timeout_s=0.5)
+            self.status_all_off()
             if oled_init:
                 self._send_command("OLED:INIT", expect_ack=False)
             return True
@@ -1579,6 +1597,13 @@ class Rp2040Controller:
             # Turn off all pixels initially
             self.all_off()
             
+            # Send initialization command for status strip
+            status_brightness_int = int(255 * self.status_brightness)
+            self._send_command(f"SINIT:{self.status_num_pixels}:{status_brightness_int}", expect_ack=True, timeout_s=0.5)
+            
+            # Turn off all status pixels initially
+            self.status_all_off()
+            
             self._initialized = True
             print(f"RP2040 controller initialized on {port}")
             return True
@@ -1604,6 +1629,7 @@ class Rp2040Controller:
     def stop(self):
         """Cleanup and turn off all NeoPixels"""
         self.all_off()
+        self.status_all_off()
         self._rx_stop.set()
         if self._rx_thr:
             self._rx_thr.join(timeout=1.0)
@@ -1620,6 +1646,9 @@ class Rp2040Controller:
         self._last_mode = None
         self._last_led = None
         self._last_rgb = None
+        self._status_last_mode = None
+        self._status_last_led = None
+        self._status_last_rgb = None
 
     # -----------------------
     # OLED UI helpers (v3)
@@ -1694,6 +1723,48 @@ class Rp2040Controller:
         self._last_mode = "off"
         self._last_led = None
         self._last_rgb = None
+        
+    def set_status_led(self, led_index, color=(255, 255, 255), animation_brightness=1.0):
+        """Turn on a specific Status NeoPixel with color
+        
+        Args:
+            led_index: Index of the LED (0-3)
+            color: RGB color tuple (default: white)
+            animation_brightness: Brightness multiplier for animation (0.0-1.0, default: 1.0)
+        """
+        if not self._initialized:
+            return
+            
+        if led_index < 0 or led_index >= self.status_num_pixels:
+            return
+            
+        # Apply brightness to color (both global brightness and animation brightness)
+        r, g, b = color
+        total_brightness = self.status_brightness * animation_brightness
+        r = int(r * total_brightness)
+        g = int(g * total_brightness)
+        b = int(b * total_brightness)
+
+        # Idempotency: don't resend if nothing changes
+        if self._status_last_mode == "single" and self._status_last_led == led_index and self._status_last_rgb == (r, g, b):
+            return
+            
+        self._send_command(f"SPIXEL:{led_index}:{r}:{g}:{b}", expect_ack=False)
+        
+        self._status_last_mode = "single"
+        self._status_last_led = led_index
+        self._status_last_rgb = (r, g, b)
+        
+    def status_all_off(self):
+        """Turn off all Status NeoPixels"""
+        if not self._initialized:
+            return
+        if self._status_last_mode == "off":
+            return
+        self._send_command("SALL:OFF", expect_ack=False)
+        self._status_last_mode = "off"
+        self._status_last_led = None
+        self._status_last_rgb = None
     
     def all_on(self, color=(255, 255, 255), animation_brightness=1.0):
         """Turn on all NeoPixels with specified color (useful for testing)
@@ -2014,7 +2085,9 @@ def main():
                 serial_port=NEOPIXEL_SERIAL_PORT,
                 serial_baud=NEOPIXEL_SERIAL_BAUD,
                 num_pixels=NEOPIXEL_COUNT,
-                brightness=NEOPIXEL_BRIGHTNESS
+                brightness=NEOPIXEL_BRIGHTNESS,
+                status_num_pixels=STATUS_NEOPIXEL_COUNT,
+                status_brightness=STATUS_NEOPIXEL_BRIGHTNESS
             )
             # Forward RP2040 button edges into the main loop.
             try:
@@ -2819,6 +2892,59 @@ def main():
         ss = s % 60
         return f"{m:02d}:{ss:02d}"
 
+    def status_leds_sync():
+        """Push current state to the dedicated status LED strip."""
+        if led_controller is None:
+            return
+            
+        now = time.time()
+        blink_on = (int(now * 2) % 2) == 0  # 500ms toggle
+        
+        # LED 1 (Index 0): GP connection status
+        if gp.connected and gp.receiving:
+            led_controller.set_status_led(0, (255, 255, 255))
+        elif gp.connected and not gp.receiving:
+            if blink_on:
+                led_controller.set_status_led(0, (255, 255, 255))
+            else:
+                led_controller.set_status_led(0, (0, 0, 0))
+        else:
+            led_controller.set_status_led(0, (0, 0, 0))
+            
+        # LED 2 (Index 1): Position status
+        pos_status = _position_status_from_eye_data()
+        if pos_status == "Good":
+            led_controller.set_status_led(1, (255, 255, 255))
+        elif pos_status in ("Near", "Far"):
+            led_controller.set_status_led(1, (255, 255, 0))
+        else:
+            led_controller.set_status_led(1, (0, 0, 0))
+            
+        # LED 3 (Index 2): Calibration status
+        running_now = using_led_calib or using_overlay_calib
+        if calib_quality in ("ok", "low"):
+            led_controller.set_status_led(2, (255, 255, 255))
+        elif calib_quality == "failed":
+            led_controller.set_status_led(2, (255, 255, 0))
+        elif calib_quality == "none" or running_now:
+            if blink_on:
+                led_controller.set_status_led(2, (255, 255, 255))
+            else:
+                led_controller.set_status_led(2, (0, 0, 0))
+        else:
+            led_controller.set_status_led(2, (0, 0, 0))
+            
+        # LED 4 (Index 3): Processing status
+        if state == "INFERENCE_LOADING":
+            if blink_on:
+                led_controller.set_status_led(3, (255, 255, 255))
+            else:
+                led_controller.set_status_led(3, (0, 0, 0))
+        elif state == "RESULTS":
+            led_controller.set_status_led(3, (255, 255, 255))
+        else:
+            led_controller.set_status_led(3, (0, 0, 0))
+
     def oled_sync():
         """Push current state + dynamic vars to the OLED (ui/generated_screens.h)."""
         # BOOT screen status
@@ -3365,6 +3491,7 @@ def main():
                 # Force a sync ASAP (next tick is fine; doing it now reduces visible stale UI).
                 try:
                     oled_sync()
+                    status_leds_sync()
                 except Exception:
                     pass
 
@@ -3436,6 +3563,7 @@ def main():
             position_next_eval = now + (float(UI_REFRESH_MS) / 1000.0)
             
         oled_sync()
+        status_leds_sync()
 
         # Calibration sequencing
         if state == "CALIBRATION":

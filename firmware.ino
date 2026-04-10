@@ -26,6 +26,8 @@
 // Configuration - CHANGE THESE TO MATCH YOUR SETUP
 #define NEOPIXEL_PIN    1       // GPIO pin connected to NeoPixel DIN (GP1)
 #define NEOPIXEL_COUNT  4       // Number of NeoPixels in chain
+#define STATUS_NEOPIXEL_PIN 2   // GPIO pin connected to Status NeoPixel DIN (GP2)
+#define STATUS_NEOPIXEL_COUNT 4 // Number of Status NeoPixels in chain
 #define SERIAL_BAUD     230400  // Serial communication baud rate
 
 // OLED over I2C (STEMMA QT / Qwiic)
@@ -61,6 +63,7 @@
 
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
+Adafruit_NeoPixel status_strip(STATUS_NEOPIXEL_COUNT, STATUS_NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
 
 // OLED objects (I2C, no reset pin)
 Adafruit_SSD1327 display1327(OLED1327_WIDTH, OLED1327_HEIGHT, &Wire, -1);
@@ -68,6 +71,7 @@ Adafruit_SSD1306 display1306(OLED1306_WIDTH, OLED1306_HEIGHT, &Wire, -1);
 
 // Global brightness (0-255)
 uint8_t global_brightness = 64;  // Default: ~25% (64/255)
+uint8_t status_global_brightness = 64;
 
 // OLED state
 bool oled_available = false;
@@ -585,6 +589,11 @@ void setup() {
   strip.setBrightness(global_brightness);
   strip.show(); // Initialize all pixels to 'off'
 
+  // Initialize Status NeoPixel strip
+  status_strip.begin();
+  status_strip.setBrightness(status_global_brightness);
+  status_strip.show();
+
   // Initialize OLED (non-fatal if missing)
   oledInit();
   // Initialize UI state (CPU will override screen shortly after boot)
@@ -816,6 +825,74 @@ void processCommand(String cmd) {
       Serial.println("ERROR:Invalid brightness value");
     }
     
+  } else if (command == "SINIT") {
+    // SINIT:<count>:<brightness>
+    int count = getParam(params, 0).toInt();
+    int brightness = getParam(params, 1).toInt();
+    
+    if (count > 0 && count <= 255 && brightness >= 0 && brightness <= 255) {
+      status_global_brightness = brightness;
+      status_strip.setBrightness(status_global_brightness);
+      status_strip.show();
+      Serial.println("ACK");
+    } else {
+      Serial.println("ERROR:Invalid parameters");
+    }
+    
+  } else if (command == "SPIXEL") {
+    // SPIXEL:<idx>:<r>:<g>:<b>
+    int idx = getParam(params, 0).toInt();
+    int r = getParam(params, 1).toInt();
+    int g = getParam(params, 2).toInt();
+    int b = getParam(params, 3).toInt();
+    
+    if (idx >= 0 && idx < STATUS_NEOPIXEL_COUNT && 
+        r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
+      status_strip.setPixelColor(idx, status_strip.Color(r, g, b));
+      status_strip.show();
+      Serial.println("ACK");
+    } else {
+      Serial.println("ERROR:Invalid parameters");
+    }
+    
+  } else if (command == "SALL") {
+    // SALL:ON:<r>:<g>:<b> or SALL:OFF
+    if (params == "OFF") {
+      statusAllOff();
+      Serial.println("ACK");
+    } else if (params.startsWith("ON:")) {
+      String colorParams = params.substring(3);
+      int r = getParam(colorParams, 0).toInt();
+      int g = getParam(colorParams, 1).toInt();
+      int b = getParam(colorParams, 2).toInt();
+      
+      if (r >= 0 && r <= 255 && g >= 0 && g <= 255 && b >= 0 && b <= 255) {
+        uint32_t color = status_strip.Color(r, g, b);
+        for (int i = 0; i < STATUS_NEOPIXEL_COUNT; i++) {
+          status_strip.setPixelColor(i, color);
+        }
+        status_strip.show();
+        Serial.println("ACK");
+      } else {
+        Serial.println("ERROR:Invalid color values");
+      }
+    } else {
+      Serial.println("ERROR:Invalid SALL command");
+    }
+    
+  } else if (command == "SBRIGHTNESS") {
+    // SBRIGHTNESS:<value>
+    int brightness = params.toInt();
+    
+    if (brightness >= 0 && brightness <= 255) {
+      status_global_brightness = brightness;
+      status_strip.setBrightness(status_global_brightness);
+      status_strip.show();
+      Serial.println("ACK");
+    } else {
+      Serial.println("ERROR:Invalid brightness value");
+    }
+    
   } else if (command == "OLED") {
     // OLED:INIT or OLED:TEST[:SSD1327|SSD1306|AUTO]
     String sub = getParam(params, 0);
@@ -1034,4 +1111,12 @@ void allOff() {
     strip.setPixelColor(i, 0);
   }
   strip.show();
+}
+
+// Turn off all status pixels
+void statusAllOff() {
+  for (int i = 0; i < STATUS_NEOPIXEL_COUNT; i++) {
+    status_strip.setPixelColor(i, 0);
+  }
+  status_strip.show();
 }

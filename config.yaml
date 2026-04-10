@@ -215,6 +215,18 @@ neopixel_count: 4
 #   Default: 0.25
 neopixel_brightness: 0.25
 
+# status_neopixel_pin: GPIO pin for Status NeoPixels
+#   - Default: 2 (GP2)
+status_neopixel_pin: 2
+
+# status_neopixel_count: Number of Status NeoPixel LEDs in chain
+#   - Default: 4
+status_neopixel_count: 4
+
+# status_neopixel_brightness: Brightness level for Status NeoPixels
+#   - Default: 0.25
+status_neopixel_brightness: 0.25
+
 # neopixel_color_order: Color order for NeoPixel protocol
 #   - Color channel order: "RGB", "GRB", "RGBW", etc.
 #   - Most WS2812 NeoPixels use "GRB" order
