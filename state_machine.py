@@ -14,7 +14,7 @@ class AppInterface(Protocol):
     def start_calibration(self, override: Optional[str] = None) -> None: ...
     
     # Recording / Events
-    def start_collection(self) -> None: ...
+    def start_collection(self) -> bool: ...
     def stop_collection(self) -> None: ...
     def marker_toggle(self) -> None: ...
     
@@ -31,6 +31,10 @@ class AppInterface(Protocol):
     def get_next_event_index(self) -> int: ...
     def get_eye_data(self) -> Dict[str, Any]: ...
     def get_calib_gaze(self) -> List[float]: ...
+    
+    # GP Status
+    def is_gp_connected(self) -> bool: ...
+    def is_gp_receiving(self) -> bool: ...
     
     # Inference
     def get_analysis_progress(self) -> tuple[int, int, float]: ... # done, total, sec_per_val
@@ -65,7 +69,8 @@ class BootState(State):
 
     def on_button(self, btn: str):
         if btn == "BTN_RIGHT":
-            self.manager.transition_to("FIND_POSITION")
+            if self.app.is_gp_connected() and self.app.is_gp_receiving():
+                self.manager.transition_to("FIND_POSITION")
 
 
 class FindPositionState(State):
@@ -170,7 +175,8 @@ class RecordConfirmationState(State):
 
     def on_button(self, btn: str):
         if btn == "BTN_RIGHT":
-            self.app.start_collection()
+            if self.app.start_collection():
+                self.manager.transition_to("RECORDING_1")
 
 
 class Recording1State(State):
@@ -195,7 +201,9 @@ class Recording2InPosState(State):
         self.app.set_screen("RECORDING_2_IN_POS")
 
     def on_button(self, btn: str):
-        if btn == "BTN_UP":
+        if btn == "BTN_A":
+            self.app.marker_toggle()
+        elif btn == "BTN_UP":
             self.manager.transition_to("RECORDING_1")
         elif btn == "BTN_DOWN":
             self.manager.transition_to("RECORDING_3")
@@ -213,7 +221,9 @@ class Recording2CloserState(State):
         self.app.set_screen("RECORDING_2_CLOSER")
 
     def on_button(self, btn: str):
-        if btn == "BTN_UP":
+        if btn == "BTN_A":
+            self.app.marker_toggle()
+        elif btn == "BTN_UP":
             self.manager.transition_to("RECORDING_1")
         elif btn == "BTN_DOWN":
             self.manager.transition_to("RECORDING_3")
@@ -231,7 +241,9 @@ class Recording2FartherState(State):
         self.app.set_screen("RECORDING_2_FARTHER")
 
     def on_button(self, btn: str):
-        if btn == "BTN_UP":
+        if btn == "BTN_A":
+            self.app.marker_toggle()
+        elif btn == "BTN_UP":
             self.manager.transition_to("RECORDING_1")
         elif btn == "BTN_DOWN":
             self.manager.transition_to("RECORDING_3")
@@ -249,7 +261,9 @@ class Recording3State(State):
         self.app.set_screen("RECORDING_3")
 
     def on_button(self, btn: str):
-        if btn == "BTN_UP":
+        if btn == "BTN_A":
+            self.app.marker_toggle()
+        elif btn == "BTN_UP":
             pos = self.app.get_position_status()
             if pos == "Good":
                 self.manager.transition_to("RECORDING_2_IN_POS")
@@ -268,6 +282,7 @@ class StopRecordState(State):
     def on_button(self, btn: str):
         if btn == "BTN_RIGHT":
             self.app.stop_collection()
+            self.manager.transition_to("INFERENCE_LOADING")
         elif btn == "BTN_LEFT":
             self.manager.transition_to("RECORDING_1")
 

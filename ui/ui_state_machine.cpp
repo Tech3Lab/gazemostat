@@ -32,9 +32,6 @@ void ui_sm_on_button(Button btn) {
         case Button::BTN_RIGHT:
             g_screen = next_in_main_flow(g_screen);
             break;
-        case Button::BTN_A:
-            g_screen = UiScreen::FIND_POSITION;
-            break;
         case Button::BTN_B:
             g_screen = UiScreen::MONITORING;
             break;

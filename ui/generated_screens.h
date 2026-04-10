@@ -107,6 +107,7 @@ struct UiGazePoint {
 // Dynamic element variables (auto-generated).
 // Update these values at runtime before calling draw_*_screen() / draw_screen().
 static String ui_loading_data = "{Metadata}";
+static String ui_boot_start_btn = "";
 static bool ui_gp_connected = false;
 static bool ui_gp_gaze_data = false;
 static bool ui_position_head = true;
@@ -165,6 +166,7 @@ static inline String ui_normalize_dynamic_text(const String &s) {
 // Dynamic variables (auto-generated).
 enum class UiDynamicVar : uint8_t {
   UI_LOADING_DATA,
+  UI_BOOT_START_BTN,
   UI_GP_CONNECTED,
   UI_GP_GAZE_DATA,
   UI_POSITION_HEAD,
@@ -261,6 +263,7 @@ template <> inline void ui_set<UiGazePoint>(UiDynamicVar var, const UiGazePoint 
 template <> inline String ui_get<String>(UiDynamicVar var) {
   switch (var) {
     case UiDynamicVar::UI_LOADING_DATA: return ui_loading_data;
+    case UiDynamicVar::UI_BOOT_START_BTN: return ui_boot_start_btn;
     case UiDynamicVar::UI_CALIB_START_BTN: return ui_calib_start_btn;
     case UiDynamicVar::UI_CALIB_NEXT_BTN: return ui_calib_next_btn;
     case UiDynamicVar::UI_CALIB_REDO_BTN: return ui_calib_redo_btn;
@@ -285,6 +288,7 @@ template <> inline String ui_get<String>(UiDynamicVar var) {
 template <> inline void ui_set<String>(UiDynamicVar var, const String &value) {
   switch (var) {
     case UiDynamicVar::UI_LOADING_DATA: ui_loading_data = ui_normalize_dynamic_text(value); break;
+    case UiDynamicVar::UI_BOOT_START_BTN: ui_boot_start_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_START_BTN: ui_calib_start_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_NEXT_BTN: ui_calib_next_btn = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CALIB_REDO_BTN: ui_calib_redo_btn = ui_normalize_dynamic_text(value); break;
@@ -455,8 +459,40 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
   {
-    const String ui_text_line = String(F("Start>"));
-    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 91, 119, 1, SSD1327_WHITE);
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_boot_start_btn);
+    const int line_h = 8 * 1;
+    int lines_n = 1;
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') { lines_n++; }
+    }
+    int cy = 119;
+    size_t i = 0;
+    while (i <= ui_dyn_text.length()) {
+      // Count characters in this line (excluding \r).
+      size_t j = i;
+      while (j < ui_dyn_text.length()) {
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
+        if (ch == '\r') { j++; continue; }
+        if (ch == '\n') break;
+        j++;
+      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 91;
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
+      // End of string.
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
+      // Newline.
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
+      // Safety: advance to avoid infinite loop.
+      i++;
+    }
   }
 }
 

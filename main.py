@@ -2385,10 +2385,10 @@ def main():
         nonlocal recording_elapsed_frozen, event_elapsed_frozen
         if not gp.connected:
             set_info_msg("Connect Gazepoint first")
-            return
+            return False
         if calib_quality not in ("ok", "low"):
             set_info_msg("Calibrate first")
-            return
+            return False
         state = "RECORDING_1"
         if led_controller is not None:
             try:
@@ -2403,13 +2403,14 @@ def main():
         event_elapsed_frozen = None
         events = []
         gaze_samples = []
+        return True
 
     def stop_collection_begin_analysis():
         nonlocal state, analyze_t0, per_event_scores, global_score
         nonlocal event_open, next_event_index, event_started_at
         nonlocal results_pages, results_page_index, analysis_total_values, analysis_values_done
         nonlocal recording_elapsed_frozen, event_elapsed_frozen
-        state = "INFERENCE_LOADING"
+        # state is managed by state_machine.py now, but we'll keep the OLED sync just in case
         if led_controller is not None:
             try:
                 led_controller.oled_set_screen("INFERENCE_LOADING")
@@ -2503,13 +2504,11 @@ def main():
         threading.Thread(target=_run, daemon=True).start()
 
     def set_results_state():
-        nonlocal state, results_scroll
-        state = "RESULTS"
-        if led_controller is not None:
-            try:
-                led_controller.oled_set_screen("RESULTS")
-            except Exception:
-                pass
+        nonlocal results_scroll
+        try:
+            state_manager.transition_to("RESULTS")
+        except Exception:
+            pass
         results_scroll = 0.0
 
     def marker_toggle():
@@ -2695,8 +2694,8 @@ def main():
             check_existing_calibration()
         def start_calibration(self, override: str = None) -> None:
             start_calibration(override)
-        def start_collection(self) -> None:
-            start_collection()
+        def start_collection(self) -> bool:
+            return start_collection()
         def stop_collection(self) -> None:
             stop_collection_begin_analysis()
         def marker_toggle(self) -> None:
@@ -2721,6 +2720,10 @@ def main():
             return last_eye_data or {}
         def get_calib_gaze(self) -> list:
             return last_calib_gaze or []
+        def is_gp_connected(self) -> bool:
+            return bool(gp.connected)
+        def is_gp_receiving(self) -> bool:
+            return bool(gp.receiving)
         def get_analysis_progress(self) -> tuple:
             return (analysis_values_done, analysis_total_values, analysis_seconds_per_value)
         def get_results_pages(self) -> list:
@@ -2825,6 +2828,11 @@ def main():
             # Gaze data checkbox reflects whether gaze samples are being received.
             _oled_set_bool("ui_gp_gaze_data", bool(gp.receiving))
             _oled_set_str("ui_loading_data", "")
+            
+            if gp.connected and gp.receiving:
+                _oled_set_str("ui_boot_start_btn", "Start>")
+            else:
+                _oled_set_str("ui_boot_start_btn", "")
 
         # CALIBRATION screen vars
         if state == "CALIBRATION":
@@ -3333,7 +3341,7 @@ def main():
                 # Case A (default): full re-init including eye tracking state.
                 if RP2040_BOOT_REINIT_APP_STATE:
                     reset_app_state()
-                    _set_screen("BOOT")
+                    state_manager.transition_to("BOOT")
                 else:
                     # Case B: keep current pipeline; force OLED resync.
                     try:
