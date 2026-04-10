@@ -20,6 +20,64 @@
 static const uint8_t UI_DESIGNER_W = 128;
 static const uint8_t UI_DESIGNER_H = 128;
 
+// Text helper primitives for UTF-8 chevron glyphs.
+static inline bool ui_match_utf8_chevron_up(const String &s, size_t i) {
+  return (i + 2) < s.length() && (uint8_t)s[i] == 0xE2 && (uint8_t)s[i + 1] == 0x8C && (uint8_t)s[i + 2] == 0x83;
+}
+static inline bool ui_match_utf8_chevron_down(const String &s, size_t i) {
+  return (i + 2) < s.length() && (uint8_t)s[i] == 0xE2 && (uint8_t)s[i + 1] == 0x8C && (uint8_t)s[i + 2] == 0x84;
+}
+static inline int16_t ui_text_cell_advance(uint8_t size) {
+  const int16_t z = size < 1 ? 1 : size;
+  return 6 * z;
+}
+static inline void ui_draw_text_chevron_up(Adafruit_SSD1327 &display, int16_t x, int16_t y, uint8_t size, uint16_t color) {
+  const int16_t z = size < 1 ? 1 : size;
+  display.drawLine(x + 0 * z, y + 4 * z, x + 2 * z, y + 1 * z, color);
+  display.drawLine(x + 2 * z, y + 1 * z, x + 4 * z, y + 4 * z, color);
+}
+static inline void ui_draw_text_chevron_down(Adafruit_SSD1327 &display, int16_t x, int16_t y, uint8_t size, uint16_t color) {
+  const int16_t z = size < 1 ? 1 : size;
+  display.drawLine(x + 0 * z, y + 2 * z, x + 2 * z, y + 5 * z, color);
+  display.drawLine(x + 2 * z, y + 5 * z, x + 4 * z, y + 2 * z, color);
+}
+static inline int ui_text_line_cols(const String &s, size_t start, size_t end) {
+  int cols = 0;
+  for (size_t i = start; i < end;) {
+    const uint8_t ch = (uint8_t)s[i];
+    if (ch == '\r') { i++; continue; }
+    if (ui_match_utf8_chevron_up(s, i) || ui_match_utf8_chevron_down(s, i)) { cols++; i += 3; continue; }
+    cols++;
+    i++;
+  }
+  return cols;
+}
+static inline void ui_draw_text_span(Adafruit_SSD1327 &display, const String &s, size_t start, size_t end, int16_t x, int16_t y, uint8_t size, uint16_t color = SSD1327_WHITE) {
+  int16_t cx = x;
+  const int16_t adv = ui_text_cell_advance(size);
+  for (size_t i = start; i < end;) {
+    if (ui_match_utf8_chevron_up(s, i)) {
+      ui_draw_text_chevron_up(display, cx, y, size, color);
+      cx += adv;
+      i += 3;
+      continue;
+    }
+    if (ui_match_utf8_chevron_down(s, i)) {
+      ui_draw_text_chevron_down(display, cx, y, size, color);
+      cx += adv;
+      i += 3;
+      continue;
+    }
+    const uint8_t ch = (uint8_t)s[i];
+    if (ch != '\r') {
+      display.setCursor(cx, y);
+      display.write(ch);
+      cx += adv;
+    }
+    i++;
+  }
+}
+
 // Available screens (auto-generated).
 enum class UiScreen : uint8_t {
   LOADING = 0,
@@ -30,11 +88,14 @@ enum class UiScreen : uint8_t {
   IN_POSITION = 5,
   CALIBRATION = 6,
   RECORD_CONFIRMATION = 7,
-  RECORDING = 8,
-  STOP_RECORD = 9,
-  INFERENCE_LOADING = 10,
-  RESULTS = 11,
-  MONITORING = 12,
+  RECORDING_1 = 8,
+  RECORDING_2_IN_POS = 9,
+  RECORDING_2_CLOSER = 10,
+  RECORDING_2_FARTHER = 11,
+  RECORDING_3 = 12,
+  STOP_RECORD = 13,
+  INFERENCE_LOADING = 14,
+  RESULTS = 15,
 };
 
 // Dynamic type for gaze path coordinates.
@@ -60,6 +121,12 @@ static String ui_calib_result = "";
 static String ui_recording_timer = "02:23";
 static String ui_event_time = "00:24";
 static String ui_event_name = "STOP EVENT 3";
+static bool ui_event_button_rect = true;
+static String ui_event_counter = "2";
+static bool ui_left_eye = true;
+static bool ui_right_eye = true;
+static String ui_position_txt = "IN\nPOSITION";
+static UiGazePoint ui_gaze_point = {23, 11};
 static String ui_close_event_warning = "Event marker 29 will\nbe closed\nautomatically";
 static String ui_inference_timer = "02:34";
 static int16_t ui_inference_prog_bar = 50;
@@ -70,10 +137,6 @@ static String ui_result_2 = "TEXT";
 static String ui_result_3 = "TEXT";
 static String ui_result_4 = "TEXT";
 static String ui_results_prev_btn = "<Previous";
-static bool ui_left_eye = true;
-static bool ui_right_eye = true;
-static String ui_text_el_269 = "Good";
-static UiGazePoint ui_gaze_point = {23, 11};
 
 // Helper for dynamic text: interpret literal \n / \r sequences as newlines.
 // This is useful when values come from JSON/serial protocols that escape newlines.
@@ -116,6 +179,12 @@ enum class UiDynamicVar : uint8_t {
   UI_RECORDING_TIMER,
   UI_EVENT_TIME,
   UI_EVENT_NAME,
+  UI_EVENT_BUTTON_RECT,
+  UI_EVENT_COUNTER,
+  UI_LEFT_EYE,
+  UI_RIGHT_EYE,
+  UI_POSITION_TXT,
+  UI_GAZE_POINT,
   UI_CLOSE_EVENT_WARNING,
   UI_INFERENCE_TIMER,
   UI_INFERENCE_PROG_BAR,
@@ -126,10 +195,6 @@ enum class UiDynamicVar : uint8_t {
   UI_RESULT_3,
   UI_RESULT_4,
   UI_RESULTS_PREV_BTN,
-  UI_LEFT_EYE,
-  UI_RIGHT_EYE,
-  UI_TEXT_EL_269,
-  UI_GAZE_POINT,
 };
 
 // Generic fallback: unknown types/vars return default and do nothing.
@@ -145,6 +210,7 @@ template <> inline bool ui_get<bool>(UiDynamicVar var) {
     case UiDynamicVar::UI_LED_UP_RIGHT: return ui_led_up_right;
     case UiDynamicVar::UI_LED_BOTTOM_RIGHT: return ui_led_bottom_right;
     case UiDynamicVar::UI_LED_BOTTOM_LEFT: return ui_led_bottom_left;
+    case UiDynamicVar::UI_EVENT_BUTTON_RECT: return ui_event_button_rect;
     case UiDynamicVar::UI_LEFT_EYE: return ui_left_eye;
     case UiDynamicVar::UI_RIGHT_EYE: return ui_right_eye;
     default: return false;
@@ -159,6 +225,7 @@ template <> inline void ui_set<bool>(UiDynamicVar var, const bool &value) {
     case UiDynamicVar::UI_LED_UP_RIGHT: ui_led_up_right = value; break;
     case UiDynamicVar::UI_LED_BOTTOM_RIGHT: ui_led_bottom_right = value; break;
     case UiDynamicVar::UI_LED_BOTTOM_LEFT: ui_led_bottom_left = value; break;
+    case UiDynamicVar::UI_EVENT_BUTTON_RECT: ui_event_button_rect = value; break;
     case UiDynamicVar::UI_LEFT_EYE: ui_left_eye = value; break;
     case UiDynamicVar::UI_RIGHT_EYE: ui_right_eye = value; break;
     default: break;
@@ -201,6 +268,8 @@ template <> inline String ui_get<String>(UiDynamicVar var) {
     case UiDynamicVar::UI_RECORDING_TIMER: return ui_recording_timer;
     case UiDynamicVar::UI_EVENT_TIME: return ui_event_time;
     case UiDynamicVar::UI_EVENT_NAME: return ui_event_name;
+    case UiDynamicVar::UI_EVENT_COUNTER: return ui_event_counter;
+    case UiDynamicVar::UI_POSITION_TXT: return ui_position_txt;
     case UiDynamicVar::UI_CLOSE_EVENT_WARNING: return ui_close_event_warning;
     case UiDynamicVar::UI_INFERENCE_TIMER: return ui_inference_timer;
     case UiDynamicVar::UI_RESULTS_TITLE: return ui_results_title;
@@ -210,7 +279,6 @@ template <> inline String ui_get<String>(UiDynamicVar var) {
     case UiDynamicVar::UI_RESULT_3: return ui_result_3;
     case UiDynamicVar::UI_RESULT_4: return ui_result_4;
     case UiDynamicVar::UI_RESULTS_PREV_BTN: return ui_results_prev_btn;
-    case UiDynamicVar::UI_TEXT_EL_269: return ui_text_el_269;
     default: return String("");
   }
 }
@@ -224,6 +292,8 @@ template <> inline void ui_set<String>(UiDynamicVar var, const String &value) {
     case UiDynamicVar::UI_RECORDING_TIMER: ui_recording_timer = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_EVENT_TIME: ui_event_time = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_EVENT_NAME: ui_event_name = ui_normalize_dynamic_text(value); break;
+    case UiDynamicVar::UI_EVENT_COUNTER: ui_event_counter = ui_normalize_dynamic_text(value); break;
+    case UiDynamicVar::UI_POSITION_TXT: ui_position_txt = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_CLOSE_EVENT_WARNING: ui_close_event_warning = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_INFERENCE_TIMER: ui_inference_timer = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_RESULTS_TITLE: ui_results_title = ui_normalize_dynamic_text(value); break;
@@ -233,7 +303,6 @@ template <> inline void ui_set<String>(UiDynamicVar var, const String &value) {
     case UiDynamicVar::UI_RESULT_3: ui_result_3 = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_RESULT_4: ui_result_4 = ui_normalize_dynamic_text(value); break;
     case UiDynamicVar::UI_RESULTS_PREV_BTN: ui_results_prev_btn = ui_normalize_dynamic_text(value); break;
-    case UiDynamicVar::UI_TEXT_EL_269: ui_text_el_269 = ui_normalize_dynamic_text(value); break;
     default: break;
   }
 }
@@ -270,25 +339,23 @@ inline void draw_loading_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 34;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -298,10 +365,14 @@ inline void draw_loading_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(40, 15);
-  display.print(F("LOADING,"));
-  display.setCursor(22, 23);
-  display.print(F("PLEASE WAIT..."));
+  {
+    const String ui_text_line = String(F("LOADING,"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 40, 15, 1, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("PLEASE WAIT..."));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 22, 23, 1, SSD1327_WHITE);
+  }
 }
 
 // Screen 1: boot
@@ -323,18 +394,24 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(21, 40);
-  display.print(F("GP connected"));
+  {
+    const String ui_text_line = String(F("GP connected"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 21, 40, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(21, 57);
-  display.print(F("GP gaze data"));
+  {
+    const String ui_text_line = String(F("GP gaze data"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 21, 57, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(34, 12);
-  display.print(F("LOADING..."));
+  {
+    const String ui_text_line = String(F("LOADING..."));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 34, 12, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -351,25 +428,23 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 40;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -379,8 +454,10 @@ inline void draw_boot_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(91, 119);
-  display.print(F("Start>"));
+  {
+    const String ui_text_line = String(F("Start>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 91, 119, 1, SSD1327_WHITE);
+  }
 }
 
 // Screen 2: find_position
@@ -390,8 +467,10 @@ inline void draw_find_position_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("POSITION SUBJECT"));
+  {
+    const String ui_text_line = String(F("POSITION SUBJECT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 3, 4, 1, SSD1327_WHITE);
+  }
   display.drawRoundRect(37, 31, 54, 25, 3, SSD1327_WHITE);
   {
     const int x1 = 36, y1 = 63, x2 = 91, y2 = 64;
@@ -447,8 +526,10 @@ inline void draw_find_position_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(90, 117);
-  display.print(F("Start>"));
+  {
+    const String ui_text_line = String(F("Start>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 90, 117, 1, SSD1327_WHITE);
+  }
   {
     const int x1 = 86, y1 = 60, x2 = 97, y2 = 104;
     const int dx = x2 - x1;
@@ -474,8 +555,10 @@ inline void draw_move_closer_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("POSITION SUBJECT"));
+  {
+    const String ui_text_line = String(F("POSITION SUBJECT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 3, 4, 1, SSD1327_WHITE);
+  }
   display.drawRoundRect(37, 23, 54, 25, 3, SSD1327_WHITE);
   {
     const int x1 = 36, y1 = 54, x2 = 91, y2 = 55;
@@ -547,10 +630,14 @@ inline void draw_move_closer_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(46, 102);
-  display.print(F("PLEASE"));
-  display.setCursor(31, 110);
-  display.print(F("MOVE CLOSER"));
+  {
+    const String ui_text_line = String(F("PLEASE"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 46, 102, 1, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("MOVE CLOSER"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 31, 110, 1, SSD1327_WHITE);
+  }
   display.drawTriangle(16, 26, 7, 42, 25, 42, SSD1327_WHITE);
   display.drawLine(16, 30, 16, 36, SSD1327_WHITE);
   display.fillRect(15, 39, 2, 2, SSD1327_WHITE);
@@ -563,8 +650,10 @@ inline void draw_move_farther_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("POSITION SUBJECT"));
+  {
+    const String ui_text_line = String(F("POSITION SUBJECT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 3, 4, 1, SSD1327_WHITE);
+  }
   display.drawRoundRect(37, 23, 54, 25, 3, SSD1327_WHITE);
   {
     const int x1 = 36, y1 = 54, x2 = 91, y2 = 55;
@@ -636,10 +725,14 @@ inline void draw_move_farther_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(46, 102);
-  display.print(F("PLEASE"));
-  display.setCursor(28, 110);
-  display.print(F("MOVE FARTHER"));
+  {
+    const String ui_text_line = String(F("PLEASE"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 46, 102, 1, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("MOVE FARTHER"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 28, 110, 1, SSD1327_WHITE);
+  }
   display.drawTriangle(16, 26, 7, 42, 25, 42, SSD1327_WHITE);
   display.drawLine(16, 30, 16, 36, SSD1327_WHITE);
   display.fillRect(15, 39, 2, 2, SSD1327_WHITE);
@@ -652,8 +745,10 @@ inline void draw_in_position_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("POSITION SUBJECT"));
+  {
+    const String ui_text_line = String(F("POSITION SUBJECT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 3, 4, 1, SSD1327_WHITE);
+  }
   display.drawRoundRect(37, 23, 54, 25, 3, SSD1327_WHITE);
   {
     const int x1 = 36, y1 = 54, x2 = 91, y2 = 55;
@@ -725,18 +820,24 @@ inline void draw_in_position_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(37, 97);
-  display.print(F("YOU'RE IN"));
-  display.setCursor(40, 105);
-  display.print(F("POSITION"));
+  {
+    const String ui_text_line = String(F("YOU'RE IN"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 37, 97, 1, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("POSITION"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 40, 105, 1, SSD1327_WHITE);
+  }
   display.drawCircle(16, 36, 8, SSD1327_WHITE);
   display.drawLine(12, 36, 15, 39, SSD1327_WHITE);
   display.drawLine(15, 39, 20, 33, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(55, 119);
-  display.print(F("Calibration>"));
+  {
+    const String ui_text_line = String(F("Calibration>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 119, 1, SSD1327_WHITE);
+  }
 }
 
 // Screen 6: calibration
@@ -758,46 +859,44 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
-      const int x0 = 18;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 20;
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
   }
-  display.drawCircle(7, 11, 5, SSD1327_WHITE);
+  display.drawCircle(9, 31, 5, SSD1327_WHITE);
   if (ui_led_up_left) {
-    display.fillCircle(7, 11, 4, SSD1327_WHITE);
+    display.fillCircle(9, 31, 4, SSD1327_WHITE);
   }
-  display.drawCircle(119, 11, 5, SSD1327_WHITE);
+  display.drawCircle(118, 31, 5, SSD1327_WHITE);
   if (ui_led_up_right) {
-    display.fillCircle(119, 11, 4, SSD1327_WHITE);
+    display.fillCircle(118, 31, 4, SSD1327_WHITE);
   }
-  display.drawCircle(120, 77, 5, SSD1327_WHITE);
+  display.drawCircle(118, 91, 5, SSD1327_WHITE);
   if (ui_led_bottom_right) {
-    display.fillCircle(120, 77, 4, SSD1327_WHITE);
+    display.fillCircle(118, 91, 4, SSD1327_WHITE);
   }
-  display.drawCircle(8, 77, 5, SSD1327_WHITE);
+  display.drawCircle(10, 91, 5, SSD1327_WHITE);
   if (ui_led_bottom_left) {
-    display.fillCircle(8, 77, 4, SSD1327_WHITE);
+    display.fillCircle(10, 91, 4, SSD1327_WHITE);
   }
   display.setTextSize(1);
   display.setTextWrap(false);
@@ -815,25 +914,23 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 96;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -856,25 +953,23 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 2;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -894,35 +989,41 @@ inline void draw_calibration_screen(Adafruit_SSD1327 &display) {
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (21 - (lines_n * line_h)) / 2);
-    int cy = 30 + oy;
+    int cy = 52 + oy;
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 25 + max(0, (77 - (cols * 6 * 2)) / 2);
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 2, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
   }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("CALIBRATION"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 3, 4, 1, SSD1327_WHITE);
+  }
+  display.drawLine(0, 15, 125, 15, SSD1327_WHITE);
 }
 
 // Screen 7: record_confirmation
@@ -931,29 +1032,37 @@ inline void draw_record_confirmation_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(15, 59);
-  display.print(F("READY TO RECORD?"));
+  {
+    const String ui_text_line = String(F("READY TO RECORD?"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 15, 59, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(91, 118);
-  display.print(F("Start>"));
+  {
+    const String ui_text_line = String(F("Start>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 91, 118, 1, SSD1327_WHITE);
+  }
 }
 
-// Screen 8: recording
-inline void draw_recording_screen(Adafruit_SSD1327 &display) {
+// Screen 8: recording_1
+inline void draw_recording_1_screen(Adafruit_SSD1327 &display) {
   display.clearDisplay();
   display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("RECORDING..."));
+  {
+    const String ui_text_line = String(F("REC... / EVENT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(37, 118);
-  display.print(F("Stop recording>"));
+  {
+    const String ui_text_line = String(F("1/3"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 115, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -966,29 +1075,27 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
-    int cy = 47;
+    int cy = 25;
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
-      const int x0 = 89;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 88;
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -998,13 +1105,17 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(9, 47);
-  display.print(F("TOTAL TIME:"));
+  {
+    const String ui_text_line = String(F("TOTAL TIME:"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 8, 25, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(9, 59);
-  display.print(F("EVENT TIME:"));
+  {
+    const String ui_text_line = String(F("EVENT TIME:"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 8, 44, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -1017,29 +1128,27 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
       if (ch == '\r') continue;
       if (ch == '\n') { lines_n++; }
     }
-    int cy = 59;
+    int cy = 44;
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
-      const int x0 = 89;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 88;
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1062,25 +1171,23 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 34;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1091,35 +1198,644 @@ inline void draw_recording_screen(Adafruit_SSD1327 &display) {
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(19, 89);
-  display.print(F("A"));
-  display.drawRoundRect(9, 83, 109, 20, 3, SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("A"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 19, 89, 1, SSD1327_WHITE);
+  }
+  if (ui_event_button_rect) {
+    display.drawRoundRect(9, 83, 110, 20, 8, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("EVENT COUNT:"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 8, 64, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_event_counter);
+    const int line_h = 8 * 1;
+    int lines_n = 1;
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') { lines_n++; }
+    }
+    const int oy = max(0, (8 - (lines_n * line_h)) / 2);
+    int cy = 64 + oy;
+    size_t i = 0;
+    while (i <= ui_dyn_text.length()) {
+      // Count characters in this line (excluding \r).
+      size_t j = i;
+      while (j < ui_dyn_text.length()) {
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
+        if (ch == '\r') { j++; continue; }
+        if (ch == '\n') break;
+        j++;
+      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 89 + max(0, (31 - (cols * 6 * 1)) / 2);
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
+      // End of string.
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
+      // Newline.
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
+      // Safety: advance to avoid infinite loop.
+      i++;
+    }
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\203"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 43, 117, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\204"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 81, 114, 1, SSD1327_WHITE);
+  }
+  display.drawCircle(45, 119, 5, SSD1327_WHITE);
+  display.drawCircle(83, 119, 5, SSD1327_WHITE);
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("End>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 102, 118, 1, SSD1327_WHITE);
+  }
 }
 
-// Screen 9: stop_record
-inline void draw_stop_record_screen(Adafruit_SSD1327 &display) {
+// Screen 9: recording_2_in_pos
+inline void draw_recording_2_in_pos_screen(Adafruit_SSD1327 &display) {
   display.clearDisplay();
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(102, 118);
-  display.print(F("Yes>"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(22, 42);
-  display.print(F("End recording?"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(2, 118);
-  display.print(F("<No"));
   display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(3, 4);
-  display.print(F("RECORDING..."));
+  {
+    const String ui_text_line = String(F("REC... / MONITOR"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("2/3"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 115, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\203"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 43, 117, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\204"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 81, 114, 1, SSD1327_WHITE);
+  }
+  display.drawCircle(45, 119, 5, SSD1327_WHITE);
+  display.drawCircle(83, 119, 5, SSD1327_WHITE);
+  display.drawRoundRect(10, 28, 40, 23, 3, SSD1327_WHITE);
+  {
+    const int x1 = 8, y1 = 55, x2 = 50, y2 = 56;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 7, y1 = 89, x2 = 16, y2 = 53;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 44, y1 = 54, x2 = 53, y2 = 90;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 2, y1 = 87, x2 = 58, y2 = 87;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  if (ui_position_head) {
+    display.drawCircle(30, 71, 11, SSD1327_WHITE);
+  }
+  display.drawCircle(77, 67, 8, SSD1327_WHITE);
+  if (ui_left_eye) {
+    display.fillCircle(77, 67, 7, SSD1327_WHITE);
+  }
+  if (ui_right_eye) {
+    display.fillCircle(111, 67, 8, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("LEFT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 65, 50, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("RIGHT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 96, 50, 1, SSD1327_WHITE);
+  }
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_position_txt);
+    const int line_h = 8 * 1;
+    int lines_n = 1;
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') { lines_n++; }
+    }
+    const int oy = max(0, (19 - (lines_n * line_h)) / 2);
+    int cy = 91 + oy;
+    size_t i = 0;
+    while (i <= ui_dyn_text.length()) {
+      // Count characters in this line (excluding \r).
+      size_t j = i;
+      while (j < ui_dyn_text.length()) {
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
+        if (ch == '\r') { j++; continue; }
+        if (ch == '\n') break;
+        j++;
+      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 5 + max(0, (51 - (cols * 6 * 1)) / 2);
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
+      // End of string.
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
+      // Newline.
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
+      // Safety: advance to avoid infinite loop.
+      i++;
+    }
+  }
+  display.drawCircle(30, 39, 7, SSD1327_WHITE);
+  display.drawLine(26, 39, 29, 42, SSD1327_WHITE);
+  display.drawLine(29, 42, 33, 36, SSD1327_WHITE);
+}
+
+// Screen 10: recording_2_closer
+inline void draw_recording_2_closer_screen(Adafruit_SSD1327 &display) {
+  display.clearDisplay();
+  display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("REC... / MONITOR"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("2/3"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 115, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\203"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 43, 117, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\204"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 81, 114, 1, SSD1327_WHITE);
+  }
+  display.drawCircle(45, 119, 5, SSD1327_WHITE);
+  display.drawCircle(83, 119, 5, SSD1327_WHITE);
+  display.drawRoundRect(10, 28, 40, 23, 3, SSD1327_WHITE);
+  {
+    const int x1 = 8, y1 = 55, x2 = 50, y2 = 56;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 7, y1 = 89, x2 = 16, y2 = 53;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 44, y1 = 54, x2 = 53, y2 = 90;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 2, y1 = 87, x2 = 58, y2 = 87;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  if (ui_position_head) {
+    display.drawCircle(30, 78, 11, SSD1327_WHITE);
+  }
+  display.drawCircle(77, 67, 8, SSD1327_WHITE);
+  if (ui_left_eye) {
+    display.fillCircle(77, 67, 7, SSD1327_WHITE);
+  }
+  display.fillCircle(111, 67, 8, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("LEFT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 65, 50, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("RIGHT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 96, 50, 1, SSD1327_WHITE);
+  }
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_position_txt);
+    const int line_h = 8 * 1;
+    int lines_n = 1;
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') { lines_n++; }
+    }
+    const int oy = max(0, (19 - (lines_n * line_h)) / 2);
+    int cy = 91 + oy;
+    size_t i = 0;
+    while (i <= ui_dyn_text.length()) {
+      // Count characters in this line (excluding \r).
+      size_t j = i;
+      while (j < ui_dyn_text.length()) {
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
+        if (ch == '\r') { j++; continue; }
+        if (ch == '\n') break;
+        j++;
+      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 5 + max(0, (51 - (cols * 6 * 1)) / 2);
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
+      // End of string.
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
+      // Newline.
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
+      // Safety: advance to avoid infinite loop.
+      i++;
+    }
+  }
+  display.drawTriangle(29, 32, 22, 44, 36, 44, SSD1327_WHITE);
+  display.drawLine(29, 35, 29, 40, SSD1327_WHITE);
+  display.fillRect(28, 42, 2, 2, SSD1327_WHITE);
+}
+
+// Screen 11: recording_2_farther
+inline void draw_recording_2_farther_screen(Adafruit_SSD1327 &display) {
+  display.clearDisplay();
+  display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("REC... / MONITOR"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("2/3"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 115, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\203"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 43, 117, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\204"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 81, 114, 1, SSD1327_WHITE);
+  }
+  display.drawCircle(45, 119, 5, SSD1327_WHITE);
+  display.drawCircle(83, 119, 5, SSD1327_WHITE);
+  display.drawRoundRect(10, 28, 40, 23, 3, SSD1327_WHITE);
+  {
+    const int x1 = 8, y1 = 55, x2 = 50, y2 = 56;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 7, y1 = 89, x2 = 16, y2 = 53;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 44, y1 = 54, x2 = 53, y2 = 90;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  {
+    const int x1 = 2, y1 = 87, x2 = 58, y2 = 87;
+    const int dx = x2 - x1;
+    const int dy = y2 - y1;
+    const int n = max(abs(dx), abs(dy));
+    if (n == 0) {
+      display.drawPixel(x1, y1, SSD1327_WHITE);
+    } else {
+      for (int i = 0; i <= n; i++) {
+        if (((i / 2) % 2) != 0) continue; // 2 on, 2 off
+        const int px = x1 + (dx * i) / n;
+        const int py = y1 + (dy * i) / n;
+        display.drawPixel(px, py, SSD1327_WHITE);
+      }
+    }
+  }
+  if (ui_position_head) {
+    display.drawCircle(30, 64, 11, SSD1327_WHITE);
+  }
+  display.drawCircle(77, 67, 8, SSD1327_WHITE);
+  if (ui_left_eye) {
+    display.fillCircle(77, 67, 7, SSD1327_WHITE);
+  }
+  display.fillCircle(111, 67, 8, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("LEFT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 65, 50, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("RIGHT"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 96, 50, 1, SSD1327_WHITE);
+  }
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_dyn_text = ui_normalize_dynamic_text(ui_position_txt);
+    const int line_h = 8 * 1;
+    int lines_n = 1;
+    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
+      const char ch = ui_dyn_text[i];
+      if (ch == '\r') continue;
+      if (ch == '\n') { lines_n++; }
+    }
+    const int oy = max(0, (19 - (lines_n * line_h)) / 2);
+    int cy = 91 + oy;
+    size_t i = 0;
+    while (i <= ui_dyn_text.length()) {
+      // Count characters in this line (excluding \r).
+      size_t j = i;
+      while (j < ui_dyn_text.length()) {
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
+        if (ch == '\r') { j++; continue; }
+        if (ch == '\n') break;
+        j++;
+      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 5 + max(0, (51 - (cols * 6 * 1)) / 2);
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
+      // End of string.
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
+      // Newline.
+      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
+      // Safety: advance to avoid infinite loop.
+      i++;
+    }
+  }
+  display.drawTriangle(29, 32, 22, 44, 36, 44, SSD1327_WHITE);
+  display.drawLine(29, 35, 29, 40, SSD1327_WHITE);
+  display.fillRect(28, 42, 2, 2, SSD1327_WHITE);
+}
+
+// Screen 12: recording_3
+inline void draw_recording_3_screen(Adafruit_SSD1327 &display) {
+  display.clearDisplay();
+  display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("REC... / GAZE VIEW"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("3/3"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 55, 115, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\203"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 43, 117, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("\342\214\204"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 81, 114, 1, SSD1327_WHITE);
+  }
+  display.drawCircle(45, 119, 5, SSD1327_WHITE);
+  display.drawCircle(83, 119, 5, SSD1327_WHITE);
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
+  display.drawRect(4, 28, 120, 72, SSD1327_WHITE);
+  {
+    const int gx = max(1, min(118, (int)ui_gaze_point.x));
+    const int gy = max(1, min(70, (int)ui_gaze_point.y));
+    display.fillRect(4 + gx - 1, 28 + gy - 1, 3, 3, SSD1327_WHITE);
+  }
+}
+
+// Screen 13: stop_record
+inline void draw_stop_record_screen(Adafruit_SSD1327 &display) {
+  display.clearDisplay();
+  display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("REC... / GAZE VIEW"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 12, 4, 1, SSD1327_WHITE);
+  }
+  display.fillCircle(6, 7, 2, SSD1327_WHITE);
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -1133,47 +1849,78 @@ inline void draw_stop_record_screen(Adafruit_SSD1327 &display) {
       if (ch == '\n') { lines_n++; }
     }
     const int oy = max(0, (30 - (lines_n * line_h)) / 2);
-    int cy = 68 + oy;
+    int cy = 82 + oy;
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
-      const int x0 = 0 + max(0, (128 - (cols * 6 * 1)) / 2);
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
+      const int x0 = 1 + max(0, (126 - (cols * 6 * 1)) / 2);
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
   }
+  display.setTextSize(2);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("READY TO"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 16, 25, 2, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("END"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 46, 41, 2, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("RECORDING?"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 4, 57, 2, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("<back"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 2, 118, 1, SSD1327_WHITE);
+  }
+  display.setTextSize(1);
+  display.setTextWrap(false);
+  display.setTextColor(SSD1327_WHITE);
+  {
+    const String ui_text_line = String(F("End>"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 102, 118, 1, SSD1327_WHITE);
+  }
 }
 
-// Screen 10: inference_loading
+// Screen 14: inference_loading
 inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
-  display.setCursor(34, 23);
-  display.print(F("ANALYSING,"));
-  display.setCursor(22, 31);
-  display.print(F("PLEASE WAIT..."));
+  {
+    const String ui_text_line = String(F("ANALYSING,"));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 34, 23, 1, SSD1327_WHITE);
+  }
+  {
+    const String ui_text_line = String(F("PLEASE WAIT..."));
+    ui_draw_text_span(display, ui_text_line, 0, ui_text_line.length(), 22, 31, 1, SSD1327_WHITE);
+  }
   display.setTextSize(1);
   display.setTextWrap(false);
   display.setTextColor(SSD1327_WHITE);
@@ -1191,25 +1938,23 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 34 + max(0, (60 - (cols * 6 * 1)) / 2);
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1232,25 +1977,23 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 89;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1265,7 +2008,7 @@ inline void draw_inference_loading_screen(Adafruit_SSD1327 &display) {
   }
 }
 
-// Screen 11: results
+// Screen 15: results
 inline void draw_results_screen(Adafruit_SSD1327 &display) {
   display.clearDisplay();
   display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
@@ -1286,25 +2029,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 3 + max(0, (85 - (cols * 6 * 1)) / 2);
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1327,25 +2068,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 97;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1368,25 +2107,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 3;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1409,25 +2146,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 3;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1450,25 +2185,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 3;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1491,25 +2224,23 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 3;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
@@ -1532,112 +2263,28 @@ inline void draw_results_screen(Adafruit_SSD1327 &display) {
     size_t i = 0;
     while (i <= ui_dyn_text.length()) {
       // Count characters in this line (excluding \r).
-      int cols = 0;
       size_t j = i;
       while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
+        if (ui_match_utf8_chevron_up(ui_dyn_text, j) || ui_match_utf8_chevron_down(ui_dyn_text, j)) {
+          j += 3;
+          continue;
+        }
+        const uint8_t ch = (uint8_t)ui_dyn_text[j];
         if (ch == '\r') { j++; continue; }
         if (ch == '\n') break;
-        cols++;
         j++;
       }
+      const int cols = ui_text_line_cols(ui_dyn_text, i, j);
       const int x0 = 2;
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
+      ui_draw_text_span(display, ui_dyn_text, i, j, x0, cy, 1, SSD1327_WHITE);
       // End of string.
-      if (i >= ui_dyn_text.length()) break;
+      if (j >= ui_dyn_text.length()) break;
+      i = j;
       // Newline.
       if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
       // Safety: advance to avoid infinite loop.
       i++;
     }
-  }
-}
-
-// Screen 12: monitoring
-inline void draw_monitoring_screen(Adafruit_SSD1327 &display) {
-  display.clearDisplay();
-  display.drawLine(0, 15, 127, 15, SSD1327_WHITE);
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(4, 3);
-  display.print(F("MONITORING"));
-  display.drawCircle(50, 104, 8, SSD1327_WHITE);
-  if (ui_left_eye) {
-    display.fillCircle(50, 104, 7, SSD1327_WHITE);
-  }
-  display.drawCircle(79, 104, 8, SSD1327_WHITE);
-  if (ui_right_eye) {
-    display.fillCircle(79, 104, 7, SSD1327_WHITE);
-  }
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(31, 100);
-  display.print(F("L"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(93, 100);
-  display.print(F("R"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  display.setCursor(9, 117);
-  display.print(F("Position:"));
-  display.setTextSize(1);
-  display.setTextWrap(false);
-  display.setTextColor(SSD1327_WHITE);
-  {
-    const String ui_dyn_text = ui_normalize_dynamic_text(ui_text_el_269);
-    const int line_h = 8 * 1;
-    int lines_n = 1;
-    for (size_t i = 0; i < ui_dyn_text.length(); i++) {
-      const char ch = ui_dyn_text[i];
-      if (ch == '\r') continue;
-      if (ch == '\n') { lines_n++; }
-    }
-    const int oy = max(0, (8 - (lines_n * line_h)) / 2);
-    int cy = 117 + oy;
-    size_t i = 0;
-    while (i <= ui_dyn_text.length()) {
-      // Count characters in this line (excluding \r).
-      int cols = 0;
-      size_t j = i;
-      while (j < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[j];
-        if (ch == '\r') { j++; continue; }
-        if (ch == '\n') break;
-        cols++;
-        j++;
-      }
-      const int x0 = 69 + max(0, (51 - (cols * 6 * 1)) / 2);
-      display.setCursor(x0, cy);
-      // Write this line.
-      while (i < j && i < ui_dyn_text.length()) {
-        const char ch = ui_dyn_text[i];
-        if (ch != '\r') display.write(ch);
-        i++;
-      }
-      // End of string.
-      if (i >= ui_dyn_text.length()) break;
-      // Newline.
-      if (ui_dyn_text[i] == '\n') { i++; cy += line_h; continue; }
-      // Safety: advance to avoid infinite loop.
-      i++;
-    }
-  }
-  display.drawRect(4, 21, 120, 72, SSD1327_WHITE);
-  {
-    const int gx = max(1, min(118, (int)ui_gaze_point.x));
-    const int gy = max(1, min(70, (int)ui_gaze_point.y));
-    display.fillRect(4 + gx - 1, 21 + gy - 1, 3, 3, SSD1327_WHITE);
   }
 }
 
@@ -1652,11 +2299,14 @@ inline void draw_screen(Adafruit_SSD1327 &display, UiScreen screen) {
     case UiScreen::IN_POSITION: draw_in_position_screen(display); break;
     case UiScreen::CALIBRATION: draw_calibration_screen(display); break;
     case UiScreen::RECORD_CONFIRMATION: draw_record_confirmation_screen(display); break;
-    case UiScreen::RECORDING: draw_recording_screen(display); break;
+    case UiScreen::RECORDING_1: draw_recording_1_screen(display); break;
+    case UiScreen::RECORDING_2_IN_POS: draw_recording_2_in_pos_screen(display); break;
+    case UiScreen::RECORDING_2_CLOSER: draw_recording_2_closer_screen(display); break;
+    case UiScreen::RECORDING_2_FARTHER: draw_recording_2_farther_screen(display); break;
+    case UiScreen::RECORDING_3: draw_recording_3_screen(display); break;
     case UiScreen::STOP_RECORD: draw_stop_record_screen(display); break;
     case UiScreen::INFERENCE_LOADING: draw_inference_loading_screen(display); break;
     case UiScreen::RESULTS: draw_results_screen(display); break;
-    case UiScreen::MONITORING: draw_monitoring_screen(display); break;
     default: draw_loading_screen(display); break;
   }
 }

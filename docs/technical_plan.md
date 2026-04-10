@@ -47,7 +47,7 @@ The host app also connects to the **Gazepoint** eye tracker API over TCP and may
 - **Important invariant**: `draw_*_screen()` / `draw_screen()` do **not** call `display.display()`.
   - Firmware must call `display.display()` once per frame after drawing.
 - Dynamic UI variables are simple globals in `ui/generated_screens.h`.
-  - Auto-generated vars cover boot (e.g. `ui_gp_connected`, `ui_gp_gaze_data`), calibration (`ui_led_up_left`, etc., `ui_calib_*`), recording (`ui_recording_timer`, `ui_event_time`, `ui_event_name`), stop-record warning (`ui_close_event_warning`), inference (`ui_inference_prog_bar`, `ui_inference_timer`), results (`ui_result_1`–`ui_result_4`, `ui_results_*`), and monitoring (`ui_left_eye`, `ui_right_eye`, `ui_gaze_point`, `ui_text_el_269` for position status).
+  - Auto-generated vars cover boot (e.g. `ui_gp_connected`, `ui_gp_gaze_data`), calibration (`ui_led_up_left`, `ui_calib_*`), recording flow (`ui_recording_timer`, `ui_event_time`, `ui_event_name`, `ui_event_button_rect`, `ui_event_counter`, `ui_left_eye`, `ui_right_eye`, `ui_position_txt`, `ui_gaze_point`), stop-record warning (`ui_close_event_warning`), inference (`ui_inference_prog_bar`, `ui_inference_timer`), and results (`ui_result_1`–`ui_result_4`, `ui_results_*`).
   - Host drives screen and vars via `OLED:UI:SCREEN:<name>` and `OLED:UI:SET:BOOL|U8|STR:<var>:<value>`.
 
 **Note on regenerating UI**: If the UI designer regenerates `ui/generated_screens.h`, ensure the firmware’s `dynamicVarFromString()` in `firmware.ino` still recognizes any vars used by the host (aliases like `ui_close_event_warning` / `ui_closed_event_warning`, `ui_text_el_269` / `ui_position_status`, and `ui_gaze_x`/`ui_gaze_y` mapped to `ui_gaze_point` are handled there).
@@ -75,7 +75,7 @@ Line-based commands, `:`-separated, newline terminated.
   - `OLED:FEEDBACK:ON|OFF|STATUS`
   - `OLED:UI:STATE:<tracker>:<led>:<connection>:<calib>` (legacy/back-compat; `<calib>` ignored in v3)
   - `OLED:UI:SCREEN:<screen_name>`
-    - Screen names (v3): `LOADING`, `BOOT`, `FIND_POSITION`, `MOVE_CLOSER`, `MOVE_FARTHER`, `IN_POSITION`, `CALIBRATION`, `RECORD_CONFIRMATION`, `RECORDING`, `STOP_RECORD`, `INFERENCE_LOADING`, `RESULTS`, `MONITORING`
+    - Screen names: `LOADING`, `BOOT`, `FIND_POSITION`, `MOVE_CLOSER`, `MOVE_FARTHER`, `IN_POSITION`, `CALIBRATION`, `RECORD_CONFIRMATION`, `RECORDING_1`, `RECORDING_2_IN_POS`, `RECORDING_2_CLOSER`, `RECORDING_2_FARTHER`, `RECORDING_3`, `STOP_RECORD`, `INFERENCE_LOADING`, `RESULTS`
   - `OLED:UI:SET:BOOL:<var_name>:<0|1>`
   - `OLED:UI:SET:U8:<var_name>:<0..255>`
   - `OLED:UI:SET:STR:<var_name>:<value...>`
@@ -103,8 +103,8 @@ Line-based commands, `:`-separated, newline terminated.
 
 The host owns the screen/state machine and drives both the OLED (via serial) and the Pygame window using the same pipeline screens:
 
-- `BOOT` → `FIND_POSITION` → (`MOVE_CLOSER`/`MOVE_FARTHER`/`IN_POSITION`) → `CALIBRATION` → `RECORD_CONFIRMATION` → `RECORDING` → `STOP_RECORD` → `INFERENCE_LOADING` → `RESULTS`
-- Modal: holding `BTN_B` enters `MONITORING` and releasing returns to previous screen.
+- `BOOT` → `FIND_POSITION` → (`MOVE_CLOSER`/`MOVE_FARTHER`/`IN_POSITION`) → `CALIBRATION` → `RECORD_CONFIRMATION` → `RECORDING_1` → (`RECORDING_2_IN_POS`/`RECORDING_2_CLOSER`/`RECORDING_2_FARTHER`) → `RECORDING_3` → `STOP_RECORD` → `INFERENCE_LOADING` → `RESULTS`
+- The old `MONITORING` modal is removed; its eye-status and gaze-preview widgets now live inside the recording sub-screens.
 
 **Head positioning behavior (important):**
 - During the positioning step, the host **continuously re-evaluates** the user’s distance from eye data and updates the OLED hint screen at **200ms** intervals (`MOVE_CLOSER` / `MOVE_FARTHER` / `IN_POSITION`).
@@ -115,9 +115,8 @@ The host owns the screen/state machine and drives both the OLED (via serial) and
 
 Keyboard simulation mapping in `main.py`:
 - `W/A/S/D/X` → joystick up/left/center/right/down
-- `P` → `BTN_A` (event marker toggle while recording)
-- `L` (hold) → `BTN_B` (monitoring modal)
- - `R` → reset app state (same behavior as `BTN_CENTER`)
+- `P` → `BTN_A` (event marker toggle on `RECORDING_1`)
+- `R` → reset app state (same behavior as `BTN_CENTER`)
 
 ### Pygame UI (debug dashboard)
 
@@ -155,7 +154,7 @@ On Windows, use `upload_firmware.py` which:
 - Firmware OLED UI now uses **`ui/generated_screens.h`** (SSD1327 128×128) and no longer contains a demo/navigation state machine.
 - RP2040 now forwards button edge events to the host: `BTN:PRESS:*` / `BTN:RELEASE:*`.
 - Host (`main.py`) now owns the FLOW pipeline state machine and drives OLED screens/vars via `OLED:UI:*` commands.
-- Host terminology is now **events** (not tasks) and recording shows both **recording timer** and **event timer**.
+- Host terminology is now **events** (not tasks), calibration shows binary `Pass` / `Failed` text on `ui_calib_result`, and recording is split across `RECORDING_1` / `RECORDING_2_*` / `RECORDING_3` / `STOP_RECORD`.
 - Model/inference outputs are now **4 values for global results followed by 4 values per event** (up to 10 event slots).
 - Mock inference generates **4 values** per page (`val1..val4`) at **~3 seconds per value** and displays progress/ETA.
 - Calibration quality is displayed as a **percentage** (derived from `average_error`).

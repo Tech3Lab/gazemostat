@@ -7,6 +7,7 @@ import threading
 import queue
 import socket
 import csv
+import json
 import random
 from datetime import datetime
 from pathlib import Path
@@ -2047,12 +2048,10 @@ def main():
     calib_status = "red"
     receiving_hint = False
 
-    # FLOW screen id (matches ui/v3 UiScreen names).
+    # FLOW screen id (matches ui/generated_screens.h).
     # BOOT -> FIND_POSITION -> (MOVE_*/IN_POSITION) -> CALIBRATION -> RECORD_CONFIRMATION ->
-    # RECORDING -> STOP_RECORD -> INFERENCE_LOADING -> RESULTS, with MONITORING as a BTN_B-held modal.
+    # RECORDING_1 -> RECORDING_2_* -> RECORDING_3 -> STOP_RECORD -> INFERENCE_LOADING -> RESULTS.
     state = "BOOT"
-    prev_state = None  # for MONITORING modal
-    monitoring_active = False
     running = True
     # Manual window resize (windowed mode only): drag bottom-right grip
     resizing = False
@@ -2390,10 +2389,10 @@ def main():
         if calib_quality not in ("ok", "low"):
             set_info_msg("Calibrate first")
             return
-        state = "RECORDING"
+        state = "RECORDING_1"
         if led_controller is not None:
             try:
-                led_controller.oled_set_screen("RECORDING")
+                led_controller.oled_set_screen("RECORDING_1")
             except Exception:
                 pass
         session_t0 = time.time()
@@ -2622,6 +2621,26 @@ def main():
             return "Far"
         return "Good"
 
+    def _recording_position_screen_from_status(pos: str = None):
+        """Map current distance status to the recording position sub-screen."""
+        pos = pos or _position_status_from_eye_data()
+        if pos == "Good":
+            return "RECORDING_2_IN_POS"
+        if pos == "Near":
+            return "RECORDING_2_FARTHER"
+        return "RECORDING_2_CLOSER"
+
+    def _is_recording_flow_state(screen_name: str = None):
+        s = screen_name or state
+        return s in (
+            "RECORDING_1",
+            "RECORDING_2_IN_POS",
+            "RECORDING_2_CLOSER",
+            "RECORDING_2_FARTHER",
+            "RECORDING_3",
+            "STOP_RECORD",
+        )
+
     def _set_screen(new_screen: str):
         """Set FLOW screen and update OLED immediately."""
         nonlocal state
@@ -2636,7 +2655,6 @@ def main():
 
     def handle_button(kind: str, btn: str):
         """Handle a button edge event from keyboard or RP2040."""
-        nonlocal prev_state, monitoring_active
         nonlocal results_pages, results_page_index
         kind = (kind or "").upper()
         btn = (btn or "").upper()
@@ -2644,25 +2662,12 @@ def main():
         # Reset button (RP2040 BTN_CENTER / keyboard "S") resets the whole app state.
         # This is intentionally handled before any modal/state gating.
         if kind == "PRESS" and btn == "BTN_CENTER":
-            monitoring_active = False
-            prev_state = None
             reset_app_state()
             _set_screen("BOOT")
             return
 
-        # Modal monitoring (hold BTN_B)
+        # BTN_B is currently unused in the flow.
         if btn == "BTN_B":
-            if kind == "PRESS" and state != "MONITORING":
-                prev_state = state
-                monitoring_active = True
-                _set_screen("MONITORING")
-            elif kind == "RELEASE" and state == "MONITORING":
-                monitoring_active = False
-                _set_screen(prev_state or "BOOT")
-            return
-
-        # Ignore all other inputs while monitoring modal is active
-        if state == "MONITORING":
             return
 
         if kind != "PRESS":
@@ -2716,16 +2721,30 @@ def main():
                 start_collection()
             return
 
-        if state == "RECORDING":
+        if state == "RECORDING_1":
             if btn == "BTN_A":
                 marker_toggle()
+            elif btn == "BTN_DOWN":
+                _set_screen(_recording_position_screen_from_status())
+            return
+
+        if state in ("RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
+            if btn == "BTN_UP":
+                _set_screen("RECORDING_1")
+            elif btn == "BTN_DOWN":
+                _set_screen("RECORDING_3")
+            return
+
+        if state == "RECORDING_3":
+            if btn == "BTN_UP":
+                _set_screen(_recording_position_screen_from_status())
             elif btn == "BTN_RIGHT":
                 _set_screen("STOP_RECORD")
             return
 
         if state == "STOP_RECORD":
             if btn == "BTN_LEFT":
-                _set_screen("RECORDING")
+                _set_screen("RECORDING_1")
             elif btn == "BTN_RIGHT":
                 stop_collection_begin_analysis()
             return
@@ -2826,12 +2845,10 @@ def main():
             _oled_set_str("ui_calib_start_btn", "Start calibration>" if (not running_now and calib_quality == "none") else "")
             _oled_set_str("ui_calib_redo_btn", "<Redo" if done_now else "")
             _oled_set_str("ui_calib_next_btn", "Next>" if (done_now and calib_quality in ("ok", "low")) else "")
-            # Calibration result as raw average error
-            if done_now and calib_quality in ("ok", "low") and calib_avg_error is not None:
-                try:
-                    _oled_set_str("ui_calib_result", f"{float(calib_avg_error):.3f}")
-                except Exception:
-                    _oled_set_str("ui_calib_result", "")
+            if done_now and calib_quality in ("ok", "low"):
+                _oled_set_str("ui_calib_result", "Pass")
+            elif done_now and calib_quality == "failed":
+                _oled_set_str("ui_calib_result", "Failed")
             else:
                 _oled_set_str("ui_calib_result", "")
 
@@ -2853,8 +2870,8 @@ def main():
             _oled_set_bool("ui_led_bottom_left", bl)
             _oled_set_bool("ui_led_bottom_right", br)
 
-        # RECORDING screen vars
-        if state == "RECORDING":
+        # RECORDING_1 screen vars
+        if state == "RECORDING_1":
             total = (time.time() - session_t0) if session_t0 else None
             _oled_set_str("ui_recording_timer", _fmt_mmss(total))
             if event_open and event_started_at is not None:
@@ -2865,6 +2882,39 @@ def main():
                 _oled_set_str("ui_event_time", "--:--")
                 # No open event => next A press will START the next event.
                 _oled_set_str("ui_event_name", f"START EVENT {next_event_index}")
+            _oled_set_bool("ui_event_button_rect", bool(event_open))
+            event_counter = max(0, next_event_index - 1) + (1 if event_open else 0)
+            _oled_set_str("ui_event_counter", str(event_counter))
+
+        # RECORDING_2_* screens
+        if state in ("RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
+            if last_eye_data:
+                left_open = bool(last_eye_data.get("lpv"))
+                right_open = bool(last_eye_data.get("rpv"))
+            else:
+                left_open = False
+                right_open = False
+            _oled_set_bool("ui_left_eye", bool(left_open))
+            _oled_set_bool("ui_right_eye", bool(right_open))
+            pos = _position_status_from_eye_data()
+            if pos == "Good":
+                pos_txt = "IN\nPOSITION"
+            elif pos == "Near":
+                pos_txt = "MOVE\nFARTHER"
+            else:
+                pos_txt = "MOVE\nCLOSER"
+            _oled_set_str("ui_position_txt", pos_txt)
+
+        # RECORDING_3 screen
+        if state == "RECORDING_3":
+            if last_calib_gaze and len(last_calib_gaze) >= 2:
+                gx = max(0.0, min(1.0, float(last_calib_gaze[0])))
+                gy = max(0.0, min(1.0, float(last_calib_gaze[1])))
+                _oled_set_u8("ui_gaze_x", int(gx * 255))
+                _oled_set_u8("ui_gaze_y", int(gy * 255))
+            else:
+                _oled_set_u8("ui_gaze_x", 128)
+                _oled_set_u8("ui_gaze_y", 128)
 
         # INFERENCE_LOADING
         if state == "INFERENCE_LOADING":
@@ -2901,32 +2951,6 @@ def main():
             _oled_set_str("ui_result_3", vals[2])
             _oled_set_str("ui_result_4", vals[3])
 
-        # MONITORING modal
-        if state == "MONITORING":
-            if last_eye_data:
-                lpv_raw = bool(last_eye_data.get("lpv"))
-                rpv_raw = bool(last_eye_data.get("rpv"))
-                lpupild_raw = last_eye_data.get("lpupild")
-                rpupild_raw = last_eye_data.get("rpupild")
-                left_open = bool(lpv_raw)
-                right_open = bool(rpv_raw)
-            else:
-                left_open = False
-                right_open = False
-            _oled_set_bool("ui_left_eye", bool(left_open))
-            _oled_set_bool("ui_right_eye", bool(right_open))
-            pos = _position_status_from_eye_data()
-            # generated_screens.h uses ui_text_el_269 for monitoring position status.
-            _oled_set_str("ui_text_el_269", pos)
-            if last_calib_gaze and len(last_calib_gaze) >= 2:
-                gx = max(0.0, min(1.0, float(last_calib_gaze[0])))
-                gy = max(0.0, min(1.0, float(last_calib_gaze[1])))
-                _oled_set_u8("ui_gaze_x", int(gx * 255))
-                _oled_set_u8("ui_gaze_y", int(gy * 255))
-            else:
-                _oled_set_u8("ui_gaze_x", 128)
-                _oled_set_u8("ui_gaze_y", 128)
-    
     def gpio_button_callback():
         """Called when GPIO marker button is pressed"""
         nonlocal button_pressed_until
@@ -2961,8 +2985,8 @@ def main():
                 draw_circle(screen, calib_status, (cal_x, 30))
         else:
             draw_circle(screen, calib_status, (cal_x, 30))
-        # Middle recording indicator when recording
-        if state == "RECORDING":
+        # Middle recording indicator while the recording flow is active
+        if _is_recording_flow_state():
             mid_x = WIDTH // 2
             # blink at ~2 Hz
             blink_on = (int(time.time() * 2) % 2) == 0
@@ -3242,7 +3266,6 @@ def main():
                     pygame.K_d: "BTN_RIGHT",
                     pygame.K_s: "BTN_CENTER",
                     pygame.K_p: "BTN_A",
-                    pygame.K_l: "BTN_B",
                 }
                 if ev.key in KEY_TO_BTN:
                     k = KEY_TO_BTN[ev.key]
@@ -3266,10 +3289,6 @@ def main():
                     log_key("R")
                     # Keep reset behavior consistent with RP2040 reset button (BTN_CENTER).
                     btn_event_q.put(("PRESS", "BTN_CENTER", "KB"))
-            elif ev.type == pygame.KEYUP:
-                # Only BTN_B is hold-to-monitor in the FLOW.
-                if ev.key == pygame.K_l:
-                    btn_event_q.put(("RELEASE", "BTN_B", "KB"))
             elif ev.type == pygame.MOUSEWHEEL:
                 # Heartbeat/serial panel scrolling.
                 if serial_log_rect_for_input is not None:
@@ -3376,7 +3395,7 @@ def main():
                 s = gp.q.get_nowait()
                 samples_processed += 1
                 
-                if state == "RECORDING":
+                if _is_recording_flow_state():
                     gaze_samples.append(s)
                 
                 # Remember last for preview (include validity) - only keep latest for display
@@ -3413,18 +3432,21 @@ def main():
             print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
                   f"Processed {samples_processed} samples this frame.", file=sys.stderr)
 
-        # Positioning hint screens (not FIND_POSITION): continuously re-evaluate and
-        # update the OLED/UI hint screen. Advancement to CALIBRATION stays RIGHT-press only.
-        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
+        # Positioning hint screens: continuously re-evaluate and update the hint screen.
+        # Advancing to the next stage remains button-driven.
+        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION", "RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
             now = time.time()
             if now >= position_next_eval:
                 pos = _position_status_from_eye_data()
-                if pos == "Good":
-                    desired = "IN_POSITION"
-                elif pos == "Near":
-                    desired = "MOVE_FARTHER"
+                if state in ("RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
+                    desired = _recording_position_screen_from_status(pos)
                 else:
-                    desired = "MOVE_CLOSER"
+                    if pos == "Good":
+                        desired = "IN_POSITION"
+                    elif pos == "Near":
+                        desired = "MOVE_FARTHER"
+                    else:
+                        desired = "MOVE_CLOSER"
                 _set_screen(desired)
                 position_next_eval = now + (float(UI_REFRESH_MS) / 1000.0)
 
@@ -3907,14 +3929,14 @@ def main():
                 y += s.get_height() + 2
             return y
 
-        def _draw_pipeline_diagram(rect: pygame.Rect, state_name: str, monitoring: bool):
+        def _draw_pipeline_diagram(rect: pygame.Rect, state_name: str):
             """Draw the pipeline as boxes, highlighting the current step."""
             steps = [
                 ("BOOT", {"BOOT"}),
                 ("POS", {"FIND_POSITION", "MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"}),
                 ("CAL", {"CALIBRATION"}),
                 ("CONF", {"RECORD_CONFIRMATION"}),
-                ("REC", {"RECORDING", "STOP_RECORD"}),  # STOP_RECORD is still "recording context"
+                ("REC", {"RECORDING_1", "RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER", "RECORDING_3", "STOP_RECORD"}),
                 ("INF", {"INFERENCE_LOADING"}),
                 ("RES", {"RESULTS"}),
             ]
@@ -3943,17 +3965,11 @@ def main():
                 pygame.draw.rect(screen, bd, r, 2, border_radius=6)
                 t = small.render(label, True, (15, 15, 15) if active else (220, 220, 220))
                 screen.blit(t, (r.centerx - t.get_width() // 2, r.centery - t.get_height() // 2))
-            if monitoring:
-                pill = pygame.Rect(x0, y0 + h0 + 6, 78, 18)
-                pygame.draw.rect(screen, (180, 80, 255), pill, border_radius=9)
-                mtxt = small.render("MONITOR", True, (15, 15, 15))
-                screen.blit(mtxt, (pill.centerx - mtxt.get_width() // 2, pill.centery - mtxt.get_height() // 2))
 
         def _shortcuts_lines():
             lines = [
                 "W/A/S/D/X -> UP/LEFT/CENTER/RIGHT/DOWN",
-                "P -> BTN_A marker (RECORDING)",
-                "L hold -> BTN_B monitoring modal",
+                "P -> BTN_A marker (RECORDING_1)",
                 "R -> reset app state, M -> quit",
             ]
             if SIM_GAZE:
@@ -4160,7 +4176,7 @@ def main():
         done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
         # Freeze timers once recording has ended (analysis started).
         if session_t0:
-            if state in ("RECORDING", "STOP_RECORD"):
+            if _is_recording_flow_state():
                 total_t = (time.time() - session_t0)
             else:
                 total_t = recording_elapsed_frozen
@@ -4168,7 +4184,7 @@ def main():
             total_t = None
 
         if event_open and event_started_at is not None:
-            if state in ("RECORDING", "STOP_RECORD"):
+            if _is_recording_flow_state():
                 ev_t = (time.time() - event_started_at)
             else:
                 ev_t = event_elapsed_frozen
@@ -4179,7 +4195,7 @@ def main():
         msg_line = None
         if info_msg and time.time() < info_msg_until:
             msg_line = f"Info: {info_msg}"
-        _draw_pipeline_diagram(pipeline_rect, state, monitoring_active or state == "MONITORING")
+        _draw_pipeline_diagram(pipeline_rect, state)
         pipeline_lines = [
             f"STEP: {pipeline_step}  OLED: {state}",
             f"RP2040: ok={bool(rp2040_ok)} alive={bool(rp2040_alive)} age={rp2040_age:.2f}s" if rp2040_age is not None else f"RP2040: ok={bool(rp2040_ok)} alive={bool(rp2040_alive)}",

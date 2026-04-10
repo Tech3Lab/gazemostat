@@ -218,11 +218,14 @@ static UiScreen screenFromString(String name, bool &ok) {
   if (name == "IN_POSITION") return UiScreen::IN_POSITION;
   if (name == "CALIBRATION") return UiScreen::CALIBRATION;
   if (name == "RECORD_CONFIRMATION") return UiScreen::RECORD_CONFIRMATION;
-  if (name == "RECORDING") return UiScreen::RECORDING;
+  if (name == "RECORDING" || name == "RECORDING_1") return UiScreen::RECORDING_1;
+  if (name == "RECORDING_2_IN_POS") return UiScreen::RECORDING_2_IN_POS;
+  if (name == "RECORDING_2_CLOSER") return UiScreen::RECORDING_2_CLOSER;
+  if (name == "RECORDING_2_FARTHER") return UiScreen::RECORDING_2_FARTHER;
+  if (name == "RECORDING_3") return UiScreen::RECORDING_3;
   if (name == "STOP_RECORD") return UiScreen::STOP_RECORD;
   if (name == "INFERENCE_LOADING") return UiScreen::INFERENCE_LOADING;
   if (name == "RESULTS") return UiScreen::RESULTS;
-  if (name == "MONITORING") return UiScreen::MONITORING;
   ok = false;
   return UiScreen::BOOT;
 }
@@ -252,6 +255,8 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
   if (varName == "ui_recording_timer") { out = UiDynamicVar::UI_RECORDING_TIMER; return true; }
   if (varName == "ui_event_time") { out = UiDynamicVar::UI_EVENT_TIME; return true; }
   if (varName == "ui_event_name") { out = UiDynamicVar::UI_EVENT_NAME; return true; }
+  if (varName == "ui_event_button_rect") { out = UiDynamicVar::UI_EVENT_BUTTON_RECT; return true; }
+  if (varName == "ui_event_counter") { out = UiDynamicVar::UI_EVENT_COUNTER; return true; }
   if (varName == "ui_closed_event_warning" || varName == "ui_close_event_warning") { out = UiDynamicVar::UI_CLOSE_EVENT_WARNING; return true; }
   if (varName == "ui_inference_timer") { out = UiDynamicVar::UI_INFERENCE_TIMER; return true; }
   if (varName == "ui_inference_prog_bar") { out = UiDynamicVar::UI_INFERENCE_PROG_BAR; return true; }
@@ -265,7 +270,7 @@ static bool dynamicVarFromString(String varName, UiDynamicVar &out) {
   if (varName == "ui_left_eye") { out = UiDynamicVar::UI_LEFT_EYE; return true; }
   if (varName == "ui_right_eye") { out = UiDynamicVar::UI_RIGHT_EYE; return true; }
   if (varName == "ui_gaze_point") { out = UiDynamicVar::UI_GAZE_POINT; return true; }
-  if (varName == "ui_position_status" || varName == "ui_text_el_269") { out = UiDynamicVar::UI_TEXT_EL_269; return true; }
+  if (varName == "ui_position_txt" || varName == "ui_position_status" || varName == "ui_text_el_269") { out = UiDynamicVar::UI_POSITION_TXT; return true; }
   return false;
 }
 
