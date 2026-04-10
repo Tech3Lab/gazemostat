@@ -41,20 +41,23 @@
 #define OLED_ADDR_PRIMARY   0x3D
 #define OLED_ADDR_FALLBACK  0x3C
 
-// OLED Bonnet joystick + buttons (GPIO)
+// OLED Bonnet joystick + buttons (GPIO) replaced by Canaduino D1 Mini JoyPad (I2C)
 //
 // IMPORTANT:
-// - The Bonnet's joystick + A/B buttons are typically simple switches to GND.
-// - To read them on RP2040, you must wire each button signal to an RP2040 GPIO.
-// - These defaults assume you wired them to GP6..GP12. Adjust to match your wiring.
-// - We use INPUT_PULLUP, so "pressed" reads LOW.
-#define BTN_UP_PIN      6
-#define BTN_DOWN_PIN    7
-#define BTN_LEFT_PIN    8
-#define BTN_RIGHT_PIN   9
-#define BTN_CENTER_PIN  10
-#define BTN_A_PIN       11
-#define BTN_B_PIN       12
+// - The Canaduino JoyPad uses a PCF8574 I2C expander.
+// - Default I2C address is 0x24 (can be jumpered to 0x20).
+// - Buttons pull the PCF8574 pins LOW when pressed.
+#define JOYPAD_I2C_ADDR 0x24
+
+// Bit mapping for PCF8574 pins (P0-P7)
+// Adjust these if the physical buttons map to different bits.
+#define JOYPAD_BIT_UP      0
+#define JOYPAD_BIT_DOWN    1
+#define JOYPAD_BIT_LEFT    2
+#define JOYPAD_BIT_RIGHT   3
+#define JOYPAD_BIT_CENTER  4
+#define JOYPAD_BIT_A       5 // Top right button
+#define JOYPAD_BIT_B       6
 
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
@@ -81,7 +84,7 @@ OledModel oled_model = OledModel::NONE;
 // bit0..bit6 = UP,DOWN,LEFT,RIGHT,CENTER,A,B
 uint8_t buttons_prev = 0;
 unsigned long last_button_poll_ms = 0;
-const unsigned long BUTTON_POLL_MS = 20;  // 50 Hz button polling
+const unsigned long BUTTON_POLL_MS = 50;  // 20 Hz button polling (I2C)
 // OLED full-frame refresh is expensive over I2C. Keep it responsive but avoid starving serial RX/HB.
 const unsigned long UI_REFRESH_MS = 100;  // 10 Hz UI refresh
 unsigned long last_ui_refresh_ms = 0;
@@ -116,13 +119,21 @@ static uint32_t genBootId() {
 
 static uint8_t readButtons() {
   uint8_t s = 0;
-  if (digitalRead(BTN_UP_PIN) == LOW) s |= (1 << 0);
-  if (digitalRead(BTN_DOWN_PIN) == LOW) s |= (1 << 1);
-  if (digitalRead(BTN_LEFT_PIN) == LOW) s |= (1 << 2);
-  if (digitalRead(BTN_RIGHT_PIN) == LOW) s |= (1 << 3);
-  if (digitalRead(BTN_CENTER_PIN) == LOW) s |= (1 << 4);
-  if (digitalRead(BTN_A_PIN) == LOW) s |= (1 << 5);
-  if (digitalRead(BTN_B_PIN) == LOW) s |= (1 << 6);
+  Wire.requestFrom(JOYPAD_I2C_ADDR, 1);
+  if (Wire.available()) {
+    uint8_t state = Wire.read();
+    // PCF8574 pins are pulled HIGH by default, LOW when button pressed.
+    // So we invert the state.
+    uint8_t pressed = ~state;
+    
+    if (pressed & (1 << JOYPAD_BIT_UP))     s |= (1 << 0);
+    if (pressed & (1 << JOYPAD_BIT_DOWN))   s |= (1 << 1);
+    if (pressed & (1 << JOYPAD_BIT_LEFT))   s |= (1 << 2);
+    if (pressed & (1 << JOYPAD_BIT_RIGHT))  s |= (1 << 3);
+    if (pressed & (1 << JOYPAD_BIT_CENTER)) s |= (1 << 4);
+    if (pressed & (1 << JOYPAD_BIT_A))      s |= (1 << 5);
+    if (pressed & (1 << JOYPAD_BIT_B))      s |= (1 << 6);
+  }
   return s;
 }
 
@@ -159,9 +170,8 @@ static void renderButtonFeedback(uint8_t buttons) {
 }
 
 static void pollButtonsAndUpdateDisplay() {
-  if (!oled_available) return;
   unsigned long now = millis();
-  // 1) Poll buttons at 50 Hz (edges only).
+  // 1) Poll buttons at 20 Hz (edges only).
   if (now - last_button_poll_ms >= BUTTON_POLL_MS) {
     last_button_poll_ms = now;
 
@@ -190,7 +200,7 @@ static void pollButtonsAndUpdateDisplay() {
   }
 
   // 2) Refresh OLED UI at a throttled rate only when content changed.
-  if (ui_dirty && (now - last_ui_refresh_ms >= UI_REFRESH_MS)) {
+  if (oled_available && ui_dirty && (now - last_ui_refresh_ms >= UI_REFRESH_MS)) {
     last_ui_refresh_ms = now;
     renderUi();
   }
@@ -285,7 +295,7 @@ static bool i2cProbe(uint8_t addr) {
   return err == 0;
 }
 
-static void oledI2cInit() {
+static void i2cInit() {
   Wire.setSDA(OLED_SDA_PIN);
   Wire.setSCL(OLED_SCL_PIN);
   Wire.begin();
@@ -357,7 +367,7 @@ static bool initSsd1306At(uint8_t addr, bool showReadyScreen) {
 }
 
 static bool oledInit() {
-  oledI2cInit();
+  i2cInit();
 
   oled_available = false;
   oled_model = OledModel::NONE;
@@ -534,7 +544,7 @@ static bool oledIntegrityTestAuto(String &failReason) {
 }
 
 static bool oledIntegrityTestForTarget(String target, String &failReason) {
-  oledI2cInit();
+  i2cInit();
   target.trim();
   target.toUpperCase();
 
@@ -567,14 +577,8 @@ void setup() {
   // Initialize serial communication
   Serial.begin(SERIAL_BAUD);
 
-  // Configure button GPIOs
-  pinMode(BTN_UP_PIN, INPUT_PULLUP);
-  pinMode(BTN_DOWN_PIN, INPUT_PULLUP);
-  pinMode(BTN_LEFT_PIN, INPUT_PULLUP);
-  pinMode(BTN_RIGHT_PIN, INPUT_PULLUP);
-  pinMode(BTN_CENTER_PIN, INPUT_PULLUP);
-  pinMode(BTN_A_PIN, INPUT_PULLUP);
-  pinMode(BTN_B_PIN, INPUT_PULLUP);
+  // Initialize I2C for JoyPad and OLED
+  i2cInit();
   
   // Initialize NeoPixel strip (don't wait for Serial on RP2040)
   strip.begin();
@@ -583,9 +587,9 @@ void setup() {
 
   // Initialize OLED (non-fatal if missing)
   oledInit();
+  // Initialize UI state (CPU will override screen shortly after boot)
+  buttons_prev = readButtons();
   if (oled_available) {
-    // Initialize UI state (CPU will override screen shortly after boot)
-    buttons_prev = readButtons();
     ui_current_screen = UiScreen::BOOT;
     renderUi();
   }

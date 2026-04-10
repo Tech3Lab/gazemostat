@@ -2653,108 +2653,96 @@ def main():
             except Exception:
                 pass
 
+    def check_existing_calibration():
+        """Check if a valid calibration already exists on the Gazepoint server."""
+        def _check():
+            nonlocal calib_quality, calib_avg_error, calib_status
+            try:
+                if gp.calibrate_result_summary():
+                    summary = gp.get_calibration_result_summary()
+                    if summary and summary.get('success') == 1:
+                        avg_error = summary.get('average_error')
+                        if avg_error is not None:
+                            if avg_error < CALIB_OK_THRESHOLD:
+                                calib_status = "green"
+                                calib_quality = "ok"
+                                calib_avg_error = avg_error
+                            elif avg_error < CALIB_LOW_THRESHOLD:
+                                calib_status = "orange"
+                                calib_quality = "low"
+                                calib_avg_error = avg_error
+                        else:
+                            calib_status = "green"
+                            calib_quality = "ok"
+                            calib_avg_error = 0.0
+            except Exception as e:
+                print(f"Error checking existing calibration: {e}")
+                
+        threading.Thread(target=_check, daemon=True).start()
+
+    class AppImpl:
+        def set_screen(self, screen_name: str) -> None:
+            _set_screen(screen_name)
+        def oled_set_str(self, var_name: str, value: str) -> None:
+            _oled_set_str(var_name, value)
+        def oled_set_bool(self, var_name: str, value: bool) -> None:
+            _oled_set_bool(var_name, value)
+        def oled_set_u8(self, var_name: str, value: int) -> None:
+            _oled_set_u8(var_name, value)
+        def set_info_msg(self, msg: str, dur: float) -> None:
+            set_info_msg(msg, dur)
+        def check_existing_calibration(self) -> None:
+            check_existing_calibration()
+        def start_calibration(self, override: str = None) -> None:
+            start_calibration(override)
+        def start_collection(self) -> None:
+            start_collection()
+        def stop_collection(self) -> None:
+            stop_collection_begin_analysis()
+        def marker_toggle(self) -> None:
+            marker_toggle()
+        def reset_app_state(self) -> None:
+            reset_app_state()
+        def get_position_status(self) -> str:
+            return _position_status_from_eye_data()
+        def get_calib_quality(self) -> str:
+            return calib_quality
+        def is_calib_running(self) -> bool:
+            return using_led_calib or using_overlay_calib
+        def get_session_time(self) -> float:
+            return (time.time() - session_t0) if session_t0 else None
+        def get_event_time(self) -> float:
+            return (time.time() - event_started_at) if event_started_at else None
+        def is_event_open(self) -> bool:
+            return event_open
+        def get_next_event_index(self) -> int:
+            return next_event_index
+        def get_eye_data(self) -> dict:
+            return last_eye_data or {}
+        def get_calib_gaze(self) -> list:
+            return last_calib_gaze or []
+        def get_analysis_progress(self) -> tuple:
+            return (analysis_values_done, analysis_total_values, analysis_seconds_per_value)
+        def get_results_pages(self) -> list:
+            return results_pages
+        def get_results_page_index(self) -> int:
+            return results_page_index
+        def set_results_page_index(self, index: int) -> None:
+            nonlocal results_page_index
+            results_page_index = index
+
+    app_impl = AppImpl()
+    from state_machine import StateMachineManager
+    state_manager = StateMachineManager(app_impl)
+    # Sync initial state
+    state_manager.current_state_name = state
+    state_manager.current_state = state_manager.states.get(state, state_manager.states["BOOT"])
+
     def handle_button(kind: str, btn: str):
         """Handle a button edge event from keyboard or RP2040."""
-        nonlocal results_pages, results_page_index
         kind = (kind or "").upper()
-        btn = (btn or "").upper()
-
-        # Reset button (RP2040 BTN_CENTER / keyboard "S") resets the whole app state.
-        # This is intentionally handled before any modal/state gating.
-        if kind == "PRESS" and btn == "BTN_CENTER":
-            reset_app_state()
-            _set_screen("BOOT")
-            return
-
-        # BTN_B is currently unused in the flow.
-        if btn == "BTN_B":
-            return
-
-        if kind != "PRESS":
-            return
-
-        if state == "BOOT":
-            if btn == "BTN_RIGHT":
-                _set_screen("FIND_POSITION")
-            return
-
-        # FIND_POSITION is an explicit "ready" step.
-        # Stay on it until RIGHT is pressed, then choose a positioning hint screen.
-        if state == "FIND_POSITION":
-            if btn == "BTN_RIGHT":
-                pos = _position_status_from_eye_data()
-                if pos == "Good":
-                    _set_screen("IN_POSITION")
-                elif pos == "Near":
-                    _set_screen("MOVE_FARTHER")
-                else:
-                    _set_screen("MOVE_CLOSER")
-            return
-
-        # On hint screens, advancement to calibration is NEVER automatic:
-        # user must press RIGHT while in a good position.
-        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION"):
-            if btn == "BTN_RIGHT":
-                pos = _position_status_from_eye_data()
-                if pos == "Good":
-                    _set_screen("CALIBRATION")
-                else:
-                    # Keep user on positioning step; OLED/Pygame will update the hint screen.
-                    set_info_msg("Not in position yet", dur=1.0)
-            return
-
-        if state == "CALIBRATION":
-            running_now = using_led_calib or using_overlay_calib
-            done_now = (not running_now) and (calib_quality in ("ok", "low", "failed"))
-            if btn == "BTN_RIGHT":
-                if (not running_now) and calib_quality == "none":
-                    start_calibration(override=None)
-                elif done_now and calib_quality in ("ok", "low"):
-                    _set_screen("RECORD_CONFIRMATION")
-            elif btn == "BTN_LEFT":
-                if done_now:
-                    start_calibration(override=None)
-            return
-
-        if state == "RECORD_CONFIRMATION":
-            if btn == "BTN_RIGHT":
-                start_collection()
-            return
-
-        if state == "RECORDING_1":
-            if btn == "BTN_A":
-                marker_toggle()
-            elif btn == "BTN_DOWN":
-                _set_screen(_recording_position_screen_from_status())
-            return
-
-        if state in ("RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
-            if btn == "BTN_UP":
-                _set_screen("RECORDING_1")
-            elif btn == "BTN_DOWN":
-                _set_screen("RECORDING_3")
-            return
-
-        if state == "RECORDING_3":
-            if btn == "BTN_UP":
-                _set_screen(_recording_position_screen_from_status())
-            elif btn == "BTN_RIGHT":
-                _set_screen("STOP_RECORD")
-            return
-
-        if state == "STOP_RECORD":
-            if btn == "BTN_LEFT":
-                _set_screen("RECORDING_1")
-            elif btn == "BTN_RIGHT":
-                stop_collection_begin_analysis()
-            return
-
-        if state == "RESULTS":
-            if btn == "BTN_RIGHT" and results_pages and results_page_index < (len(results_pages) - 1):
-                results_page_index += 1
-            elif btn == "BTN_LEFT" and results_pages and results_page_index > 0:
-                results_page_index -= 1
-            return
+        if kind == "PRESS":
+            state_manager.on_button(btn)
 
     # -----------------------
     # OLED v3 sync (cached)
@@ -3432,25 +3420,13 @@ def main():
             print(f"Warning: Queue size is {queue_size_before} samples. This may cause latency. "
                   f"Processed {samples_processed} samples this frame.", file=sys.stderr)
 
-        # Positioning hint screens: continuously re-evaluate and update the hint screen.
-        # Advancing to the next stage remains button-driven.
-        if state in ("MOVE_CLOSER", "MOVE_FARTHER", "IN_POSITION", "RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
-            now = time.time()
-            if now >= position_next_eval:
-                pos = _position_status_from_eye_data()
-                if state in ("RECORDING_2_IN_POS", "RECORDING_2_CLOSER", "RECORDING_2_FARTHER"):
-                    desired = _recording_position_screen_from_status(pos)
-                else:
-                    if pos == "Good":
-                        desired = "IN_POSITION"
-                    elif pos == "Near":
-                        desired = "MOVE_FARTHER"
-                    else:
-                        desired = "MOVE_CLOSER"
-                _set_screen(desired)
-                position_next_eval = now + (float(UI_REFRESH_MS) / 1000.0)
-
         # Sync current screen variables to OLED
+        # State machine on_update handles continuous state evaluations (like position checks)
+        now = time.time()
+        if now >= position_next_eval:
+            state_manager.on_update()
+            position_next_eval = now + (float(UI_REFRESH_MS) / 1000.0)
+            
         oled_sync()
 
         # Calibration sequencing
