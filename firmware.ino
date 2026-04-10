@@ -57,9 +57,9 @@
 #define JOYPAD_BIT_DOWN    1
 #define JOYPAD_BIT_LEFT    2
 #define JOYPAD_BIT_RIGHT   3
-#define JOYPAD_BIT_CENTER  4
-#define JOYPAD_BIT_A       6 // Top right button (was 5, now 6)
-#define JOYPAD_BIT_B       5 // Top left button (was 6, now 5)
+#define JOYPAD_BIT_CENTER  5 // Joystick push (was 4)
+#define JOYPAD_BIT_A       4 // Top right button (was 6, but physically it's bit 4)
+#define JOYPAD_BIT_B       6 // Top left button
 
 // Create NeoPixel object
 Adafruit_NeoPixel strip(NEOPIXEL_COUNT, NEOPIXEL_PIN, NEO_GRB + NEO_KHZ800);
